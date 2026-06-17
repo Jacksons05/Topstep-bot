@@ -4,7 +4,42 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from orderflow import OrderFlowEngine, mad_modified_z  # noqa: E402
+from orderflow import OrderFlowEngine, MultiLevelBook, mad_modified_z  # noqa: E402
+
+
+def test_multilevel_book_depth_obi():
+    b = MultiLevelBook()
+    b.apply_snapshot(
+        bids=[(99.0, 300), (98.0, 400), (97.0, 300)],   # ΣLb (top 3) = 1000
+        asks=[(100.0, 50), (101.0, 50), (102.0, 100)],  # ΣLa (top 3) = 200
+    )
+    assert b.has_depth
+    assert abs(b.depth_obi(3) - 0.666666) < 1e-4         # (1000-200)/1200
+    assert b.best_bid() == (99.0, 300) and b.best_ask() == (100.0, 50)
+
+
+def test_multilevel_book_update_add_and_remove():
+    b = MultiLevelBook()
+    b.apply_snapshot([(99.0, 100)], [(100.0, 100)])
+    b.apply_update("bid", 98.0, 500)         # add a level
+    assert b.depth_obi(5) > 0                 # bids now heavier
+    b.apply_update("bid", 98.0, 0)           # remove it
+    assert 98.0 not in b.bids
+
+
+def test_engine_prefers_depth_obi_over_bbo():
+    e = OrderFlowEngine()
+    # top-of-book says balanced...
+    e.on_depth(bid=100.0, bid_size=100, ask=100.25, ask_size=100)
+    assert e.obi == 0.0
+    # ...but the L2 ladder is bid-heavy → OBI flips positive and gate confirms BUY
+    e.on_depth_snapshot(
+        bids=[(100.0, 800), (99.75, 600)],
+        asks=[(100.25, 50), (100.5, 50)],
+    )
+    assert e.has_data and e.obi > 0.85
+    ok, reason = e.confirm_entry("BUY")
+    assert ok and "OBI" in reason
 from rithmic_marketdata import RithmicOrderFlowFeed  # noqa: E402
 
 

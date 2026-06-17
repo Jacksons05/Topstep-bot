@@ -34,6 +34,50 @@ except Exception:  # noqa: BLE001 - library absent → mock path only
     _DT_BBO = _DT_LAST = None
 
 
+class _OrderBookBits:
+    """subscribe_to_market_data() only reads `.value` as the Rithmic update_bits
+    bitmask. The protocol defines ORDER_BOOK = 4 (full depth ladder), but
+    async-rithmic's DataType enum only exposes BBO(2)/LAST_TRADE(1) — so we pass
+    this shim to request the depth stream the account is entitled to."""
+    value = 4
+    name = "ORDER_BOOK"
+
+
+_DT_ORDER_BOOK = _OrderBookBits()
+
+
+def _register_depth_template() -> bool:
+    """Wire Rithmic's OrderBook protobuf (inbound template 156) into the plant's
+    decode map if it's available. async-rithmic ships the depth references
+    COMMENTED OUT and does not bundle order_book_pb2, so this returns False until
+    the R|Protocol order_book.proto is compiled in. The rest of the depth path is
+    ready; only this decode is gated on that file.
+    """
+    try:
+        from async_rithmic.plants.base import TEMPLATES_MAP
+        from async_rithmic.protocol_buffers import order_book_pb2  # not bundled (yet)
+        TEMPLATES_MAP.setdefault(156, order_book_pb2.OrderBook)
+        return True
+    except Exception:  # noqa: BLE001 - proto not present → depth decode unavailable
+        return False
+
+
+def _depth_levels_from_msg(data: dict) -> tuple[list, list] | None:
+    """Map a decoded OrderBook dict → (bids, asks) level lists.
+
+    Rithmic's OrderBook (template 156) carries parallel arrays bid_price[]/
+    bid_size[] and ask_price[]/ask_size[]. Field names are confirmed against a
+    live tick before this is relied on; returns None when the shape isn't depth.
+    """
+    bp, bs = data.get("bid_price"), data.get("bid_size")
+    ap, asz = data.get("ask_price"), data.get("ask_size")
+    if not (isinstance(bp, (list, tuple)) and isinstance(ap, (list, tuple))):
+        return None
+    bids = [(float(p), float(z)) for p, z in zip(bp, bs or [])]
+    asks = [(float(p), float(z)) for p, z in zip(ap, asz or [])]
+    return bids, asks
+
+
 class RithmicOrderFlowFeed:
     """Subscribes Rithmic market data and routes it into per-symbol engines."""
 
@@ -45,6 +89,9 @@ class RithmicOrderFlowFeed:
         self._engines: dict[str, OrderFlowEngine] = {}
         self._subscribed: set[str] = set()
         self._handler_registered = False
+        # Try to wire the L2 depth decode (template 156). When unavailable the
+        # feed still streams top-of-book BBO + trades; only multi-level OBI is off.
+        self.depth_active = _register_depth_template() if not self._mock else False
 
     def get(self, symbol: str) -> OrderFlowEngine:
         """Return (creating if needed) the engine for a futures root."""
@@ -68,6 +115,12 @@ class RithmicOrderFlowFeed:
             return 0
 
         self._register_handler()
+        log.info(
+            "[OrderFlow] L2 depth %s",
+            "ACTIVE (ORDER_BOOK template 156 → multi-level OBI)" if self.depth_active
+            else "OFF — order_book proto not registered; top-of-book BBO only. "
+                 "Add Rithmic R|Protocol order_book.proto to enable.",
+        )
         n = 0
         for symbol in symbols:
             sym = symbol.upper()
@@ -82,9 +135,16 @@ class RithmicOrderFlowFeed:
                 self._broker._run(
                     self._client.subscribe_to_market_data(sym, spec.exchange, _DT_LAST)
                 )
+                feeds = "BBO + LAST_TRADE"
+                if self.depth_active:
+                    # Full CME L2 depth (the account is entitled to it) — multi-level OBI.
+                    self._broker._run(
+                        self._client.subscribe_to_market_data(sym, spec.exchange, _DT_ORDER_BOOK)
+                    )
+                    feeds += " + ORDER_BOOK(L2)"
                 self._subscribed.add(sym)
                 n += 1
-                log.info(f"[OrderFlow] subscribed {sym} @ {spec.exchange} (BBO + LAST_TRADE)")
+                log.info(f"[OrderFlow] subscribed {sym} @ {spec.exchange} ({feeds})")
             except Exception as exc:  # noqa: BLE001
                 log.warning(f"[OrderFlow] subscribe failed for {sym}: {exc}")
         return n
@@ -100,6 +160,12 @@ class RithmicOrderFlowFeed:
                     return
                 eng = self._engines[sym]
                 dtype = data.get("data_type")
+                # L2 depth (template 156): parallel bid/ask price+size arrays.
+                # Routed first since its dict also carries bid_price as a list.
+                levels = _depth_levels_from_msg(data)
+                if levels is not None:
+                    eng.on_depth_snapshot(levels[0], levels[1])
+                    return
                 if dtype == _DT_BBO:
                     eng.on_depth(
                         bid=float(data.get("bid_price", 0) or 0),

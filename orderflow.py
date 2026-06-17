@@ -38,6 +38,7 @@ WHALE_Z            = _f("OF_WHALE_Z", 3.5)
 WHALE_NOTIONAL_USD = _f("OF_WHALE_NOTIONAL_USD", 1_000_000.0)
 FOOTPRINT_RATIO    = _f("OF_FOOTPRINT_RATIO", 10.0)
 WINDOW_SEC         = int(_f("OF_WINDOW_SEC", 120))
+DEPTH_LEVELS       = int(_f("OF_DEPTH_LEVELS", 5))   # ladder levels summed for depth OBI
 
 
 def mad_modified_z(x: float, series: list[float]) -> float:
@@ -55,6 +56,61 @@ def mad_modified_z(x: float, series: list[float]) -> float:
     if mad == 0:
         return 0.0
     return 0.6745 * (x - med) / mad
+
+
+class MultiLevelBook:
+    """Market-by-price depth ladder (CME L2 / Rithmic ORDER_BOOK template 156).
+
+    Holds N price levels per side as {price: size}. Fed by depth snapshots +
+    incremental updates from the live feed. Top-of-book still works without it
+    (the engine falls back to BBO sizes); when populated, OBI/footprint use the
+    summed depth across the top `levels`, which is the real microstructure the
+    strategy wants (not just best bid/ask).
+    """
+
+    def __init__(self) -> None:
+        self.bids: dict[float, float] = {}   # price -> resting size
+        self.asks: dict[float, float] = {}
+        self._has = False
+
+    @property
+    def has_depth(self) -> bool:
+        return self._has and bool(self.bids) and bool(self.asks)
+
+    def apply_snapshot(self, bids: list[tuple[float, float]], asks: list[tuple[float, float]]) -> None:
+        self.bids = {float(p): float(s) for p, s in bids if s and s > 0}
+        self.asks = {float(p): float(s) for p, s in asks if s and s > 0}
+        self._has = True
+
+    def apply_update(self, side: str, price: float, size: float) -> None:
+        """Incremental level update; size 0 removes the level."""
+        book = self.bids if side == "bid" else self.asks
+        if size and size > 0:
+            book[float(price)] = float(size)
+        else:
+            book.pop(float(price), None)
+        self._has = True
+
+    def top_bids(self, n: int) -> list[tuple[float, float]]:
+        return sorted(self.bids.items(), key=lambda kv: -kv[0])[:n]
+
+    def top_asks(self, n: int) -> list[tuple[float, float]]:
+        return sorted(self.asks.items(), key=lambda kv: kv[0])[:n]
+
+    def depth_obi(self, levels: int) -> float:
+        """Imbalance summed over the top `levels` of each side: (ΣLb−ΣLa)/(ΣLb+ΣLa)."""
+        lb = sum(s for _, s in self.top_bids(levels))
+        la = sum(s for _, s in self.top_asks(levels))
+        tot = lb + la
+        return (lb - la) / tot if tot > 0 else 0.0
+
+    def best_bid(self) -> tuple[float, float] | None:
+        b = self.top_bids(1)
+        return b[0] if b else None
+
+    def best_ask(self) -> tuple[float, float] | None:
+        a = self.top_asks(1)
+        return a[0] if a else None
 
 
 @dataclass
@@ -85,13 +141,31 @@ class OrderFlowEngine:
         self._trail: "deque[tuple[float, float]]" = deque()
         self._last_whale = 0
         self._trades_seen = 0
+        self.book = MultiLevelBook()          # L2 ladder when ORDER_BOOK feed is live
+        self.depth_levels = DEPTH_LEVELS
 
     @property
     def has_data(self) -> bool:
         """True once real depth or trades have arrived. The engine only applies
         the order-flow gate when this is True, so a cold feed fails OPEN rather
         than blocking every entry during warm-up."""
-        return (self.bid_size + self.ask_size) > 0 or self._trades_seen > 0
+        return (self.bid_size + self.ask_size) > 0 or self._trades_seen > 0 or self.book.has_depth
+
+    # ── L2 depth ingest (Rithmic ORDER_BOOK / template 156) ──
+    def on_depth_snapshot(self, bids: list[tuple[float, float]], asks: list[tuple[float, float]]) -> None:
+        self.book.apply_snapshot(bids, asks)
+        bb, ba = self.book.best_bid(), self.book.best_ask()
+        if bb and ba:                          # keep top-of-book mirror in sync
+            self.bid, self.bid_size = bb
+            self.ask, self.ask_size = ba
+
+    def on_depth_update(self, side: str, price: float, size: float) -> None:
+        self.book.apply_update(side, price, size)
+        bb, ba = self.book.best_bid(), self.book.best_ask()
+        if bb:
+            self.bid, self.bid_size = bb
+        if ba:
+            self.ask, self.ask_size = ba
 
     # ── ingest ────────────────────────────────────────────
     def on_depth(self, bid: float, bid_size: float, ask: float, ask_size: float) -> None:
@@ -139,6 +213,10 @@ class OrderFlowEngine:
     # ── metrics ───────────────────────────────────────────
     @property
     def obi(self) -> float:
+        # Prefer multi-level depth imbalance (summed over top N ladder levels)
+        # when the L2 book is live; fall back to top-of-book BBO sizes.
+        if self.book.has_depth:
+            return self.book.depth_obi(self.depth_levels)
         tot = self.bid_size + self.ask_size
         return (self.bid_size - self.ask_size) / tot if tot > 0 else 0.0
 

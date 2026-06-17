@@ -78,7 +78,36 @@ Knobs: `ORDERFLOW_GATE_ENABLED` (master, default on) · `OF_OBI_THRESHOLD=0.85` 
 `OF_WHALE_Z=3.5` · `OF_WHALE_NOTIONAL_USD=1e6` · `OF_FOOTPRINT_RATIO=10` ·
 `OF_WINDOW_SEC=120`.
 
-The O(log N) tree book / Fenwick VAP are future optimizations — the first cut
-keeps only best-bid/ask (BBO) + a rolling trade window, which is all OBI,
-micro-price, CVD, and the whale z-score require. Full L2 ladder depth (beyond
-top-of-book) would need a deeper Rithmic subscription + the tree book.
+## 8. Level 2 / full depth (CME DOM)
+
+A funded Lucid futures account **is entitled to CME Level 2** — futures depth is
+a single consolidated exchange book (DOM), cheap and standard, unlike fragmented
+equity L2. Verified in the protocol: Rithmic's market-data `UpdateBits` defines
+**`ORDER_BOOK = 4`** (full ladder) alongside `BBO=2` / `LAST_TRADE=1`.
+
+The constraint is the **library, not the account**: `async-rithmic` exposes only
+`DataType.BBO` + `LAST_TRADE`, ships the depth references **commented out**
+(`base.py` `#156: pb.order_book_pb2.OrderBook`), and does **not** bundle
+`order_book_pb2`. So it can *request* depth but can't decode the inbound message.
+
+**What's built (ready, drop-in):**
+- `orderflow.py` `MultiLevelBook` — price→size ladder per side; `depth_obi(N)`
+  sums the top N levels. `OrderFlowEngine.obi` prefers depth OBI when the ladder
+  is live, BBO otherwise. `on_depth_snapshot()` / `on_depth_update()` ingest.
+- `rithmic_marketdata.py` — subscribes `ORDER_BOOK` (via the `_OrderBookBits`
+  shim, `value=4`) when depth is available; `_register_depth_template()` wires
+  template 156 into the plant decode map; the tick handler routes the depth
+  arrays into the book. `OF_DEPTH_LEVELS` (default 5) sets the OBI depth.
+
+**To finalize (one artifact + one confirm):**
+1. Add Rithmic R|Protocol **`order_book.proto`** (template 156), compile to
+   `order_book_pb2`, drop into `async_rithmic/protocol_buffers/` — then
+   `_register_depth_template()` returns True and `depth_active` flips on.
+2. Patch the ticker plant to forward template 156 to `on_tick` (it currently
+   handles only 150/151), and **confirm the OrderBook field names** against a
+   live tick (`bid_price[]`/`bid_size[]`/`ask_price[]`/`ask_size[]` assumed in
+   `_depth_levels_from_msg`). The consumer side needs zero further change.
+
+Until then the feed runs **top-of-book BBO + trades** (OBI/micro-price/CVD/whale
+all work); only multi-level depth OBI / footprint is idle. The O(log N) tree
+book / Fenwick VAP remain future optimizations on top of the ladder model.
