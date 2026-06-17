@@ -1,0 +1,71 @@
+"""Deterministic tests for the order-flow engine — no network, synthetic feeds."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from orderflow import OrderFlowEngine, mad_modified_z  # noqa: E402
+
+
+def test_obi_bid_heavy_is_positive():
+    e = OrderFlowEngine()
+    e.on_depth(bid=100.0, bid_size=900, ask=100.25, ask_size=100)
+    assert abs(e.obi - 0.8) < 1e-9          # (900-100)/1000
+    e.on_depth(bid=100.0, bid_size=100, ask=100.25, ask_size=900)
+    assert abs(e.obi + 0.8) < 1e-9          # ask-heavy → negative
+
+
+def test_micro_price_leans_toward_thin_side():
+    e = OrderFlowEngine()
+    # bid liquidity huge, ask thin → micro-price weighted toward the ask (price about to lift)
+    e.on_depth(bid=100.0, bid_size=1000, ask=101.0, ask_size=10)
+    mp = e.micro_price
+    assert 100.0 < mp <= 101.0 and mp > 100.5
+
+
+def test_cvd_aggressor_classification():
+    e = OrderFlowEngine()
+    e.on_depth(bid=100.0, bid_size=50, ask=100.25, ask_size=50)
+    assert e.on_trade(100.25, 10) == 1      # at ask → buy
+    assert e.on_trade(100.00, 4) == -1      # at bid → sell
+    assert e.cvd == 6                        # +10 - 4
+
+
+def test_mad_z_flags_outlier():
+    base = [100.0] * 20
+    assert mad_modified_z(100.0, base) == 0.0      # MAD 0 → no flag
+    series = [100, 110, 90, 105, 95, 100, 2000]    # last is a whale
+    assert mad_modified_z(2000, series) > 3.5
+
+
+def test_whale_flag_requires_z_and_notional():
+    e = OrderFlowEngine(multiplier=1.0)
+    e.on_depth(bid=100.0, bid_size=50, ask=100.25, ask_size=50)
+    # seed small VARIED buckets across distinct seconds (varied → MAD > 0)
+    for s, sz in enumerate([10, 12, 8, 11, 9], start=1):
+        e.on_trade(100.25, sz, ts=float(s))        # ~$1k each, different sizes
+    # a $2M buy print in a fresh second → z>3.5 and notional≥$1M
+    e.on_trade(100.25, 20000, ts=10.0)             # 100.25*20000 ≈ $2.0M
+    assert e.whale() == 1
+
+
+def test_confirm_entry_needs_extreme_obi():
+    e = OrderFlowEngine()
+    e.on_depth(bid=100.0, bid_size=500, ask=100.25, ask_size=500)  # OBI 0 → no
+    ok, _ = e.confirm_entry("BUY")
+    assert not ok
+    e.on_depth(bid=100.0, bid_size=960, ask=100.25, ask_size=40)   # OBI 0.92 ≥ 0.85
+    ok, reason = e.confirm_entry("BUY")
+    assert ok and "OBI" in reason
+
+
+def test_confirm_entry_vetoes_on_opposing_cvd_divergence():
+    e = OrderFlowEngine()
+    e.on_depth(bid=100.0, bid_size=960, ask=100.25, ask_size=40)   # strong buy OBI
+    # build a bearish divergence: price grinds to new highs while CVD rolls over
+    for i in range(15):
+        # sells at the bid push CVD down even as price ticks up
+        e.on_depth(bid=100.0 + i * 0.1, bid_size=960, ask=100.25 + i * 0.1, ask_size=40)
+        e.on_trade(100.0 + i * 0.1, 5, ts=float(i))   # at/below bid → negative delta
+    ok, reason = e.confirm_entry("BUY")
+    assert not ok and "divergence" in reason
