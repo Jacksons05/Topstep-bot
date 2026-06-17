@@ -1,0 +1,25 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Secrets & local config (never commit)
+.env
+
+# Runtime state (ephemeral — managed by Postgres on Railway)
+signals.log
+
+# Manual kill switch (presence halts new entries)
+KILL_SWITCH
+
+# Runtime logs + pids (ephemeral; bot writes these locally)
+bot.out
+bot.err
+dash.out
+dash.err
+.pids
+.DS_Store

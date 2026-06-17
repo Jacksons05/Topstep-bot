@@ -1,0 +1,14 @@
+httpx>=0.27
+python-dotenv>=1.0
+anthropic>=0.40
+psycopg2-binary>=2.9
+yfinance>=0.2
+numpy>=1.26
+# backtest_fast.py (v2 §5): Polars lazy aggregation + Numba-compiled exit loop.
+# Both optional — backtest_fast falls back to interpreted numpy if numba is absent.
+polars>=1.0
+numba>=0.60
+# IBKR adapter (optional, only when BROKER=ibkr):
+# ib-insync>=0.9.86
+# Lucid Trading / Rithmic adapter (optional, only when LUCID_MODE_ENABLED=True):
+async-rithmic
