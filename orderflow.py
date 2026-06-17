@@ -84,6 +84,14 @@ class OrderFlowEngine:
         # (price, cvd) trail for divergence detection
         self._trail: "deque[tuple[float, float]]" = deque()
         self._last_whale = 0
+        self._trades_seen = 0
+
+    @property
+    def has_data(self) -> bool:
+        """True once real depth or trades have arrived. The engine only applies
+        the order-flow gate when this is True, so a cold feed fails OPEN rather
+        than blocking every entry during warm-up."""
+        return (self.bid_size + self.ask_size) > 0 or self._trades_seen > 0
 
     # ── ingest ────────────────────────────────────────────
     def on_depth(self, bid: float, bid_size: float, ask: float, ask_size: float) -> None:
@@ -106,6 +114,7 @@ class OrderFlowEngine:
         else:
             side = 0
         self._last_price = price
+        self._trades_seen += 1
 
         delta = side * size
         self.cvd += delta

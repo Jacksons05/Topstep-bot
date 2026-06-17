@@ -59,12 +59,26 @@ A flagged setup combines, in order:
 - **Volume-at-Price (HVN):** Fenwick / Segment tree over price nodes.
 - **Startup snapshot:** take one high-fidelity options-chain snapshot at open into in-memory Polars/LanceDB rather than polling all session.
 
-## 7. How it wires into this bot
+## 7. How it wires into this bot (WIRED)
 
-`orderflow.py` (this repo) implements §2–§4 in pure Python (stdlib only) so it's
-testable offline with synthetic depth/trades. A live adapter feeds it from the
-Rithmic L2 stream (`async-rithmic`, installed). `OrderFlowEngine.confirm_entry()`
-returns a gate the engine can apply alongside the GEX level + the Risk-Manager
-agent veto. The O(log N) tree book / Fenwick VAP are future optimizations — the
-first cut keeps only best-bid/ask + a rolling trade window, which is all OBI,
-micro-price, CVD, and the whale z-score require.
+- `orderflow.py` — pure-stdlib `OrderFlowEngine` implementing §2–§4 (OBI,
+  micro-price, CVD + divergence, MAD-z whale, `confirm_entry()`).
+- `rithmic_marketdata.py` — `RithmicOrderFlowFeed` reuses the **already-connected
+  RithmicBroker client + background loop** (one socket, the "hub" pattern) and
+  subscribes `DataType.BBO` + `DataType.LAST_TRADE` for each futures root in the
+  watchlist via `client.subscribe_to_market_data()`. The `on_tick` handler routes
+  BBO → `on_depth()` and trades → `on_trade()` per symbol.
+- `engine.py` — builds the feed in `__init__` when LUCID/Rithmic is live and
+  `ORDERFLOW_GATE_ENABLED`; applies `confirm_entry(sig.side)` as the final entry
+  gate (after risk.check, before `executor.open`), and resets CVD each new day.
+  **Fails open** when the engine has no data yet (`has_data` False) — warm-up,
+  non-futures symbols, or mock mode never block trading.
+
+Knobs: `ORDERFLOW_GATE_ENABLED` (master, default on) · `OF_OBI_THRESHOLD=0.85` ·
+`OF_WHALE_Z=3.5` · `OF_WHALE_NOTIONAL_USD=1e6` · `OF_FOOTPRINT_RATIO=10` ·
+`OF_WINDOW_SEC=120`.
+
+The O(log N) tree book / Fenwick VAP are future optimizations — the first cut
+keeps only best-bid/ask (BBO) + a rolling trade window, which is all OBI,
+micro-price, CVD, and the whale z-score require. Full L2 ladder depth (beyond
+top-of-book) would need a deeper Rithmic subscription + the tree book.

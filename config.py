@@ -240,6 +240,10 @@ class Config:
     # RITHMIC_USER + RITHMIC_PASSWORD to activate futures execution
     # through the Rithmic executor + Lucid risk layer.
     lucid_mode_enabled: bool = _b("LUCID_MODE_ENABLED", True)  # this is the Lucid futures fork
+    # Order-flow confirmation gate (OBI/CVD/whale from the live Rithmic L1+trade
+    # feed). Only applied when a live feed has data for the symbol; fails open
+    # otherwise (warm-up, non-futures symbol, mock mode).
+    orderflow_gate_enabled: bool = _b("ORDERFLOW_GATE_ENABLED", True)
     # Rithmic credentials — leave blank until you have your account.
     rithmic_user: str = _s("RITHMIC_USER")                             # your Rithmic username
     rithmic_password: str = _s("RITHMIC_PASSWORD")                     # your Rithmic password

@@ -5,6 +5,22 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from orderflow import OrderFlowEngine, mad_modified_z  # noqa: E402
+from rithmic_marketdata import RithmicOrderFlowFeed  # noqa: E402
+
+
+class _MockBroker:
+    _mock_mode = True
+    _client = None
+    def _run(self, coro):  # never called in mock
+        raise AssertionError("should not run in mock mode")
+
+
+def test_feed_mock_mode_subscribes_nothing_and_gate_fails_open():
+    feed = RithmicOrderFlowFeed(_MockBroker())
+    assert feed.subscribe(["ES", "MNQ", "SPY"]) == 0   # mock → no live subscription
+    eng = feed.get("ES")
+    assert not eng.has_data                              # cold → gate fails open
+    assert eng.multiplier == 50.0                        # ES $/point multiplier wired
 
 
 def test_obi_bid_heavy_is_positive():

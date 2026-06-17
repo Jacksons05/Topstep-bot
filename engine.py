@@ -59,6 +59,7 @@ class Engine:
         # moved since its last evaluation. {symbol: (direction, strength_bucket)}
         self._eval_cache: dict[str, tuple[str, float]] = {}
         self._lucid_last_reset: date | None = None
+        self._oflow = None  # RithmicOrderFlowFeed when a live Rithmic feed is up
 
         # ── Lucid / Rithmic mode ───────────────────────────────────────────
         # The Lucid bot executes futures through Rithmic with the Lucid risk
@@ -86,6 +87,19 @@ class Engine:
                     f"max_contracts={CONFIG.lucid_max_contracts} | "
                     f"flatten_at={CONFIG.lucid_flatten_time} ET"
                 )
+                # Live order-flow feed: stream BBO + trades off the same Rithmic
+                # connection into per-symbol OBI/CVD/whale engines. Only the
+                # futures roots in the watchlist get subscribed.
+                if CONFIG.orderflow_gate_enabled:
+                    try:
+                        from rithmic_marketdata import RithmicOrderFlowFeed
+                        self._oflow = RithmicOrderFlowFeed(self.executor.broker)
+                        n = self._oflow.subscribe(list(CONFIG.watchlist))
+                        notify(f"📡 Order-flow feed: subscribed {n} futures root(s) "
+                               f"(OBI/CVD/whale gate {'live' if n else 'idle — no futures roots'})")
+                    except Exception as e:  # noqa: BLE001
+                        notify(f"⚠ Order-flow feed init failed ({e}) — gate disabled (fails open)")
+                        self._oflow = None
             except Exception as e:  # noqa: BLE001
                 notify(
                     f"⚠ LUCID MODE init failed ({e}) — "
@@ -140,6 +154,8 @@ class Engine:
                     acct = self.executor.broker.account()
                     self._lucid.reset_day(acct.get("equity", CONFIG.bankroll_usd))
                     self._lucid_last_reset = today
+                    if self._oflow is not None:
+                        self._oflow.reset_session()  # CVD is a since-open running total
                 except Exception:  # noqa: BLE001
                     pass
 
@@ -251,6 +267,20 @@ class Engine:
                 notify(f"  skip (regime {rk} sized to {size:.0f} < min "
                        f"{CONFIG.min_executable_size_usd:.0f}): {sig.symbol}")
                 continue
+
+            # ── Order-flow confirmation gate ────────────────────────────
+            # Final microstructure check at entry: require OBI extreme in the
+            # trade direction, veto on opposing whale / CVD divergence. Only
+            # applied when the live Rithmic feed actually has data for this
+            # symbol (fails open during warm-up / non-futures symbols).
+            if self._oflow is not None:
+                of = self._oflow.get(sig.symbol)
+                if of.has_data:
+                    of_ok, of_reason = of.confirm_entry(sig.side)
+                    if not of_ok:
+                        notify(f"  skip (order-flow: {of_reason}): {sig.symbol}")
+                        continue
+                    notify(f"  order-flow OK ({of_reason}): {sig.symbol}")
 
             qty = max(1, int(size / sig.price)) if sig.price > 0 else 0
             try:
