@@ -85,29 +85,27 @@ a single consolidated exchange book (DOM), cheap and standard, unlike fragmented
 equity L2. Verified in the protocol: Rithmic's market-data `UpdateBits` defines
 **`ORDER_BOOK = 4`** (full ladder) alongside `BBO=2` / `LAST_TRADE=1`.
 
-The constraint is the **library, not the account**: `async-rithmic` exposes only
-`DataType.BBO` + `LAST_TRADE`, ships the depth references **commented out**
-(`base.py` `#156: pb.order_book_pb2.OrderBook`), and does **not** bundle
-`order_book_pb2`. So it can *request* depth but can't decode the inbound message.
+**Wired natively (async-rithmic ≥1.6, Python 3.12 venv).** The earlier limit was
+an old library version (1.2.7) that exposed only BBO/LAST_TRADE. 1.6.x ships L2
+natively — no proto hack needed:
+- Subscribe: `subscribe_to_market_data(sym, exchange, DataType.ORDER_BOOK)`.
+- Stream: `client.on_order_book` delivers the OrderBook message (template 156)
+  with repeated `bid_price[]/bid_size[]` and `ask_price[]/ask_size[]` arrays (the
+  ladder) plus an `update_type`.
 
-**What's built (ready, drop-in):**
+**What's built:**
 - `orderflow.py` `MultiLevelBook` — price→size ladder per side; `depth_obi(N)`
   sums the top N levels. `OrderFlowEngine.obi` prefers depth OBI when the ladder
-  is live, BBO otherwise. `on_depth_snapshot()` / `on_depth_update()` ingest.
-- `rithmic_marketdata.py` — subscribes `ORDER_BOOK` (via the `_OrderBookBits`
-  shim, `value=4`) when depth is available; `_register_depth_template()` wires
-  template 156 into the plant decode map; the tick handler routes the depth
-  arrays into the book. `OF_DEPTH_LEVELS` (default 5) sets the OBI depth.
+  is live, BBO otherwise. `OF_DEPTH_LEVELS` (default 5) sets the depth.
+- `rithmic_marketdata.py` — subscribes BBO + LAST_TRADE + ORDER_BOOK per futures
+  root; `on_tick` routes BBO/trades, `on_order_book` parses the ladder arrays
+  into `on_depth_snapshot()`. `depth_available` reflects whether the library
+  exposes `DataType.ORDER_BOOK`.
 
-**To finalize (one artifact + one confirm):**
-1. Add Rithmic R|Protocol **`order_book.proto`** (template 156), compile to
-   `order_book_pb2`, drop into `async_rithmic/protocol_buffers/` — then
-   `_register_depth_template()` returns True and `depth_active` flips on.
-2. Patch the ticker plant to forward template 156 to `on_tick` (it currently
-   handles only 150/151), and **confirm the OrderBook field names** against a
-   live tick (`bid_price[]`/`bid_size[]`/`ask_price[]`/`ask_size[]` assumed in
-   `_depth_levels_from_msg`). The consumer side needs zero further change.
+**Remaining (account-side only):** the **CME Level-2 data subscription must be
+enabled** on the Rithmic/Lucid account (non-pro for funded traders) for the
+ORDER_BOOK stream to carry depth — otherwise `update_type` returns NO_BOOK and
+the engine falls back to top-of-book BBO. No code change required.
 
-Until then the feed runs **top-of-book BBO + trades** (OBI/micro-price/CVD/whale
-all work); only multi-level depth OBI / footprint is idle. The O(log N) tree
-book / Fenwick VAP remain future optimizations on top of the ladder model.
+The O(log N) tree book / Fenwick VAP remain future optimizations on top of the
+ladder model (the current dict-based book is fine for top-N OBI).

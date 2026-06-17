@@ -1,17 +1,17 @@
-"""Live Rithmic L1/trade feed → per-symbol OrderFlowEngine.
+"""Live Rithmic L1/L2/trade feed → per-symbol OrderFlowEngine.
 
 Reuses the RithmicBroker's already-connected RithmicClient and background event
 loop (one persistent socket, per the research's "centralized hub" note) to
-stream Best-Bid-Offer (top-of-book sizes → OBI / micro-price) and Last-Trade
-prints (→ CVD / whale flag) for the traded futures roots. The engine reads the
-resulting OrderFlowEngine via `confirm_entry()` as a final entry gate.
+stream, for each traded futures root:
+  • BBO        (DataType.BBO)        → top-of-book sizes (OBI / micro-price)
+  • LAST_TRADE (DataType.LAST_TRADE) → trade prints (CVD / whale flag)
+  • ORDER_BOOK (DataType.ORDER_BOOK) → full L2 depth ladder (multi-level OBI)
 
-async-rithmic market-data surface (verified, v1.2.7):
-  await client.subscribe_to_market_data(symbol, exchange, DataType.BBO)
-  await client.subscribe_to_market_data(symbol, exchange, DataType.LAST_TRADE)
-  client.on_tick += handler        # handler(data: dict)
-    BBO  (data_type=DataType.BBO):        bid_price, bid_size, ask_price, ask_size
-    LAST (data_type=DataType.LAST_TRADE): trade_price, trade_size, aggressor, ssboe
+async-rithmic ≥1.6 surfaces L2 natively: subscribe_to_market_data(..., ORDER_BOOK)
+streams the OrderBook message (template 156) to `client.on_order_book`, carrying
+repeated bid_price[]/bid_size[] and ask_price[]/ask_size[] arrays (the ladder)
+plus an update_type. The CME Level-2 data subscription must be enabled on the
+account for these to flow (non-pro for funded traders).
 
 Degrades safely: in mock mode (no async-rithmic / no creds) it subscribes to
 nothing and every engine stays empty → has_data False → the gate fails open.
@@ -30,51 +30,24 @@ try:
     from async_rithmic import DataType
     _DT_BBO = DataType.BBO
     _DT_LAST = DataType.LAST_TRADE
+    _DT_ORDER_BOOK = DataType.ORDER_BOOK      # native L2 in async-rithmic ≥1.6
 except Exception:  # noqa: BLE001 - library absent → mock path only
-    _DT_BBO = _DT_LAST = None
+    _DT_BBO = _DT_LAST = _DT_ORDER_BOOK = None
 
 
-class _OrderBookBits:
-    """subscribe_to_market_data() only reads `.value` as the Rithmic update_bits
-    bitmask. The protocol defines ORDER_BOOK = 4 (full depth ladder), but
-    async-rithmic's DataType enum only exposes BBO(2)/LAST_TRADE(1) — so we pass
-    this shim to request the depth stream the account is entitled to."""
-    value = 4
-    name = "ORDER_BOOK"
+def _ladder_from_orderbook(msg) -> tuple[list, list]:
+    """Map a Rithmic OrderBook protobuf (template 156) → (bids, asks) level lists.
 
-
-_DT_ORDER_BOOK = _OrderBookBits()
-
-
-def _register_depth_template() -> bool:
-    """Wire Rithmic's OrderBook protobuf (inbound template 156) into the plant's
-    decode map if it's available. async-rithmic ships the depth references
-    COMMENTED OUT and does not bundle order_book_pb2, so this returns False until
-    the R|Protocol order_book.proto is compiled in. The rest of the depth path is
-    ready; only this decode is gated on that file.
+    bid_price/bid_size and ask_price/ask_size are repeated scalar fields (the
+    ladder, top level first). Empty arrays (e.g. update_type NO_BOOK) yield empty
+    lists, which the book treats as "no depth".
     """
-    try:
-        from async_rithmic.plants.base import TEMPLATES_MAP
-        from async_rithmic.protocol_buffers import order_book_pb2  # not bundled (yet)
-        TEMPLATES_MAP.setdefault(156, order_book_pb2.OrderBook)
-        return True
-    except Exception:  # noqa: BLE001 - proto not present → depth decode unavailable
-        return False
-
-
-def _depth_levels_from_msg(data: dict) -> tuple[list, list] | None:
-    """Map a decoded OrderBook dict → (bids, asks) level lists.
-
-    Rithmic's OrderBook (template 156) carries parallel arrays bid_price[]/
-    bid_size[] and ask_price[]/ask_size[]. Field names are confirmed against a
-    live tick before this is relied on; returns None when the shape isn't depth.
-    """
-    bp, bs = data.get("bid_price"), data.get("bid_size")
-    ap, asz = data.get("ask_price"), data.get("ask_size")
-    if not (isinstance(bp, (list, tuple)) and isinstance(ap, (list, tuple))):
-        return None
-    bids = [(float(p), float(z)) for p, z in zip(bp, bs or [])]
-    asks = [(float(p), float(z)) for p, z in zip(ap, asz or [])]
+    bp = list(getattr(msg, "bid_price", []) or [])
+    bs = list(getattr(msg, "bid_size", []) or [])
+    ap = list(getattr(msg, "ask_price", []) or [])
+    asz = list(getattr(msg, "ask_size", []) or [])
+    bids = [(float(p), float(z)) for p, z in zip(bp, bs)]
+    asks = [(float(p), float(z)) for p, z in zip(ap, asz)]
     return bids, asks
 
 
@@ -88,10 +61,9 @@ class RithmicOrderFlowFeed:
         self._mock = getattr(broker, "_mock_mode", True)
         self._engines: dict[str, OrderFlowEngine] = {}
         self._subscribed: set[str] = set()
-        self._handler_registered = False
-        # Try to wire the L2 depth decode (template 156). When unavailable the
-        # feed still streams top-of-book BBO + trades; only multi-level OBI is off.
-        self.depth_active = _register_depth_template() if not self._mock else False
+        self._handlers_registered = False
+        # L2 is native when the library exposes DataType.ORDER_BOOK (async-rithmic ≥1.6).
+        self.depth_available = _DT_ORDER_BOOK is not None and not self._mock
 
     def get(self, symbol: str) -> OrderFlowEngine:
         """Return (creating if needed) the engine for a futures root."""
@@ -105,7 +77,7 @@ class RithmicOrderFlowFeed:
         return eng
 
     def subscribe(self, symbols: list[str]) -> int:
-        """Subscribe BBO + LAST_TRADE for every futures root in `symbols`.
+        """Subscribe BBO + LAST_TRADE (+ ORDER_BOOK) for every futures root.
 
         Non-futures symbols (no FUTURES_SPECS entry) are skipped — order flow is
         a futures-only signal here. Returns the count actually subscribed.
@@ -114,12 +86,12 @@ class RithmicOrderFlowFeed:
             log.info("[OrderFlow] mock/unavailable — no live subscription; gate fails open")
             return 0
 
-        self._register_handler()
+        self._register_handlers()
         log.info(
             "[OrderFlow] L2 depth %s",
-            "ACTIVE (ORDER_BOOK template 156 → multi-level OBI)" if self.depth_active
-            else "OFF — order_book proto not registered; top-of-book BBO only. "
-                 "Add Rithmic R|Protocol order_book.proto to enable.",
+            "ACTIVE (ORDER_BOOK → multi-level OBI). Needs the account's CME "
+            "Level-2 data subscription enabled." if self.depth_available
+            else "OFF — library lacks DataType.ORDER_BOOK (upgrade async-rithmic ≥1.6).",
         )
         n = 0
         for symbol in symbols:
@@ -136,8 +108,7 @@ class RithmicOrderFlowFeed:
                     self._client.subscribe_to_market_data(sym, spec.exchange, _DT_LAST)
                 )
                 feeds = "BBO + LAST_TRADE"
-                if self.depth_active:
-                    # Full CME L2 depth (the account is entitled to it) — multi-level OBI.
+                if self.depth_available:
                     self._broker._run(
                         self._client.subscribe_to_market_data(sym, spec.exchange, _DT_ORDER_BOOK)
                     )
@@ -149,8 +120,8 @@ class RithmicOrderFlowFeed:
                 log.warning(f"[OrderFlow] subscribe failed for {sym}: {exc}")
         return n
 
-    def _register_handler(self) -> None:
-        if self._handler_registered or self._client is None:
+    def _register_handlers(self) -> None:
+        if self._handlers_registered or self._client is None:
             return
 
         async def _on_tick(data) -> None:
@@ -160,12 +131,6 @@ class RithmicOrderFlowFeed:
                     return
                 eng = self._engines[sym]
                 dtype = data.get("data_type")
-                # L2 depth (template 156): parallel bid/ask price+size arrays.
-                # Routed first since its dict also carries bid_price as a list.
-                levels = _depth_levels_from_msg(data)
-                if levels is not None:
-                    eng.on_depth_snapshot(levels[0], levels[1])
-                    return
                 if dtype == _DT_BBO:
                     eng.on_depth(
                         bid=float(data.get("bid_price", 0) or 0),
@@ -182,8 +147,21 @@ class RithmicOrderFlowFeed:
             except Exception as exc:  # noqa: BLE001 - never let a bad tick kill the loop
                 log.debug(f"[OrderFlow] tick handler error: {exc}")
 
+        async def _on_order_book(msg) -> None:
+            try:
+                sym = (getattr(msg, "symbol", "") or "").upper()
+                if not sym or sym not in self._engines:
+                    return
+                bids, asks = _ladder_from_orderbook(msg)
+                if bids and asks:                     # NO_BOOK / empty → leave book as-is
+                    self._engines[sym].on_depth_snapshot(bids, asks)
+            except Exception as exc:  # noqa: BLE001
+                log.debug(f"[OrderFlow] order-book handler error: {exc}")
+
         self._client.on_tick += _on_tick
-        self._handler_registered = True
+        if self.depth_available:
+            self._client.on_order_book += _on_order_book
+        self._handlers_registered = True
 
     def reset_session(self) -> None:
         """Zero every engine's CVD at the open."""
