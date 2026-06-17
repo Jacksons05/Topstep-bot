@@ -250,6 +250,11 @@ class Config:
     rithmic_system: str = _s("RITHMIC_SYSTEM", "Rithmic Paper Trading")  # system/gateway name
     rithmic_env: str = _s("RITHMIC_ENV", "paper")                      # "paper" | "live"
     rithmic_url: str = _s("RITHMIC_URL", "rituz00100.rithmic.com:443")  # WebSocket gateway URL (test default; production URL provided by Rithmic after conformance)
+    # Rithmic ties each credential set to a REGISTERED app_name/app_version
+    # (issued with API access / after conformance). A wrong one → login rp_code 13
+    # "permission denied". Set these to exactly what Rithmic/Lucid assigned you.
+    rithmic_app_name: str = _s("RITHMIC_APP_NAME", "JARVIS")
+    rithmic_app_version: str = _s("RITHMIC_APP_VERSION", "1.0")
     # Lucid risk parameters
     lucid_daily_drawdown_usd: float = _f("LUCID_DAILY_DRAWDOWN_USD", 1500.0)  # EOD drawdown limit ($)
     lucid_max_contracts: int = _i("LUCID_MAX_CONTRACTS", 3)            # max open contracts per symbol

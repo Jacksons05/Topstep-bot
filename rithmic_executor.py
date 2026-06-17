@@ -161,8 +161,8 @@ class RithmicBroker:
             user=self._user,
             password=self._password,
             system_name=self._system,
-            app_name="JARVIS",
-            app_version="1.0",
+            app_name=CONFIG.rithmic_app_name,
+            app_version=CONFIG.rithmic_app_version,
             url=self._url,  # wss:// prefix added automatically if absent
         )
 
