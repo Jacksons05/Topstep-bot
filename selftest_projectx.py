@@ -1,14 +1,17 @@
-"""Rithmic connection + L2 order-flow self-test.
+"""ProjectX (TopstepX) connection + order-flow self-test.
 
-    .venv/bin/python selftest_rithmic.py [SYMBOL]   # default MES
+    .venv/bin/python selftest_projectx.py [SYMBOL]   # default MES
 
-Connects with the .env credentials, prints login + account, subscribes the
-symbol's BBO + LAST_TRADE + ORDER_BOOK, and after a few seconds reports live
-OBI / micro-price / CVD / depth so you can confirm the feed (and the account's
-CME Level-2 entitlement) before wiring it into the engine.
+Connects with the .env credentials, prints login + account, resolves the
+contract, subscribes the symbol's GatewayQuote + GatewayTrade + GatewayDepth on
+the SignalR market hub, and after a few seconds reports live OBI / micro-price /
+CVD / depth so you can confirm the feed (and the account's L2 entitlement)
+before wiring it into the engine.
+
+Requires `signalrcore` in the venv for the live feed (pip install signalrcore).
 
 Exit codes: 0 = connected + data; 1 = connect/login failed; 2 = connected but
-no market data (market closed, or symbol/exchange wrong).
+no market data (market closed, or symbol/contract wrong, or signalrcore missing).
 """
 from __future__ import annotations
 
@@ -26,16 +29,17 @@ def main() -> int:
         print(f"✗ {sym} is not a known futures root (futures_symbols.py)")
         return 1
 
-    print(f"Rithmic self-test | system={CONFIG.rithmic_system} env={CONFIG.rithmic_env} "
-          f"url={CONFIG.rithmic_url} app={CONFIG.rithmic_app_name}/{CONFIG.rithmic_app_version}")
+    print(f"ProjectX self-test | base={CONFIG.projectx_api_base} "
+          f"rtc={CONFIG.projectx_rtc_base} live={CONFIG.projectx_live} "
+          f"user={CONFIG.projectx_username or '(unset)'}")
 
-    from rithmic_executor import RithmicBroker
-    from rithmic_marketdata import RithmicOrderFlowFeed
+    from projectx_executor import ProjectXBroker
+    from projectx_marketdata import ProjectXOrderFlowFeed
 
-    broker = RithmicBroker()
+    broker = ProjectXBroker()
     if getattr(broker, "_mock_mode", True):
-        print("✗ broker in MOCK MODE — connect/login failed (check creds, system, "
-              "and RITHMIC_APP_NAME/VERSION; a permission-denied login usually = wrong app_name).")
+        print("✗ broker in MOCK MODE — login failed or creds unset "
+              "(check PROJECTX_USERNAME / PROJECTX_API_KEY).")
         return 1
 
     try:
@@ -47,7 +51,10 @@ def main() -> int:
         broker.close()
         return 1
 
-    feed = RithmicOrderFlowFeed(broker)
+    cid = broker.contract_id(sym)
+    print(f"contract: {sym} -> {cid}")
+
+    feed = ProjectXOrderFlowFeed(broker)
     n = feed.subscribe([sym])
     print(f"subscribed {n} root(s) | L2 depth_available={feed.depth_available}")
 
@@ -64,10 +71,11 @@ def main() -> int:
                   f"CVD={snap.cvd:+.0f} whale={snap.whale:+d} "
                   f"bid={eng.bid}@{eng.bid_size:g} ask={eng.ask}@{eng.ask_size:g}")
 
+    feed.close()
     broker.close()
     if not got:
-        print("⚠ connected but no ticks — market may be closed, or the CME data "
-              "subscription / symbol-exchange needs checking.")
+        print("⚠ connected but no ticks — market may be closed, the contract/symbol "
+              "needs checking, or signalrcore is not installed (pip install signalrcore).")
         return 2
     print("✓ live order-flow confirmed.")
     return 0

@@ -255,6 +255,17 @@ class Config:
     # "permission denied". Set these to exactly what Rithmic/Lucid assigned you.
     rithmic_app_name: str = _s("RITHMIC_APP_NAME", "JARVIS")
     rithmic_app_version: str = _s("RITHMIC_APP_VERSION", "1.0")
+    # ── Topstep / ProjectX Gateway API (current execution path) ────────────
+    # ProjectX is Topstep's own REST + SignalR gateway (api.topstepx.com /
+    # rtc.topstepx.com). Simple API-key auth — no Rithmic app registration /
+    # conformance wall. Set PROJECTX_USERNAME + PROJECTX_API_KEY to activate;
+    # the order-flow engine, Lucid risk, and entry/exit logic are unchanged.
+    projectx_username: str = _s("PROJECTX_USERNAME")                   # TopstepX login / username
+    projectx_api_key: str = _s("PROJECTX_API_KEY")                     # API key from TopstepX → Settings → API
+    projectx_api_base: str = _s("PROJECTX_API_BASE", "https://api.topstepx.com")
+    projectx_rtc_base: str = _s("PROJECTX_RTC_BASE", "https://rtc.topstepx.com")
+    projectx_account_name: str = _s("PROJECTX_ACCOUNT_NAME")          # blank → first tradable account
+    projectx_live: bool = _b("PROJECTX_LIVE", False)                   # False = sim/eval data sub; True = funded/live
     # Lucid risk parameters
     lucid_daily_drawdown_usd: float = _f("LUCID_DAILY_DRAWDOWN_USD", 1500.0)  # EOD drawdown limit ($)
     lucid_max_contracts: int = _i("LUCID_MAX_CONTRACTS", 3)            # max open contracts per symbol

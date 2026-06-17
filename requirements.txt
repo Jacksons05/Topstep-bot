@@ -10,7 +10,8 @@ polars>=1.0
 numba>=0.60
 # IBKR adapter (optional, only when BROKER=ibkr):
 # ib-insync>=0.9.86
-# Lucid Trading / Rithmic adapter (execution + L1/L2/trade order-flow feed).
-# >=1.6 required for native L2 (DataType.ORDER_BOOK + on_order_book). Needs
-# Python >= 3.10 (this fork's venv is 3.12 — protobuf's C ext breaks on 3.14).
-async-rithmic>=1.6
+# Lucid Trading / ProjectX (TopstepX) adapter: REST execution is plain httpx
+# (above); the live order-flow feed (quotes/trades/L2 depth) uses the ProjectX
+# SignalR market hub via signalrcore. Optional — projectx_marketdata degrades to
+# a no-op (gate fails open) when absent.
+signalrcore>=0.9.5

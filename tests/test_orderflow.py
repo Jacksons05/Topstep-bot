@@ -40,18 +40,18 @@ def test_engine_prefers_depth_obi_over_bbo():
     assert e.has_data and e.obi > 0.85
     ok, reason = e.confirm_entry("BUY")
     assert ok and "OBI" in reason
-from rithmic_marketdata import RithmicOrderFlowFeed  # noqa: E402
+from projectx_marketdata import ProjectXOrderFlowFeed  # noqa: E402
 
 
 class _MockBroker:
     _mock_mode = True
-    _client = None
-    def _run(self, coro):  # never called in mock
-        raise AssertionError("should not run in mock mode")
+    token = ""
+    def contract_id(self, symbol):  # never called in mock
+        raise AssertionError("should not resolve contracts in mock mode")
 
 
 def test_feed_mock_mode_subscribes_nothing_and_gate_fails_open():
-    feed = RithmicOrderFlowFeed(_MockBroker())
+    feed = ProjectXOrderFlowFeed(_MockBroker())
     assert feed.subscribe(["ES", "MNQ", "SPY"]) == 0   # mock → no live subscription
     eng = feed.get("ES")
     assert not eng.has_data                              # cold → gate fails open

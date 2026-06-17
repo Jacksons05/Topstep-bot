@@ -2,7 +2,7 @@
 risk -> execute -> manage. One run_once() = one full pass over the watchlist.
 
 This is the Lucid funded-futures bot: it signals off the shared agentic core
-(quant indicators + the LLM agent team) and executes through Rithmic with the
+(quant indicators + the LLM agent team) and executes through ProjectX with the
 Lucid risk layer (EOD drawdown kill-switch, econ blackout, contract cap, EOD
 flatten). The equity-options path (Alpaca/CBOE GEX, 0DTE structures) has been
 removed — see the sister repo Trading-Bot for that variant.
@@ -60,19 +60,19 @@ class Engine:
         # moved since its last evaluation. {symbol: (direction, strength_bucket)}
         self._eval_cache: dict[str, tuple[str, float]] = {}
         self._lucid_last_reset: date | None = None
-        self._oflow = None  # RithmicOrderFlowFeed when a live Rithmic feed is up
+        self._oflow = None  # ProjectXOrderFlowFeed when a live ProjectX feed is up
 
-        # ── Lucid / Rithmic mode ───────────────────────────────────────────
-        # The Lucid bot executes futures through Rithmic with the Lucid risk
-        # layer attached. When credentials are missing it degrades to the
-        # base executor (Sim/Alpaca) so the agentic pipeline still runs in
-        # paper — but it warns loudly, because live futures need Rithmic.
+        # ── Lucid / ProjectX (TopstepX) mode ───────────────────────────────
+        # The Lucid bot executes futures through the ProjectX gateway with the
+        # Lucid risk layer attached. When credentials are missing it degrades to
+        # the base executor (Sim/Alpaca) so the agentic pipeline still runs in
+        # paper — but it warns loudly, because live futures need ProjectX.
         self._lucid: "LucidRiskManager | None" = None  # type: ignore[name-defined]
-        if CONFIG.lucid_mode_enabled and CONFIG.rithmic_user and CONFIG.rithmic_password:
+        if CONFIG.lucid_mode_enabled and CONFIG.projectx_username and CONFIG.projectx_api_key:
             try:
-                from rithmic_executor import RithmicBroker
+                from projectx_executor import ProjectXBroker
                 from lucid_risk import LucidRiskManager
-                self.executor.broker = RithmicBroker()
+                self.executor.broker = ProjectXBroker()
                 # Seed the Lucid drawdown base from the live account balance.
                 # Falls back to bankroll_usd if the account call fails (mock mode).
                 try:
@@ -82,19 +82,19 @@ class Engine:
                     initial_equity = CONFIG.bankroll_usd
                 self._lucid = LucidRiskManager(initial_equity=initial_equity)
                 notify(
-                    "⚡ LUCID/RITHMIC MODE ACTIVE — "
-                    f"system={CONFIG.rithmic_system} env={CONFIG.rithmic_env} | "
+                    "⚡ LUCID/PROJECTX MODE ACTIVE — "
+                    f"env={'live' if CONFIG.projectx_live else 'sim'} | "
                     f"drawdown_limit=${CONFIG.lucid_daily_drawdown_usd:,.2f} | "
                     f"max_contracts={CONFIG.lucid_max_contracts} | "
                     f"flatten_at={CONFIG.lucid_flatten_time} ET"
                 )
-                # Live order-flow feed: stream BBO + trades off the same Rithmic
-                # connection into per-symbol OBI/CVD/whale engines. Only the
-                # futures roots in the watchlist get subscribed.
+                # Live order-flow feed: stream quotes + trades + depth off the
+                # ProjectX market hub into per-symbol OBI/CVD/whale engines. Only
+                # the futures roots in the watchlist get subscribed.
                 if CONFIG.orderflow_gate_enabled:
                     try:
-                        from rithmic_marketdata import RithmicOrderFlowFeed
-                        self._oflow = RithmicOrderFlowFeed(self.executor.broker)
+                        from projectx_marketdata import ProjectXOrderFlowFeed
+                        self._oflow = ProjectXOrderFlowFeed(self.executor.broker)
                         n = self._oflow.subscribe(list(CONFIG.watchlist))
                         notify(f"📡 Order-flow feed: subscribed {n} futures root(s) "
                                f"(OBI/CVD/whale gate {'live' if n else 'idle — no futures roots'})")
@@ -104,14 +104,14 @@ class Engine:
             except Exception as e:  # noqa: BLE001
                 notify(
                     f"⚠ LUCID MODE init failed ({e}) — "
-                    "falling back to base executor. Check rithmic-python installation."
+                    "falling back to base executor. Check PROJECTX credentials / signalrcore."
                 )
                 self._lucid = None
         else:
             notify(
-                "⚠ Rithmic credentials not set (RITHMIC_USER/PASSWORD) — running the "
-                "agentic pipeline on the base executor (Sim/paper). Set credentials in "
-                ".env to trade futures live via Rithmic."
+                "⚠ ProjectX credentials not set (PROJECTX_USERNAME/PROJECTX_API_KEY) — running "
+                "the agentic pipeline on the base executor (Sim/paper). Set credentials in "
+                ".env to trade futures live via ProjectX/TopstepX."
             )
 
     def _market_open(self) -> bool:
@@ -272,7 +272,7 @@ class Engine:
             # ── Order-flow confirmation gate ────────────────────────────
             # Final microstructure check at entry: require OBI extreme in the
             # trade direction, veto on opposing whale / CVD divergence. Only
-            # applied when the live Rithmic feed actually has data for this
+            # applied when the live ProjectX feed actually has data for this
             # symbol (fails open during warm-up / non-futures symbols).
             if self._oflow is not None:
                 of = self._oflow.get(sig.symbol)
@@ -427,17 +427,17 @@ class Engine:
     # ── manage exits ──────────────────────────────────────
     def _manage_open(self) -> None:
         # Lucid EOD flatten: if the flatten window is open and the broker is
-        # RithmicBroker, submit a market close for every open futures position.
+        # ProjectXBroker, submit a market close for every open futures position.
         # This runs BEFORE the per-position exit loop so the state gets cleaned
         # up correctly on the same scan tick.
         if self._lucid is not None and self._lucid.should_flatten_now():
-            from rithmic_executor import RithmicBroker
-            if isinstance(self.executor.broker, RithmicBroker):
+            from projectx_executor import ProjectXBroker
+            if isinstance(self.executor.broker, ProjectXBroker):
                 open_futures = [p for p in self.state.open_positions if not p.shadow]
                 if open_futures:
                     notify(
                         f"[Lucid] EOD flatten triggered ({len(open_futures)} positions) "
-                        f"— submitting market closes via Rithmic"
+                        f"— submitting market closes via ProjectX"
                     )
                     try:
                         self.executor.broker.flatten_all()
