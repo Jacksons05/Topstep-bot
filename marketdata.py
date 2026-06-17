@@ -76,15 +76,6 @@ class MarketData:
         }
 
     def quote(self, symbol: str) -> Quote | None:
-        # Index spot comes from the real CBOE index chain (Alpaca has no index feed),
-        # so every downstream price (spot/stop/target/exit) stays at index scale.
-        if CONFIG.is_index(symbol):
-            from options import cboe_chain
-            chain = cboe_chain(symbol, 0.0)
-            if chain is None or chain.spot <= 0:
-                return None
-            return Quote(symbol=symbol, price=float(chain.spot),
-                         ts=datetime.now(timezone.utc).isoformat())
         try:
             r = self._http.get(
                 f"{CONFIG.alpaca_data_url}/v2/stocks/{symbol}/trades/latest",

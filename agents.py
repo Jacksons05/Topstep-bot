@@ -22,7 +22,11 @@ from dataclasses import dataclass, field
 import httpx
 
 from config import CONFIG
-from options import ExposureProfile
+
+# Dealer-positioning exposure is an equity/options concept; the futures bot never
+# populates it (ctx.exposure stays None), but the field + None-guards are kept so
+# the agent prompts stay identical to the sister equity bot.
+ExposureProfile = object
 
 # ── LLM client ────────────────────────────────────────────
 

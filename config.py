@@ -239,7 +239,7 @@ class Config:
     # DISABLED by default. Set LUCID_MODE_ENABLED=True AND supply
     # RITHMIC_USER + RITHMIC_PASSWORD to activate futures execution
     # through the Rithmic executor + Lucid risk layer.
-    lucid_mode_enabled: bool = _b("LUCID_MODE_ENABLED", False)
+    lucid_mode_enabled: bool = _b("LUCID_MODE_ENABLED", True)  # this is the Lucid futures fork
     # Rithmic credentials — leave blank until you have your account.
     rithmic_user: str = _s("RITHMIC_USER")                             # your Rithmic username
     rithmic_password: str = _s("RITHMIC_PASSWORD")                     # your Rithmic password

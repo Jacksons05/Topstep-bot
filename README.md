@@ -1,9 +1,22 @@
-# JARVIS — agentic stock + options trading engine
+# JARVIS Lucid — agentic futures trading engine
 
-A multi-agent trading bot (2026 framework). Reads market structure + dealer
-positioning + news, runs a Claude agent team, and trades equities through
-Alpaca (paper by default). Built to grow an edge iteratively — feed it data,
-tune the streams, measure.
+The **Lucid funded-futures** fork of the JARVIS bot. Reads market structure +
+news, runs a Claude agent team, and executes futures through **Rithmic** with
+the **Lucid risk layer** (EOD-drawdown kill-switch, econ blackout, contract
+cap, EOD flatten). Built to grow an edge iteratively — feed it data, tune the
+streams, measure.
+
+> **This is the futures fork.** The Alpaca/CBOE equity-and-options path
+> (0DTE GEX structures, dealer-positioning confluence) was stripped out — that
+> variant lives in the sister repo `Trading-Bot`. Here the pipeline is
+> data → quant → agent team → confluence → risk → Rithmic execution.
+>
+> **Status / remaining wire-up:** the signal stream still samples bars/quotes
+> from the Alpaca data API, while `rithmic_executor` expects futures roots
+> (`ES`, `MES`, `NQ`, …). To trade futures *live* you still need a futures
+> **data feed** (Rithmic market data, or a proxy→future symbol map) plus
+> `RITHMIC_USER`/`RITHMIC_PASSWORD`. Out of the box it runs the full agentic
+> pipeline in **paper/Sim** mode.
 
 > Not financial advice. Trading risks substantial loss. Run **paper** for weeks
 > before risking a cent. ~92% of retail traders lose money.

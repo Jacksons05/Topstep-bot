@@ -1,9 +1,15 @@
-"""The agentic trading cycle: data -> quant -> agents -> confluence -> risk ->
-execute -> manage. One run_once() = one full pass over the watchlist.
+"""The agentic futures-trading cycle: data -> quant -> agents -> confluence ->
+risk -> execute -> manage. One run_once() = one full pass over the watchlist.
 
-Confluence rule (the doc's core): a trade fires only when the quantitative
-stream (indicators) and the qualitative stream (agent team) agree on direction
-AND the blended confidence clears CONFIDENCE_THRESHOLD.
+This is the Lucid funded-futures bot: it signals off the shared agentic core
+(quant indicators + the LLM agent team) and executes through Rithmic with the
+Lucid risk layer (EOD drawdown kill-switch, econ blackout, contract cap, EOD
+flatten). The equity-options path (Alpaca/CBOE GEX, 0DTE structures) has been
+removed — see the sister repo Trading-Bot for that variant.
+
+Confluence rule: a trade fires only when the quantitative stream (indicators)
+and the qualitative stream (agent team) agree on direction AND the blended
+confidence clears CONFIDENCE_THRESHOLD.
 """
 from __future__ import annotations
 
@@ -18,13 +24,10 @@ from news import NewsFeed
 from events import Events
 from macro import Macro
 from notifier import notify, signal_msg
-from options import cboe_chain, exposure_for, four_greek_confluence
 from regime import classify_last
-from options_strategy import directional_levels, price_structure, select_structure
 from risk import check, circuit_breaker, kill_switch_active, should_exit
 from signals import Signal, label_for, quant_signal
 from state import State
-import yf_data
 from regime_strategy import (
     get_regime_params,
     regime_allows_signal,
@@ -33,18 +36,12 @@ from regime_strategy import (
 
 
 # US equity-market full-day holidays (NYSE), 2026. Used by the market-hours gate
-# so the LLM scan doesn't burn API credits on closed days.
+# so the LLM scan doesn't burn API credits on closed days. (Index futures track
+# the same RTH session the proxy data is sampled from.)
 _US_HOLIDAYS = {
     "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
     "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
 }
-
-# Time-stop option exits go through Alpaca, which intermittently returns a 500
-# ("internal server error") on otherwise-valid close orders. A single transient
-# 500 must not permanently strand a position, but we also can't re-submit every
-# scan tick (~30 s) forever. Retry up to this many times across scans, then park
-# the position until the next restart and stop hitting the broker.
-_OPTION_EXIT_MAX_RETRIES = 5
 
 
 class Engine:
@@ -62,16 +59,12 @@ class Engine:
         # moved since its last evaluation. {symbol: (direction, strength_bucket)}
         self._eval_cache: dict[str, tuple[str, float]] = {}
         self._lucid_last_reset: date | None = None
-        # Track time-stop exit retry counts so a transient Alpaca 500 is retried
-        # a bounded number of times across scans, then parked instead of spamming
-        # the broker every 30 s. Keyed by the position's DB identity
-        # (symbol, opened_at) so the count survives state reloads / object churn.
-        self._option_exit_attempts: dict[tuple[str, str], int] = {}
 
-        # ── Lucid / Rithmic mode gate ──────────────────────────────────────
-        # When LUCID_MODE_ENABLED=True AND Rithmic credentials are provided,
-        # swap the broker for RithmicBroker and attach the Lucid risk layer.
-        # Otherwise the engine runs in standard Alpaca mode — no other changes.
+        # ── Lucid / Rithmic mode ───────────────────────────────────────────
+        # The Lucid bot executes futures through Rithmic with the Lucid risk
+        # layer attached. When credentials are missing it degrades to the
+        # base executor (Sim/Alpaca) so the agentic pipeline still runs in
+        # paper — but it warns loudly, because live futures need Rithmic.
         self._lucid: "LucidRiskManager | None" = None  # type: ignore[name-defined]
         if CONFIG.lucid_mode_enabled and CONFIG.rithmic_user and CONFIG.rithmic_password:
             try:
@@ -86,9 +79,6 @@ class Engine:
                 except Exception:  # noqa: BLE001
                     initial_equity = CONFIG.bankroll_usd
                 self._lucid = LucidRiskManager(initial_equity=initial_equity)
-                if CONFIG.trade_options:
-                    notify("⚠ LUCID MODE: TRADE_OPTIONS auto-disabled (Rithmic has no options executor)")
-                    CONFIG.trade_options = False  # type: ignore[assignment]
                 notify(
                     "⚡ LUCID/RITHMIC MODE ACTIVE — "
                     f"system={CONFIG.rithmic_system} env={CONFIG.rithmic_env} | "
@@ -99,17 +89,15 @@ class Engine:
             except Exception as e:  # noqa: BLE001
                 notify(
                     f"⚠ LUCID MODE init failed ({e}) — "
-                    "falling back to Alpaca. Check rithmic-python installation."
+                    "falling back to base executor. Check rithmic-python installation."
                 )
                 self._lucid = None
-        elif CONFIG.lucid_mode_enabled:
-            # Enabled in config but no credentials — warn loudly, keep Alpaca.
-            notify(
-                "⚠ LUCID_MODE_ENABLED=True but RITHMIC_USER/PASSWORD not set — "
-                "running in standard Alpaca mode. Set credentials in .env to activate."
-            )
         else:
-            notify("ℹ LUCID MODE disabled — standard Alpaca/Sim mode active")
+            notify(
+                "⚠ Rithmic credentials not set (RITHMIC_USER/PASSWORD) — running the "
+                "agentic pipeline on the base executor (Sim/paper). Set credentials in "
+                ".env to trade futures live via Rithmic."
+            )
 
     def _market_open(self) -> bool:
         """True during US regular trading hours (Mon–Fri 9:30–16:00 ET, skip
@@ -162,7 +150,7 @@ class Engine:
         regime_move = self.data.intraday_change_pct(CONFIG.regime_symbol)
         self.cb_level, cb_mult = circuit_breaker(regime_move)
 
-        # 2. manage exits first (real + shadow books)
+        # 2. manage exits first
         self._manage_open()
 
         # 3. two-stage funnel so the universe can be large without LLM cost exploding.
@@ -176,17 +164,11 @@ class Engine:
             ps = self._prescreen(sym)
             if ps is not None:
                 prescreened.append((sym, ps[0], ps[1], ps[2]))
-        # rank by quant conviction; only the strongest get the expensive LLM/GEX pass
+        # rank by quant conviction; only the strongest get the expensive LLM pass
         prescreened.sort(key=lambda x: x[1].strength, reverse=True)
         top = prescreened[:CONFIG.llm_max_symbols_per_cycle]
-        # always let option underlyings reach full eval (GEX + structure), even if a
-        # large equity universe outranks them on quant strength — else options starve.
-        if CONFIG.trade_options:
-            have = {s for s, _, _, _ in top}
-            top += [r for r in prescreened
-                    if r[0] in CONFIG.option_underlyings and r[0] not in have]
 
-        # 3b. full eval (LLM + GEX + option structure) on the top-N candidates only
+        # 3b. full eval (LLM confluence) on the top-N candidates only
         candidates: list[tuple[Signal, float, dict]] = []  # (signal, conviction, regime_params)
         regime_str = "—"
         for sym, quant, spot, regime_label in top:
@@ -200,12 +182,8 @@ class Engine:
             if sig:
                 rp = get_regime_params(regime_label, CONFIG)
                 candidates.append((sig, sig.confidence, rp))
-
-        # surface options regime if any candidate carried an exposure read
-        for sig, _, _rp in candidates:
-            if sig.agents.get("regime"):
-                regime_str = sig.agents["regime"]
-                break
+                if regime_str == "—":
+                    regime_str = regime_label
 
         notify(f"scan: {len(CONFIG.watchlist)} universe | "
                f"prescreen={len(prescreened)} scored={len(top)} | "
@@ -217,16 +195,13 @@ class Engine:
         # 4. portfolio allocation across agreeing candidates
         weights = portfolio_weights([(s.symbol, c) for s, c, _ in candidates])
 
-        # 5. risk gate + execute. Options-primary: option signals take slots FIRST so a
-        # big equity universe can't crowd the few 0DTE underlyings out of MAX_CONCURRENT.
+        # 5. risk gate + execute.
         if candidates and self._past_entry_cutoff():
             notify(f"  skip ALL new entries (entry cutoff {CONFIG.entry_cutoff_et} ET) — "
                    f"{len(candidates)} candidate(s); managing open positions only")
             candidates = []
         for sig, conv, regime_params in sorted(
-                candidates,
-                key=lambda x: (x[0].asset == "option", x[1]),
-                reverse=True):
+                candidates, key=lambda x: x[1], reverse=True):
             w = weights.get(sig.symbol, 0.0)
 
             # ── Regime-adaptive playbook gates ──────────────────────────
@@ -289,46 +264,27 @@ class Engine:
 
         self.state.save()
 
-    # ── stage 1: cheap quant prescreen (no LLM/GEX/news) ──
+    # ── stage 1: cheap quant prescreen (no LLM/news) ──
     def _prescreen(self, sym: str):
         """Fast pass run on the WHOLE universe: bars + indicators only.
 
         Returns (quant, spot, regime_label) for a passable read, else None.
         No LLM, no network beyond bars.
-
-        Regime gate (v2 §5, regime-adaptive update):
-        - REGIME_ALLOW in .env acts as an allowlist; symbols whose regime is
-          not in the list are dropped ONLY when the allowlist contains exactly
-          one entry (the old hard-block behaviour for back-compat).
-        - When REGIME_ALLOW contains more than one entry (e.g. all four
-          regimes), every allowed regime passes through and the per-regime
-          playbook is applied later in run_once() — so sizing / confidence /
-          direction restrictions are regime-adaptive rather than binary.
-        - The hard REGIME_BLOCK still applies for explicitly blocked regimes.
-        - Option underlyings remain exempt (their own GEX/confluence logic).
         """
-        tf = CONFIG.scalp_timeframe if CONFIG.trade_options else "1Day"
-        bars = self.data.bars(sym, timeframe=tf, limit=200)
+        bars = self.data.bars(sym, timeframe=CONFIG.scalp_timeframe, limit=200)
         if not bars.get("close"):
             return None
         spot = bars["close"][-1]
         quant = quant_signal(bars)
         if quant is None:
             return None
-        # Option underlyings reach full eval even on a FLAT quant: in a pinned
-        # (positive-gamma) tape momentum vanishes, but that's exactly where the
-        # 0DTE credit-spread edge lives — direction is derived from dealer
-        # positioning (spot vs gamma flip) in _evaluate_full instead.
-        opt_underlying = CONFIG.trade_options and sym in CONFIG.option_underlyings
-        if quant.direction == "FLAT" and not opt_underlying:
+        if quant.direction == "FLAT":
             return None
 
         # Classify regime for this symbol (used both by the gate and later by
         # the regime-adaptive playbook in run_once).
-        option_sym = (CONFIG.trade_options and sym in CONFIG.option_underlyings
-                      and CONFIG.regime_gate_exempt_options)
         regime_label = "Unknown"
-        if CONFIG.regime_gate_enabled and not option_sym:
+        if CONFIG.regime_gate_enabled:
             regime_label = classify_last(
                 bars["close"],
                 bars.get("high") or bars["close"],
@@ -337,129 +293,28 @@ class Engine:
             reg_upper = regime_label.upper()
             if CONFIG.regime_allow:
                 if reg_upper not in CONFIG.regime_allow:
-                    # Regime is not in the allowlist — drop regardless of how
-                    # many entries the allowlist has.  When all four regimes
-                    # are listed (the new default) this branch is never reached.
                     return None
             elif CONFIG.regime_block and reg_upper in CONFIG.regime_block:
                 return None
 
         return quant, spot, regime_label
 
-    # ── stage 2: expensive full eval (LLM + GEX + structure) on top-N ──
-    def _gex_option_signal(self, sym: str, spot: float, exp, atr: float,
-                           ivr: float | None):
-        """Build a 0DTE option Signal from dealer positioning alone (no momentum).
-
-        Direction = spot vs gamma flip: above flip → bullish lean (bull-put credit /
-        long call), below → bearish. Used only for option underlyings whose momentum
-        quant is FLAT but whose GEX regime is live. Returns a priced+liquid option
-        Signal, or None when no valid structure exists.
-        """
-        direction = "BUY" if spot >= exp.gamma_flip else "SELL"
-        # Confidence scales with distance from the flip (conviction of the lean),
-        # normalised by ATR. Floored at 0.5, gated by the same threshold as equities.
-        dist = abs(spot - exp.gamma_flip)
-        confidence = round(min(1.0, 0.5 + dist / (atr * 4.0)), 3) if atr else 0.55
-        if confidence < CONFIG.confidence_threshold:
-            return None
-
-        # Four-Greek confluence veto: never enter a structure dealer flow mechanically
-        # opposes (mirrors the equity path's conflict veto).
-        conf = None
-        if CONFIG.confluence_gate_enabled:
-            conf = four_greek_confluence(exp, zero_dte=exp.front_expiry == date.today())
-            if conf.actionable and conf.score >= CONFIG.confluence_min_score:
-                want = {"bullish": "BUY", "bearish": "SELL"}.get(conf.direction or "")
-                if want and want != direction and CONFIG.confluence_conflict_veto:
-                    notify(f"  skip (GEX dir {direction} vs confluence {conf.direction} "
-                           f"{conf.playbook} {conf.score}): {sym}")
-                    return None
-
-        chain = cboe_chain(sym, spot)
-        if chain is None:
-            return None
-        structure = select_structure(
-            exp, direction, exp.front_expiry,
-            strike_step=exp.strike_step, spread_width=exp.strike_step,
-            iv_rank=ivr,
-            iv_rank_sell_threshold=CONFIG.iv_rank_sell_threshold,
-            iv_rank_buy_threshold=CONFIG.iv_rank_buy_threshold,
-        )
-        if structure is None or not price_structure(
-                chain, structure, spread_width=exp.strike_step,
-                max_spread_pct=CONFIG.option_max_spread_pct, min_mid=CONFIG.option_min_mid):
-            return None
-
-        agents = {"regime": exp.regime, "gex_dir": f"spot {spot:.2f} vs flip {exp.gamma_flip:.2f}"}
-        if conf and conf.actionable:
-            agents["confluence"] = f"{conf.playbook}:{conf.direction}:{conf.score}"
-        if ivr is not None:
-            agents["iv_rank"] = round(ivr, 1)
-        stop, target = directional_levels(direction, spot, exp, atr)
-        structure.target = target
-        sig = Signal(
-            symbol=sym, asset="option", side=direction, price=spot,
-            confidence=confidence, confidence_label=label_for(confidence),
-            thesis=structure.thesis or f"GEX {exp.regime} 0DTE {direction}",
-            quant=0.0, qual=0.0, atr=atr, agents=agents,
-            stop=stop, structure=structure,
-            contract=structure.legs[0].occ if structure.legs else "",
-        )
-        return sig
-
+    # ── stage 2: full eval (LLM confluence) on top-N ──
     def _evaluate_full(self, sym: str, quant, spot: float) -> Signal | None:
-        # Use the LIVE quote for the trade spot (entry ref, ATM strike, stop/target).
-        # The last bar close can lag/stale; greeks + levels must anchor to real price.
+        # Use the LIVE quote for the trade spot (entry ref, stop/target).
+        # The last bar close can lag/stale.
         q = self.data.quote(sym)
         if q and q.price > 0:
             spot = q.price
 
-        # ── 1. yfinance earnings guard ────────────────────
-        # Skip the position entirely when earnings are within SKIP_EARNINGS_WINDOW_DAYS.
-        # This runs before the LLM/GEX calls so a near-earnings symbol costs nothing.
-        # (The existing Finnhub blackout in events.py covers the tighter ±12h window;
-        #  this adds a longer forward-looking guard and works without a Finnhub key.)
-        earn_soon, earn_reason = yf_data.earnings_within_days(sym)
-        if earn_soon:
-            notify(f"  skip (earnings window: {earn_reason}): {sym}")
-            return None
-
-        exp = exposure_for(sym, spot) if CONFIG.trade_options or CONFIG.options_source != "none" else None
-
-        # ── 2. yfinance enrichment (cached, best-effort) ──
-        # Fetch IV rank, analyst consensus, and yfinance news.  All three degrade
-        # gracefully to None / empty strings so a yfinance outage is never fatal.
-        ivr       = yf_data.iv_rank(sym)
-        ac        = yf_data.analyst_consensus(sym)
-        yf_heads  = yf_data.news_headlines(sym, n=3)
-
-        # ── GEX-direction path: option underlying, live regime, FLAT momentum ──
-        # In a pinned (positive-gamma) tape the momentum quant is FLAT, so the normal
-        # confluence path (which requires a quant direction) never fires — yet that's
-        # where the 0DTE credit-spread edge lives. Derive direction from dealer
-        # positioning (spot vs gamma flip) and build the structure directly. Bypasses
-        # the equity quant/LLM confluence; still risk-defined + liquidity-validated.
-        if (quant.direction == "FLAT" and CONFIG.trade_options
-                and sym in CONFIG.option_underlyings and exp is not None
-                and exp.regime != "neutral" and exp.gamma_flip):
-            gex = self._gex_option_signal(sym, spot, exp, quant.atr, ivr)
-            if gex is not None:
-                return gex
-            return None  # FLAT underlying with no buildable structure → no equity fallback
-
         # Headlines only matter when an LLM agent will read them — skip the
-        # Polygon call on the quant-only path to save rate limit.
+        # news call on the quant-only path to save rate limit.
         headlines = self.news.headlines(sym) if self.team.ready else []
 
         ctx = SymbolContext(
             symbol=sym, spot=spot, quant_detail=quant.detail, quant_lean=quant.lean,
-            exposure=exp, news=headlines,
+            exposure=None, news=headlines,
             macro=self.macro.line() if self.team.ready else "",
-            # ── yfinance fields ──
-            analyst_rec=ac.get("recommendation", ""),
-            analyst_target=ac.get("target_price"),
-            yf_news=yf_heads,
         )
         verdict = self.team.evaluate(ctx)
 
@@ -479,96 +334,29 @@ class Engine:
             return None
 
         confidence = round(0.5 * quant.strength + 0.5 * qual_conv, 3)
-
-        # Four-Greek confluence gate (v2 §4): dealer positioning boosts an agreeing
-        # entry and vetoes one it mechanically opposes. Runs before the threshold so
-        # a boost can lift a borderline trade and a conflict can kill it outright.
-        conf = None
-        if exp is not None and CONFIG.confluence_gate_enabled:
-            zero_dte = exp.front_expiry == date.today()
-            conf = four_greek_confluence(exp, zero_dte=zero_dte)
-            if conf.actionable and conf.score >= CONFIG.confluence_min_score:
-                want = {"bullish": "BUY", "bearish": "SELL"}.get(conf.direction or "")
-                if want == quant.direction:
-                    confidence = round(min(1.0, confidence + CONFIG.confluence_boost), 3)
-                elif want and CONFIG.confluence_conflict_veto:
-                    notify(f"  skip (confluence {conf.playbook} {conf.direction} "
-                           f"vs {quant.direction}, score {conf.score}): {sym}")
-                    return None
-
         if confidence < CONFIG.confidence_threshold:
             return None
 
         agents = dict(verdict.trail)
-        if exp:
-            agents["regime"] = exp.regime
-        if conf and conf.actionable:
-            agents["confluence"] = f"{conf.playbook}:{conf.direction}:{conf.score}"
-        # Stash yfinance enrichment in the agents dict for the dashboard / notifier.
-        if ivr is not None:
-            agents["iv_rank"] = round(ivr, 1)
-        if ac.get("recommendation"):
-            agents["analyst_rec"] = ac["recommendation"]
-        if ac.get("target_price"):
-            agents["analyst_target"] = ac["target_price"]
 
         # quant-only mode has no narrative thesis — surface the indicator read.
         thesis = quant.detail if not self.team.ready else (verdict.thesis or quant.detail)
-        sig = Signal(
-            symbol=sym, asset="equity", side=quant.direction, price=spot,
+        return Signal(
+            symbol=sym, asset="future", side=quant.direction, price=spot,
             confidence=confidence, confidence_label=label_for(confidence),
             thesis=thesis, quant=quant.lean,
             qual=verdict.qual_lean, atr=quant.atr, agents=agents,
         )
 
-        # ── 3. Options-primary: 0DTE structure, now IV-rank aware ────────────
-        # On a 0DTE-capable underlying with a live regime, build a priced+liquid
-        # structure.  IV rank (when available) may override the regime-based
-        # debit/credit choice.  Anything missing falls back to equity.
-        if (CONFIG.trade_options and exp is not None and exp.regime != "neutral"
-                and exp.front_expiry is not None and sym in CONFIG.option_underlyings):
-            chain = cboe_chain(sym, spot)
-            structure = select_structure(
-                exp, quant.direction, exp.front_expiry,
-                strike_step=exp.strike_step, spread_width=exp.strike_step,
-                # ── IV rank override ──
-                iv_rank=ivr,
-                iv_rank_sell_threshold=CONFIG.iv_rank_sell_threshold,
-                iv_rank_buy_threshold=CONFIG.iv_rank_buy_threshold,
-            ) if chain is not None else None
-            if structure is not None and price_structure(
-                    chain, structure, spread_width=exp.strike_step,
-                    max_spread_pct=CONFIG.option_max_spread_pct, min_mid=CONFIG.option_min_mid):
-                sig.asset = "option"
-                sig.structure = structure
-                sig.contract = structure.legs[0].occ if structure.legs else ""
-                sig.thesis = structure.thesis or thesis
-                # underlying stop/target on the correct side of spot (else instant exit)
-                stop, target = directional_levels(quant.direction, spot, exp, quant.atr)
-                sig.stop = stop
-                structure.target = target
-        return sig
-
     # ── reconcile provisional entries with real fills ─────
     def _reconcile_fills(self) -> None:
         """Provisional entries (recorded at the reference price when the order
-        was merely 'accepted', e.g. placed after hours) get rewritten to the
-        true fill price once the broker reports it. ATR stop/target distances
-        are preserved by shifting them with the entry. Dead orders are dropped.
+        was merely 'accepted') get rewritten to the true fill price once the
+        broker reports it. ATR stop/target distances are preserved by shifting
+        them with the entry. Dead orders are dropped.
         """
         for pos in self.state.open_positions:  # real book only; shadow has no order
             if pos.filled or not pos.order_id or pos.order_id == "sim":
-                continue
-            # Option positions track the UNDERLYING as entry_price; the option fill price
-            # would corrupt that. Just mark filled — option P&L is premium-based at close.
-            if pos.asset == "option":
-                status, _ = self.executor.get_fill(pos.order_id)
-                if status in ("canceled", "expired", "rejected"):
-                    pos.open = False
-                    pos.closed_at = datetime.now(timezone.utc).isoformat()
-                    notify(f"VOID option {pos.symbol} order {status}")
-                elif status == "filled":
-                    pos.filled = True
                 continue
             try:
                 status, price = self.executor.get_fill(pos.order_id)
@@ -592,16 +380,6 @@ class Engine:
                 pos.filled = True
                 notify(f"FILL {pos.symbol} @ {price:.2f} (reconciled from provisional)")
 
-    def _past_option_time_stop(self) -> bool:
-        """True once we're at/after OPTION_TIME_STOP_ET (charm-unwind window)."""
-        from zoneinfo import ZoneInfo
-        try:
-            hh, mm = (int(x) for x in CONFIG.option_time_stop_et.split(":"))
-        except (ValueError, AttributeError):
-            return False
-        now = datetime.now(ZoneInfo("America/New_York"))
-        return (now.hour, now.minute) >= (hh, mm)
-
     def _past_entry_cutoff(self) -> bool:
         """True once we're at/after ENTRY_CUTOFF_ET. Blocks NEW entries only;
         open positions are still managed and flattened normally."""
@@ -615,8 +393,6 @@ class Engine:
 
     # ── manage exits ──────────────────────────────────────
     def _manage_open(self) -> None:
-        charm_flat = self._past_option_time_stop()
-
         # Lucid EOD flatten: if the flatten window is open and the broker is
         # RithmicBroker, submit a market close for every open futures position.
         # This runs BEFORE the per-position exit loop so the state gets cleaned
@@ -624,10 +400,7 @@ class Engine:
         if self._lucid is not None and self._lucid.should_flatten_now():
             from rithmic_executor import RithmicBroker
             if isinstance(self.executor.broker, RithmicBroker):
-                open_futures = [
-                    p for p in self.state.open_positions
-                    if not p.shadow and p.asset != "option"
-                ]
+                open_futures = [p for p in self.state.open_positions if not p.shadow]
                 if open_futures:
                     notify(
                         f"[Lucid] EOD flatten triggered ({len(open_futures)} positions) "
@@ -653,32 +426,6 @@ class Engine:
                 continue  # entry order still pending — nothing to exit yet
             q = self.data.quote(pos.symbol)
             if not q:
-                continue
-            # 0DTE charm time-stop: flatten all option positions by OPTION_TIME_STOP_ET.
-            # Guards:
-            #  • self._market_open() — don't attempt after 4 PM / before 9:30 AM
-            #  • bounded retry — Alpaca 500s are usually transient, so retry up to
-            #    _OPTION_EXIT_MAX_RETRIES times across scans before parking the
-            #    position, instead of either giving up on the first error or
-            #    hammering the broker every 30 s forever.
-            if charm_flat and self._market_open() and pos.asset == "option" and not pos.shadow:
-                key = (pos.symbol, pos.opened_at)
-                attempts = self._option_exit_attempts.get(key, 0)
-                if attempts < _OPTION_EXIT_MAX_RETRIES:
-                    try:
-                        self.executor.close(pos, q.price, self.state)
-                        notify(f"  TIME-STOP (3:30pm charm): {pos.symbol} {pos.kind}")
-                        self._option_exit_attempts.pop(key, None)  # clear on success
-                    except Exception as e:  # noqa: BLE001
-                        attempts += 1
-                        self._option_exit_attempts[key] = attempts
-                        if attempts < _OPTION_EXIT_MAX_RETRIES:
-                            notify(f"  ! time-stop exit failed {pos.symbol} "
-                                   f"(attempt {attempts}/{_OPTION_EXIT_MAX_RETRIES}): {e} — will retry")
-                        else:
-                            notify(f"  ! time-stop exit failed {pos.symbol} "
-                                   f"(attempt {attempts}/{_OPTION_EXIT_MAX_RETRIES}): {e} — "
-                                   f"parked until restart")
                 continue
             reason = should_exit(pos, q.price)
             if not reason:
