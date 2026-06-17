@@ -42,7 +42,7 @@ Usage in engine.py:
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, time as dtime
+from datetime import date, datetime, time as dtime, timezone
 from zoneinfo import ZoneInfo
 
 from config import CONFIG
@@ -94,6 +94,20 @@ def _parse_time(hhmm: str) -> dtime:
         return dtime(16, 55)
 
 
+def hold_seconds(opened_at: str) -> float:
+    """Seconds a position has been open. `opened_at` is a UTC ISO string
+    (see executor._now). Returns +inf on parse failure so callers fail OPEN:
+    a bad timestamp must never delay a profit exit (treat it as held long
+    enough) nor count the trade as a ≤5s scalp."""
+    try:
+        opened = datetime.fromisoformat(opened_at)
+        if opened.tzinfo is None:
+            opened = opened.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - opened).total_seconds()
+    except (ValueError, TypeError):
+        return float("inf")
+
+
 class LucidRiskManager:
     """Stateless-ish risk layer for Lucid-funded futures accounts.
 
@@ -109,17 +123,59 @@ class LucidRiskManager:
         # If None, we use CONFIG.bankroll_usd as a safe default until the
         # engine provides the real live balance.
         self.day_start_equity: float = initial_equity or CONFIG.bankroll_usd
+        # Microscalping attribution (reset each day): gross realized profit from
+        # winning trades, and the slice of it earned on trades held ≤5s.
+        self._win_profit_total: float = 0.0
+        self._win_profit_scalp: float = 0.0
         log.info(
             f"[LucidRisk] initialized | day_start_equity=${self.day_start_equity:,.2f} | "
             f"drawdown_limit=${CONFIG.lucid_daily_drawdown_usd:,.2f} | "
             f"max_contracts={CONFIG.lucid_max_contracts} | "
-            f"flatten_at={CONFIG.lucid_flatten_time}"
+            f"flatten_at={CONFIG.lucid_flatten_time} | "
+            f"min_profit_hold={CONFIG.lucid_min_profit_hold_sec}s | "
+            f"scalp_profit_limit={CONFIG.lucid_scalp_profit_pct_limit:.0%}"
         )
 
     def reset_day(self, current_equity: float) -> None:
         """Call at the start of each new trading day to anchor the drawdown base."""
         self.day_start_equity = current_equity
+        self._win_profit_total = 0.0
+        self._win_profit_scalp = 0.0
         log.info(f"[LucidRisk] day reset | new base=${current_equity:,.2f}")
+
+    # ── Microscalping guard (Lucid: >50% of profit from ≤5s holds is banned) ──
+    def record_close(self, pnl_usd: float, held_sec: float) -> None:
+        """Record a closed trade for scalp-profit attribution. Only winning
+        trades feed the pool — the firm rule is about the source of *profit*."""
+        if pnl_usd <= 0:
+            return
+        self._win_profit_total += pnl_usd
+        if held_sec <= CONFIG.lucid_min_profit_hold_sec:
+            self._win_profit_scalp += pnl_usd
+
+    def scalp_profit_share(self) -> float:
+        """Fraction of winning profit earned on ≤5s holds (0.0 if no wins yet)."""
+        if self._win_profit_total <= 0:
+            return 0.0
+        return self._win_profit_scalp / self._win_profit_total
+
+    def scalp_profit_ok(self) -> tuple[bool, str]:
+        """Block NEW entries once ≤5s winners dominate realized profit, before
+        the Lucid 0.50 hard cap is breached. Returns (ok, reason)."""
+        share = self.scalp_profit_share()
+        if share >= CONFIG.lucid_scalp_profit_pct_limit:
+            reason = (
+                f"Lucid microscalp guard: {share:.0%} of profit from ≤"
+                f"{CONFIG.lucid_min_profit_hold_sec:g}s holds "
+                f"(limit {CONFIG.lucid_scalp_profit_pct_limit:.0%}, firm cap 50%)"
+            )
+            return False, reason
+        return True, "ok"
+
+    def profit_exit_held_long_enough(self, opened_at: str) -> bool:
+        """True if a take-profit exit is allowed now (held ≥ min hold). Callers
+        MUST bypass this for stop-losses — never delay a risk exit."""
+        return hold_seconds(opened_at) >= CONFIG.lucid_min_profit_hold_sec
 
     # ── 1. EOD Drawdown Kill-Switch ────────────────────────────────────────
 
@@ -234,6 +290,7 @@ class LucidRiskManager:
           2. Economic release blackout
           3. EOD drawdown limit
           4. Max contracts per symbol
+          5. Microscalping profit-share guard
         """
         # 1. Flatten window: if we should be flat, we shouldn't be opening
         if self.should_flatten_now():
@@ -253,6 +310,12 @@ class LucidRiskManager:
         contr_ok, contr_reason = self.contracts_ok(sig.symbol, state)
         if not contr_ok:
             return False, contr_reason
+
+        # 5. Microscalping guard: stop opening new trades once ≤5s winners
+        #    make up too large a share of realized profit.
+        scalp_ok, scalp_reason = self.scalp_profit_ok()
+        if not scalp_ok:
+            return False, scalp_reason
 
         return True, "ok"
 

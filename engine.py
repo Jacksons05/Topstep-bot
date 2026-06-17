@@ -23,7 +23,8 @@ from marketdata import MarketData
 from news import NewsFeed
 from events import Events
 from macro import Macro
-from notifier import notify, signal_msg
+from notifier import notify, signal_msg, trade_ticket, exit_ticket
+from lucid_risk import hold_seconds
 from regime import classify_last
 from risk import check, circuit_breaker, kill_switch_active, should_exit
 from signals import Signal, label_for, quant_signal
@@ -284,13 +285,15 @@ class Engine:
 
             qty = max(1, int(size / sig.price)) if sig.price > 0 else 0
             try:
-                self.executor.open(sig, size, self.state)
+                pos = self.executor.open(sig, size, self.state)
             except Exception as e:  # noqa: BLE001
                 notify(f"  ! execute failed {sig.symbol}: {e}")
                 continue
             self.cooldowns[sig.symbol] = time.time()
             notify("OPEN  " + signal_msg(sig, qty, size, self.executor.mode) +
                    f" [regime={rk} sz={regime_params['size_mult']:.0%}]")
+            if CONFIG.manual_tickets and not pos.shadow:
+                notify(trade_ticket(pos, sig.confidence, sig.confidence_label))
 
         self.state.save()
 
@@ -442,10 +445,15 @@ class Engine:
                             q = self.data.quote(pos.symbol)
                             exit_price = q.price if q else pos.entry_price
                             self.state.close(pos, exit_price)
+                            self._lucid.record_close(
+                                pos.pnl_usd, hold_seconds(pos.opened_at)
+                            )
                             notify(
                                 f"  LUCID-FLATTEN {pos.symbol} qty={pos.qty} "
                                 f"@ ~{exit_price:.2f}"
                             )
+                            if CONFIG.manual_tickets:
+                                notify(exit_ticket(pos, exit_price, "EOD flatten"))
                     except Exception as e:  # noqa: BLE001
                         notify(f"  ! Lucid flatten error: {e}")
 
@@ -460,10 +468,27 @@ class Engine:
             reason = should_exit(pos, q.price)
             if not reason:
                 continue
+            # Lucid microscalp guard: defer a take-profit exit until the position
+            # has been open ≥ min hold. Stop-losses are NEVER delayed (risk first).
+            if (
+                reason == "take-profit"
+                and self._lucid is not None
+                and not pos.shadow
+                and not self._lucid.profit_exit_held_long_enough(pos.opened_at)
+            ):
+                notify(
+                    f"  hold (Lucid <{CONFIG.lucid_min_profit_hold_sec:g}s): "
+                    f"deferring take-profit {pos.symbol}"
+                )
+                continue
             try:
                 self.executor.close(pos, q.price, self.state)
             except Exception as e:  # noqa: BLE001
                 notify(f"  ! exit failed {pos.symbol}: {e}")
                 continue
+            if self._lucid is not None and not pos.shadow:
+                self._lucid.record_close(pos.pnl_usd, hold_seconds(pos.opened_at))
             tag = "EXIT-SHADOW" if pos.shadow else "CLOSE"
             notify(f"{tag} {reason} {pos.symbol} @ {q.price:.2f} pnl=${pos.pnl_usd:.2f}")
+            if CONFIG.manual_tickets and not pos.shadow:
+                notify(exit_ticket(pos, q.price, reason))

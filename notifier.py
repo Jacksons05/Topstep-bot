@@ -32,6 +32,34 @@ def signal_msg(sig: Signal, qty: int, size_usd: float, mode: str) -> str:
     )
 
 
+def _close_action(side: str) -> str:
+    """The order side that flattens an open position."""
+    return "SELL" if side == "BUY" else "BUY"
+
+
+def trade_ticket(pos: "Position", conf: float, conf_label: str) -> str:
+    """Copy-paste manual-execution ticket for the Tradesea DOM (signal-only mode)."""
+    head = "🟢 LONG" if pos.side == "BUY" else "🔴 SHORT"
+    risk = abs(pos.entry_price - pos.stop)
+    reward = abs(pos.target - pos.entry_price)
+    rr = f"  |  R:R {reward / risk:.1f}" if risk > 0 else ""
+    return (
+        "📋 TRADE TICKET → execute manually on Tradesea\n"
+        f"   {head}  {pos.side} {pos.qty} {pos.symbol} @ ~{pos.entry_price:.2f}\n"
+        f"   STOP {pos.stop:.2f}   TARGET {pos.target:.2f}{rr}\n"
+        f"   conf {conf:.2f} ({conf_label}) | {pos.thesis[:100]}"
+    )
+
+
+def exit_ticket(pos: "Position", price: float, reason: str) -> str:
+    """Copy-paste manual-exit ticket for the Tradesea DOM (signal-only mode)."""
+    return (
+        "📋 EXIT TICKET → execute manually on Tradesea\n"
+        f"   ✖ {_close_action(pos.side)} {pos.qty} {pos.symbol} @ ~{price:.2f} ({reason})\n"
+        f"   est pnl ${pos.pnl_usd:.2f}"
+    )
+
+
 def notify(msg: str) -> None:
     log(msg)
     if CONFIG.discord_webhook:

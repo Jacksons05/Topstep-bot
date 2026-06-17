@@ -260,6 +260,19 @@ class Config:
     lucid_max_contracts: int = _i("LUCID_MAX_CONTRACTS", 3)            # max open contracts per symbol
     lucid_flatten_time: str = _s("LUCID_FLATTEN_TIME", "16:55")        # flatten all by this ET time
     lucid_econ_blackout_min: int = int(os.getenv("LUCID_ECON_BLACKOUT_MIN", "5"))  # blackout window around econ releases (minutes)
+    # Microscalping guard (Lucid bans >50% of profit from trades held ≤5s).
+    # Two-part defense: (1) hold profit-target exits until the position has been
+    # open at least lucid_min_profit_hold_sec (stop-losses are NEVER delayed);
+    # (2) track the share of realized profit coming from ≤5s winners and block
+    # NEW entries once it crosses lucid_scalp_profit_pct_limit (set below Lucid's
+    # 0.50 hard cap as a safety buffer).
+    lucid_min_profit_hold_sec: float = _f("LUCID_MIN_PROFIT_HOLD_SEC", 5.0)
+    lucid_scalp_profit_pct_limit: float = _f("LUCID_SCALP_PROFIT_PCT_LIMIT", 0.40)
+    # Signal-only bridge: until the bot has direct Rithmic API access, it runs on
+    # the Sim broker and emits copy-paste TRADE/EXIT tickets for the user to
+    # execute manually on the Tradesea dashboard. Set MANUAL_TICKETS=false once
+    # live API execution is wired (no need for hand-off tickets then).
+    manual_tickets: bool = _b("MANUAL_TICKETS", True)
     # Futures symbols to watch when Lucid mode is active (comma-separated roots)
     futures_symbols: tuple[str, ...] = _csv("FUTURES_SYMBOLS", "ES,NQ,MES,MNQ")
 
