@@ -188,7 +188,7 @@ class Config:
 
     # ── trading / sizing ──────────────────────────────────
     trading_mode: str = _s("TRADING_MODE", "paper")        # paper | live
-    bankroll_usd: float = _f("BANKROLL_USD", 100_000)      # equity base for sizing
+    bankroll_usd: float = _f("BANKROLL_USD", 50_000)       # equity base for sizing (Topstep $50K account start)
     max_position_pct: float = _f("MAX_POSITION_PCT", 0.05)  # max 5% per name
     max_concurrent: int = _i("MAX_CONCURRENT", 20)
     min_executable_size_usd: float = _f("MIN_EXECUTABLE_SIZE_USD", 100)
@@ -266,17 +266,38 @@ class Config:
     projectx_rtc_base: str = _s("PROJECTX_RTC_BASE", "https://rtc.topstepx.com")
     projectx_account_name: str = _s("PROJECTX_ACCOUNT_NAME")          # blank → first tradable account
     projectx_live: bool = _b("PROJECTX_LIVE", False)                   # False = sim/eval data sub; True = funded/live
-    # Lucid risk parameters
-    lucid_daily_drawdown_usd: float = _f("LUCID_DAILY_DRAWDOWN_USD", 1500.0)  # EOD drawdown limit ($)
-    lucid_max_contracts: int = _i("LUCID_MAX_CONTRACTS", 3)            # max open contracts per symbol
-    lucid_flatten_time: str = _s("LUCID_FLATTEN_TIME", "16:55")        # flatten all by this ET time
+    # ── Topstep $50K funded-account rules (No-Activation-Fee + Responsible Trading) ──
+    # These are the live risk constraints enforced by lucid_risk.TopstepRiskManager.
+    # Defaults are the official Topstep $50K spec (2026). For $100K/$150K, override
+    # via env: account_size 100000/150000, trailing_mll 3000/4500, daily_loss 2000/3000,
+    # max_contracts 10/15, profit_target 6000/9000.
+    topstep_account_size: float = _f("TOPSTEP_ACCOUNT_SIZE", 50_000.0)        # starting balance
+    topstep_trailing_mll: float = _f("TOPSTEP_TRAILING_MLL", 2_000.0)         # trailing Max Loss Limit ($) — HARD fail rule
+    topstep_profit_target: float = _f("TOPSTEP_PROFIT_TARGET", 3_000.0)       # Combine profit objective
+    topstep_max_contracts: int = _i("TOPSTEP_MAX_CONTRACTS", 5)               # max ACCOUNT-WIDE open minis (50 micros @ 10:1)
+    topstep_micro_ratio: int = _i("TOPSTEP_MICRO_RATIO", 10)                  # micros per 1 mini toward the limit (TopstepX)
+    # Responsible Trading Advantage: adds a Daily Loss Limit. ON per the funded plan.
+    topstep_responsible_trading: bool = _b("TOPSTEP_RESPONSIBLE_TRADING", True)
+    topstep_daily_loss_limit: float = _f("TOPSTEP_DAILY_LOSS_LIMIT", 1_000.0)  # DLL ($) — deactivates the day
+    # Consistency rule (payout eligibility): best single day ≤ this fraction of
+    # cumulative profit. Topstep: 50%. Enforced as a per-day profit cap that stops
+    # NEW entries once today's profit reaches consistency_pct * profit_target.
+    topstep_consistency_pct: float = _f("TOPSTEP_CONSISTENCY_PCT", 0.50)
+    # Topstep does NOT ban scalping (unlike the old Lucid ≤5s rule). The microscalp
+    # guard below is therefore OFF by default; flip on only if your firm reinstates it.
+    topstep_scalp_guard_enabled: bool = _b("TOPSTEP_SCALP_GUARD_ENABLED", False)
+
+    # Lucid risk parameters (retuned for Topstep $50K; legacy names kept for the
+    # risk layer + tests). lucid_daily_drawdown_usd now mirrors the DLL.
+    lucid_daily_drawdown_usd: float = _f("LUCID_DAILY_DRAWDOWN_USD", 1_000.0)  # = Topstep daily loss limit ($)
+    lucid_max_contracts: int = _i("LUCID_MAX_CONTRACTS", 5)            # account-wide max open contracts
+    lucid_flatten_time: str = _s("LUCID_FLATTEN_TIME", "16:08")        # flatten all by this ET (before 16:10 futures close)
     lucid_econ_blackout_min: int = int(os.getenv("LUCID_ECON_BLACKOUT_MIN", "5"))  # blackout window around econ releases (minutes)
-    # Microscalping guard (Lucid bans >50% of profit from trades held ≤5s).
-    # Two-part defense: (1) hold profit-target exits until the position has been
-    # open at least lucid_min_profit_hold_sec (stop-losses are NEVER delayed);
-    # (2) track the share of realized profit coming from ≤5s winners and block
-    # NEW entries once it crosses lucid_scalp_profit_pct_limit (set below Lucid's
-    # 0.50 hard cap as a safety buffer).
+    # Microscalping guard — DORMANT under Topstep (topstep_scalp_guard_enabled=False).
+    # Kept for the optional ≤Ns profit-share attribution + unit tests. When the guard
+    # is enabled: (1) hold profit-target exits until open ≥ lucid_min_profit_hold_sec
+    # (stop-losses are NEVER delayed); (2) block NEW entries once ≤Ns winners exceed
+    # lucid_scalp_profit_pct_limit of realized profit.
     lucid_min_profit_hold_sec: float = _f("LUCID_MIN_PROFIT_HOLD_SEC", 5.0)
     lucid_scalp_profit_pct_limit: float = _f("LUCID_SCALP_PROFIT_PCT_LIMIT", 0.40)
     # Signal-only bridge: until the bot has direct Rithmic API access, it runs on

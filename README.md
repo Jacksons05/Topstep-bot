@@ -1,10 +1,11 @@
-# JARVIS Lucid — agentic futures trading engine
+# JARVIS Topstep — agentic futures trading engine
 
-The **Lucid funded-futures** fork of the JARVIS bot. Reads market structure +
-news, runs a Claude agent team, and executes futures through **Rithmic** with
-the **Lucid risk layer** (EOD-drawdown kill-switch, econ blackout, contract
-cap, EOD flatten). Built to grow an edge iteratively — feed it data, tune the
-streams, measure.
+The **Topstep funded-futures** fork of the JARVIS bot. Reads market structure +
+news, runs a Claude agent team, and executes futures through **ProjectX /
+TopstepX** with the **Topstep $50K risk layer** (trailing Max Loss Limit, $1,000
+Daily Loss Limit via Responsible Trading, account-wide 5-contract cap,
+consistency cap, econ blackout, EOD flatten). Built to grow an edge iteratively
+— feed it data, tune the streams, measure.
 
 > **This is the futures fork.** The Alpaca/CBOE equity-and-options path
 > (0DTE GEX structures, dealer-positioning confluence) was stripped out — that

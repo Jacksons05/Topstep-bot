@@ -1,43 +1,49 @@
-"""Lucid Trading-specific risk rules.
+"""Topstep $50K funded-account risk rules.
 
 Layers on top of the existing risk.py stack — it never replaces or disables
 the base rules (daily drawdown %, circuit breakers, kill switch, cooldowns).
-Instead it adds Lucid-specific constraints that make sense for a funded
-futures account:
+Instead it enforces the Topstep $50K Trading Combine / Express Funded Account
+spec (No-Activation-Fee path, Responsible Trading Advantage ON):
 
-  1. EOD Drawdown Kill-Switch
-       Lucid measures drawdown at end-of-day against the prior day's EOD
-       balance, not on an intraday trailing basis. We mirror that here:
-       LUCID_DAILY_DRAWDOWN_USD is the maximum dollar loss for the day before
-       new entries are blocked. (Separate from DAILY_DRAWDOWN_PCT which is
-       the intraday % guard.)
+  1. Trailing Maximum Loss Limit  (HARD FAIL RULE)
+       Topstep's only hard rule. The MLL starts $2,000 below the account
+       start ($48,000 for a $50K account) and trails UP intraday in real time
+       on combined realized + unrealized equity. It LOCKS permanently at the
+       starting balance ($50,000) once peak equity reaches start + buffer
+       ($52,000). If live equity ever touches the floor → account liquidated.
+       We mirror it: track intraday peak equity, floor = min(peak - buffer,
+       account_size); block new entries (and flatten) as equity approaches it.
 
-  2. Max Contracts Per Symbol
-       Hard cap on open contracts per futures root. Default: 3 per symbol
-       (LUCID_MAX_CONTRACTS). Prevents over-sizing in a single name.
+  2. Daily Loss Limit  (Responsible Trading Advantage)
+       $1,000 for the $50K. Hitting it deactivates the DAY (not the account).
+       Measured as today's realized + open P&L vs the day's starting balance.
 
-  3. EOD Position Flatten
-       All open positions must be flat by LUCID_FLATTEN_TIME (default 16:55
-       ET). This fires BEFORE the Lucid EOD drawdown calculation window.
-       The engine calls should_flatten_now() once per scan loop and, when
-       True, calls rithmic_broker.flatten_all() on the open book.
+  3. Max Contracts (ACCOUNT-WIDE)
+       5 minis for the $50K (50 micros at the 10:1 ratio). This is a total
+       across all symbols, NOT per-symbol.
 
-  4. Economic Release Blackout
-       No new entries within LUCID_ECON_BLACKOUT_MIN (default 5) minutes
-       before or after a major scheduled economic release. Checks against a
-       hardcoded list of high-impact release times; for live use you should
-       back this with a live economic calendar (Finnhub or similar).
+  4. Consistency Rule  (payout eligibility)
+       Best single day ≤ 50% of cumulative profit. Enforced live as a per-day
+       profit cap: stop opening NEW trades once today's profit reaches
+       consistency_pct * profit_target ($1,500). Exits are never blocked.
+
+  5. EOD Position Flatten + Economic Release Blackout
+       Flatten all by LUCID_FLATTEN_TIME (16:08 ET, before the 16:10 futures
+       close) to avoid carrying unrealized risk against the trailing MLL.
+       No new entries within LUCID_ECON_BLACKOUT_MIN of a major macro release.
+
+NOTE: Topstep does NOT ban scalping — the legacy Lucid ≤5s microscalp guard is
+DORMANT (TOPSTEP_SCALP_GUARD_ENABLED=False) but kept for optional use + tests.
 
 Usage in engine.py:
-    from lucid_risk import LucidRiskManager
-    lucid = LucidRiskManager()
+    from lucid_risk import TopstepRiskManager
+    ts = TopstepRiskManager(initial_equity=<live balance>)
 
-    # In run_once(), before the existing check() call:
-    if not lucid.pre_trade_ok(sig, state):
+    # each scan, before the check() call:
+    ts.update_equity(equity)
+    breached, why = ts.risk_breach(equity, state, unrealized)   # → flatten + halt day
+    if not ts.pre_trade_ok(sig, state, equity, unrealized):
         continue
-    # In _manage_open() or just before the scan loop:
-    if lucid.should_flatten_now():
-        executor.broker.flatten_all()
 """
 from __future__ import annotations
 
@@ -108,40 +114,79 @@ def hold_seconds(opened_at: str) -> float:
         return float("inf")
 
 
-class LucidRiskManager:
-    """Stateless-ish risk layer for Lucid-funded futures accounts.
+class TopstepRiskManager:
+    """Risk layer enforcing the Topstep $50K funded-account spec.
 
-    Most methods are pure functions of the current time / state snapshot.
-    The instance holds a `day_start_equity` reference that is captured once
-    at construction (or reset via reset_day()) so EOD drawdown math is
-    consistent within a session.
+    Most methods are pure functions of the current equity / state snapshot.
+    The instance carries two pieces of session state:
+      * day_start_equity — anchors the Daily Loss Limit (reset each day).
+      * peak_equity       — highest combined (realized+unrealized) equity seen
+                            this account cycle; drives the TRAILING Max Loss
+                            Limit. It is NOT reset daily — the MLL trails across
+                            the whole cycle and locks once it reaches the start
+                            balance. update_equity() must be called each scan.
     """
 
     def __init__(self, initial_equity: float | None = None) -> None:
-        # Base equity at the start of the trading day — used to calculate
-        # the Lucid EOD drawdown limit. Capture from account on startup.
-        # If None, we use CONFIG.bankroll_usd as a safe default until the
-        # engine provides the real live balance.
-        self.day_start_equity: float = initial_equity or CONFIG.bankroll_usd
+        # Live equity at startup. Falls back to the configured account size.
+        start = initial_equity or CONFIG.topstep_account_size
+        self.account_size: float = CONFIG.topstep_account_size
+        self.mll_buffer: float = CONFIG.topstep_trailing_mll
+        self.day_start_equity: float = start
+        # Peak equity seeds at max(start, account_size): a fresh account starts
+        # at the balance, so the floor begins at account_size - buffer.
+        self.peak_equity: float = max(start, self.account_size)
         # Microscalping attribution (reset each day): gross realized profit from
-        # winning trades, and the slice of it earned on trades held ≤5s.
+        # winning trades, and the slice of it earned on trades held ≤Ns.
         self._win_profit_total: float = 0.0
         self._win_profit_scalp: float = 0.0
         log.info(
-            f"[LucidRisk] initialized | day_start_equity=${self.day_start_equity:,.2f} | "
-            f"drawdown_limit=${CONFIG.lucid_daily_drawdown_usd:,.2f} | "
-            f"max_contracts={CONFIG.lucid_max_contracts} | "
-            f"flatten_at={CONFIG.lucid_flatten_time} | "
-            f"min_profit_hold={CONFIG.lucid_min_profit_hold_sec}s | "
-            f"scalp_profit_limit={CONFIG.lucid_scalp_profit_pct_limit:.0%}"
+            f"[Topstep] initialized | account=${self.account_size:,.0f} | "
+            f"start_equity=${start:,.2f} | trailing_MLL=${self.mll_buffer:,.0f} "
+            f"(floor=${self.mll_floor():,.2f}) | daily_loss_limit="
+            f"${CONFIG.topstep_daily_loss_limit:,.0f} "
+            f"(responsible_trading={CONFIG.topstep_responsible_trading}) | "
+            f"max_contracts={CONFIG.topstep_max_contracts} (account-wide) | "
+            f"profit_target=${CONFIG.topstep_profit_target:,.0f} | "
+            f"consistency={CONFIG.topstep_consistency_pct:.0%} | "
+            f"flatten_at={CONFIG.lucid_flatten_time} ET"
         )
 
     def reset_day(self, current_equity: float) -> None:
-        """Call at the start of each new trading day to anchor the drawdown base."""
+        """Call at the start of each new trading day to anchor the Daily Loss
+        Limit. Does NOT reset peak_equity — the trailing MLL spans the cycle."""
         self.day_start_equity = current_equity
+        self.peak_equity = max(self.peak_equity, current_equity)
         self._win_profit_total = 0.0
         self._win_profit_scalp = 0.0
-        log.info(f"[LucidRisk] day reset | new base=${current_equity:,.2f}")
+        log.info(f"[Topstep] day reset | day_base=${current_equity:,.2f} | "
+                 f"peak=${self.peak_equity:,.2f} | floor=${self.mll_floor():,.2f}")
+
+    # ── Trailing Maximum Loss Limit (the one HARD Topstep rule) ─────────────
+
+    def update_equity(self, equity: float) -> None:
+        """Ratchet the intraday peak equity. Call once per scan with the best
+        available equity estimate (realized + unrealized)."""
+        if equity > self.peak_equity:
+            self.peak_equity = equity
+
+    def mll_floor(self) -> float:
+        """Current trailing MLL floor. Trails up with peak equity but locks at
+        the starting balance (account_size) once peak ≥ account_size + buffer."""
+        return min(self.peak_equity - self.mll_buffer, self.account_size)
+
+    def trailing_mll_ok(self, equity: float) -> tuple[bool, str]:
+        """False (= breach) when live equity has touched/crossed the MLL floor."""
+        floor = self.mll_floor()
+        if equity <= floor:
+            reason = (
+                f"Topstep trailing MLL breached: equity=${equity:,.2f} "
+                f"<= floor=${floor:,.2f} (peak=${self.peak_equity:,.2f}, "
+                f"buffer=${self.mll_buffer:,.0f})"
+            )
+            log.warning(f"[Topstep] LIQUIDATE: {reason}")
+            return False, reason
+        return True, "ok"
 
     # ── Microscalping guard (Lucid: >50% of profit from ≤5s holds is banned) ──
     def record_close(self, pnl_usd: float, held_sec: float) -> None:
@@ -177,49 +222,65 @@ class LucidRiskManager:
         MUST bypass this for stop-losses — never delay a risk exit."""
         return hold_seconds(opened_at) >= CONFIG.lucid_min_profit_hold_sec
 
-    # ── 1. EOD Drawdown Kill-Switch ────────────────────────────────────────
+    # ── Daily Loss Limit (Responsible Trading Advantage) ────────────────────
 
-    def daily_drawdown_ok(self, state: State) -> tuple[bool, str]:
-        """Check Lucid EOD-style drawdown against LUCID_DAILY_DRAWDOWN_USD.
+    def daily_loss_ok(self, state: State, unrealized: float = 0.0) -> tuple[bool, str]:
+        """Check today's P&L against the Topstep Daily Loss Limit.
 
-        Lucid measures drawdown from the prior session's close, not intraday
-        peak. We approximate that here by comparing today's realized + open
-        P&L against the day_start_equity captured at session open.
+        day_pnl = realized trades closed today + open-position MTM (unrealized).
+        Hitting the limit deactivates the DAY (engine flattens + halts new
+        entries until the next session). Off entirely if Responsible Trading
+        is disabled.
 
-        Returns (ok, reason). ok=False means new entries are blocked.
+        Returns (ok, reason). ok=False means the day is done.
         """
-        limit = CONFIG.lucid_daily_drawdown_usd
-        # Total day P&L: realized trades closed today + MTM on open positions.
-        day_pnl = state.daily_pnl()   # defined in state.py — realized gains today
+        if not CONFIG.topstep_responsible_trading:
+            return True, "ok"
+        limit = CONFIG.topstep_daily_loss_limit
+        day_pnl = state.daily_pnl() + unrealized
         if day_pnl <= -limit:
             reason = (
-                f"Lucid EOD drawdown hit: day_pnl=${day_pnl:.2f} "
-                f"exceeds limit -${limit:.2f}"
+                f"Topstep daily loss limit hit: day_pnl=${day_pnl:,.2f} "
+                f"<= -${limit:,.0f} — day deactivated"
             )
-            log.warning(f"[LucidRisk] KILL: {reason}")
+            log.warning(f"[Topstep] DAY HALT: {reason}")
             return False, reason
         return True, "ok"
 
-    # ── 2. Max Contracts Per Symbol ─────────────────────────────────────────
+    # ── Max Contracts (ACCOUNT-WIDE, all symbols) ───────────────────────────
 
-    def contracts_ok(self, symbol: str, state: State) -> tuple[bool, str]:
-        """Enforce the max-contracts-per-symbol cap (LUCID_MAX_CONTRACTS).
+    def contracts_ok(self, symbol: str | None, state: State) -> tuple[bool, str]:
+        """Enforce the account-wide max-contracts cap (TOPSTEP_MAX_CONTRACTS).
 
-        Counts all open positions in `symbol` (not just the real book —
-        shadow/cramer positions are excluded since they have no real exposure).
+        Topstep limits TOTAL open contracts across every symbol, not per-name.
+        Counts the real book only (shadow/cramer positions have no exposure).
+        `symbol` is accepted for call-site compatibility but not used for the
+        cap (the limit is account-wide).
         """
-        limit = CONFIG.lucid_max_contracts
-        open_in_sym = [
-            p for p in state.open_positions
-            if p.symbol == symbol.upper() and not p.shadow
-        ]
-        n = sum(int(p.qty) for p in open_in_sym)
+        limit = CONFIG.topstep_max_contracts
+        n = sum(int(p.qty) for p in state.open_positions if not p.shadow)
         if n >= limit:
+            reason = f"Topstep max contracts: {n} open account-wide, limit={limit}"
+            log.info(f"[Topstep] block: {reason}")
+            return False, reason
+        return True, "ok"
+
+    # ── Consistency rule (best day ≤ pct of cumulative profit) ──────────────
+
+    def consistency_ok(self, state: State) -> tuple[bool, str]:
+        """Stop opening NEW trades once today's profit reaches
+        consistency_pct * profit_target (the per-day cap that keeps any single
+        day ≤ 50% of the cumulative profit needed to pass). Never blocks exits.
+        """
+        cap = CONFIG.topstep_consistency_pct * CONFIG.topstep_profit_target
+        day_profit = state.daily_pnl()
+        if day_profit >= cap:
             reason = (
-                f"Lucid max contracts: {n} open in {symbol}, "
-                f"limit={limit}"
+                f"Topstep consistency cap: today +${day_profit:,.2f} "
+                f">= ${cap:,.0f} ({CONFIG.topstep_consistency_pct:.0%} of "
+                f"${CONFIG.topstep_profit_target:,.0f} target) — no new entries today"
             )
-            log.info(f"[LucidRisk] block: {reason}")
+            log.info(f"[Topstep] block: {reason}")
             return False, reason
         return True, "ok"
 
@@ -277,54 +338,96 @@ class LucidRiskManager:
 
         return False, "ok"
 
+    # ── Hard breach check (call each scan → flatten + halt the day) ─────────
+
+    def risk_breach(self, equity: float, state: State,
+                    unrealized: float = 0.0) -> tuple[bool, str]:
+        """True when a Topstep account-protection limit is breached and the
+        engine MUST flatten everything immediately:
+          * trailing Maximum Loss Limit (account-fail — never recoverable)
+          * Daily Loss Limit (day deactivated until next session)
+
+        Distinct from pre_trade_ok, which only blocks NEW entries. Stop-losses
+        and this breach flatten always take priority over any hold logic.
+        """
+        mll_ok, mll_reason = self.trailing_mll_ok(equity)
+        if not mll_ok:
+            return True, mll_reason
+        dll_ok, dll_reason = self.daily_loss_ok(state, unrealized)
+        if not dll_ok:
+            return True, dll_reason
+        return False, "ok"
+
     # ── Combined pre-trade gate ─────────────────────────────────────────────
 
-    def pre_trade_ok(self, sig: Signal, state: State) -> tuple[bool, str]:
-        """Single call that runs all Lucid-specific checks in sequence.
+    def pre_trade_ok(self, sig: Signal, state: State, equity: float | None = None,
+                     unrealized: float = 0.0) -> tuple[bool, str]:
+        """Single call that runs all Topstep checks before opening a new trade.
 
         Returns (ok, reason). Called in engine.run_once() BEFORE the existing
-        risk.check() call so Lucid blocks stack on top of the base rules.
+        risk.check() call so Topstep blocks stack on top of the base rules.
+        `equity` should be the live realized+unrealized account equity; when
+        omitted it falls back to account_size + day P&L + unrealized.
 
         Check order (fast / cheap checks first):
           1. EOD flatten window active → block all new entries
           2. Economic release blackout
-          3. EOD drawdown limit
-          4. Max contracts per symbol
-          5. Microscalping profit-share guard
+          3. Trailing Maximum Loss Limit (hard)
+          4. Daily Loss Limit (Responsible Trading)
+          5. Account-wide contract cap
+          6. Consistency per-day profit cap
+          7. Microscalping guard (only if TOPSTEP_SCALP_GUARD_ENABLED)
         """
+        if equity is None:
+            equity = self.account_size + state.daily_pnl() + unrealized
+
         # 1. Flatten window: if we should be flat, we shouldn't be opening
         if self.should_flatten_now():
-            return False, "Lucid flatten window active (≥ LUCID_FLATTEN_TIME)"
+            return False, "Topstep flatten window active (≥ LUCID_FLATTEN_TIME)"
 
         # 2. Economic release blackout
         near_rel, rel_reason = self.near_economic_release(CONFIG.lucid_econ_blackout_min)
         if near_rel:
-            return False, f"Lucid econ blackout: {rel_reason}"
+            return False, f"Topstep econ blackout: {rel_reason}"
 
-        # 3. EOD drawdown
-        dd_ok, dd_reason = self.daily_drawdown_ok(state)
-        if not dd_ok:
-            return False, dd_reason
+        # 3. Trailing MLL (hard fail rule)
+        mll_ok, mll_reason = self.trailing_mll_ok(equity)
+        if not mll_ok:
+            return False, mll_reason
 
-        # 4. Contract cap
+        # 4. Daily loss limit
+        dll_ok, dll_reason = self.daily_loss_ok(state, unrealized)
+        if not dll_ok:
+            return False, dll_reason
+
+        # 5. Account-wide contract cap
         contr_ok, contr_reason = self.contracts_ok(sig.symbol, state)
         if not contr_ok:
             return False, contr_reason
 
-        # 5. Microscalping guard: stop opening new trades once ≤5s winners
-        #    make up too large a share of realized profit.
-        scalp_ok, scalp_reason = self.scalp_profit_ok()
-        if not scalp_ok:
-            return False, scalp_reason
+        # 6. Consistency per-day profit cap
+        cons_ok, cons_reason = self.consistency_ok(state)
+        if not cons_ok:
+            return False, cons_reason
+
+        # 7. Microscalping guard — dormant under Topstep unless explicitly enabled
+        if CONFIG.topstep_scalp_guard_enabled:
+            scalp_ok, scalp_reason = self.scalp_profit_ok()
+            if not scalp_ok:
+                return False, scalp_reason
 
         return True, "ok"
+
+
+# Backwards-compatible alias: existing imports / tests use LucidRiskManager.
+LucidRiskManager = TopstepRiskManager
 
 
 # ── Convenience module-level functions (for callers that don't hold an instance) ──
 
 def should_flatten_now() -> bool:
     """Module-level alias for quick one-off checks without an instance."""
-    return LucidRiskManager().should_flatten_now()
+    return TopstepRiskManager().should_flatten_now()
 
 
 def near_economic_release(blackout_min: int = 5) -> tuple[bool, str]:

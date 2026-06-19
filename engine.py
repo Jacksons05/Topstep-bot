@@ -60,6 +60,9 @@ class Engine:
         # moved since its last evaluation. {symbol: (direction, strength_bucket)}
         self._eval_cache: dict[str, tuple[str, float]] = {}
         self._lucid_last_reset: date | None = None
+        # Topstep: True once a daily-loss / trailing-MLL breach has flattened the
+        # book — blocks all new entries until the next session (cleared on reset).
+        self._topstep_day_halt: bool = False
         self._oflow = None  # ProjectXOrderFlowFeed when a live ProjectX feed is up
 
         # ── Lucid / ProjectX (TopstepX) mode ───────────────────────────────
@@ -71,21 +74,23 @@ class Engine:
         if CONFIG.lucid_mode_enabled and CONFIG.projectx_username and CONFIG.projectx_api_key:
             try:
                 from projectx_executor import ProjectXBroker
-                from lucid_risk import LucidRiskManager
+                from lucid_risk import TopstepRiskManager
                 self.executor.broker = ProjectXBroker()
-                # Seed the Lucid drawdown base from the live account balance.
-                # Falls back to bankroll_usd if the account call fails (mock mode).
+                # Seed the trailing-MLL peak / day base from the live balance.
+                # Falls back to the account size if the call fails (mock mode).
                 try:
                     acct = self.executor.broker.account()
-                    initial_equity = acct.get("equity") or CONFIG.bankroll_usd
+                    initial_equity = acct.get("equity") or CONFIG.topstep_account_size
                 except Exception:  # noqa: BLE001
-                    initial_equity = CONFIG.bankroll_usd
-                self._lucid = LucidRiskManager(initial_equity=initial_equity)
+                    initial_equity = CONFIG.topstep_account_size
+                self._lucid = TopstepRiskManager(initial_equity=initial_equity)
                 notify(
-                    "⚡ LUCID/PROJECTX MODE ACTIVE — "
+                    "⚡ TOPSTEP/PROJECTX MODE ACTIVE — "
                     f"env={'live' if CONFIG.projectx_live else 'sim'} | "
-                    f"drawdown_limit=${CONFIG.lucid_daily_drawdown_usd:,.2f} | "
-                    f"max_contracts={CONFIG.lucid_max_contracts} | "
+                    f"account=${CONFIG.topstep_account_size:,.0f} | "
+                    f"trailing_MLL=${CONFIG.topstep_trailing_mll:,.0f} | "
+                    f"daily_loss=${CONFIG.topstep_daily_loss_limit:,.0f} | "
+                    f"max_contracts={CONFIG.topstep_max_contracts} | "
                     f"flatten_at={CONFIG.lucid_flatten_time} ET"
                 )
                 # Live order-flow feed: stream quotes + trades + depth off the
@@ -147,7 +152,7 @@ class Engine:
             notify("market closed — idle (no scan)")
             return
 
-        # Refresh Lucid drawdown base at the start of each new trading day
+        # Refresh the Topstep day base (Daily Loss Limit anchor) each new session
         if self._lucid is not None:
             today = date.today()
             if self._lucid_last_reset != today:
@@ -155,10 +160,22 @@ class Engine:
                     acct = self.executor.broker.account()
                     self._lucid.reset_day(acct.get("equity", CONFIG.bankroll_usd))
                     self._lucid_last_reset = today
+                    self._topstep_day_halt = False  # new session — limits reset
                     if self._oflow is not None:
                         self._oflow.reset_session()  # CVD is a since-open running total
                 except Exception:  # noqa: BLE001
                     pass
+
+            # Topstep account protection: ratchet the trailing-MLL peak on the
+            # live equity, then hard-flatten + halt the day on any breach
+            # (trailing Max Loss Limit = account fail; Daily Loss Limit = day off).
+            equity, unrealized = self._account_equity()
+            self._lucid.update_equity(equity)
+            breached, why = self._lucid.risk_breach(equity, self.state, unrealized)
+            if breached and not self._topstep_day_halt:
+                notify(f"🛑 TOPSTEP BREACH — {why} | flattening all & halting new entries")
+                self._topstep_flatten_all(why)
+                self._topstep_day_halt = True
 
         # 0. reconcile provisional entries against real broker fills
         self._reconcile_fills()
@@ -248,12 +265,18 @@ class Engine:
             if black:
                 notify(f"  skip (event blackout: {why}): {sig.symbol}")
                 continue
-            # Lucid risk layer: EOD flatten window, econ blackout, drawdown,
-            # and contract cap — all checked BEFORE the base risk.check() call.
+            # Topstep risk layer: flatten window, econ blackout, trailing MLL,
+            # daily loss limit, account-wide contract cap, consistency cap —
+            # all checked BEFORE the base risk.check() call.
             if self._lucid is not None:
-                lucid_ok, lucid_reason = self._lucid.pre_trade_ok(sig, self.state)
+                if self._topstep_day_halt:
+                    notify(f"  skip (Topstep: day halted by risk breach): {sig.symbol}")
+                    continue
+                equity, unrealized = self._account_equity()
+                lucid_ok, lucid_reason = self._lucid.pre_trade_ok(
+                    sig, self.state, equity, unrealized)
                 if not lucid_ok:
-                    notify(f"  skip (Lucid: {lucid_reason}): {sig.symbol}")
+                    notify(f"  skip (Topstep: {lucid_reason}): {sig.symbol}")
                     continue
             ok, size, reason = check(sig, self.state, cb_mult=cb_mult * (w or 1.0),
                                      cooldowns=self.cooldowns)
@@ -424,38 +447,74 @@ class Engine:
         now = datetime.now(ZoneInfo("America/New_York"))
         return (now.hour, now.minute) >= (hh, mm)
 
+    # ── Topstep equity / breach flatten ───────────────────
+    def _account_equity(self) -> tuple[float, float]:
+        """Best estimate of live account equity for the trailing-MLL / daily-loss
+        guards, plus the open-position unrealized P&L.
+
+        Unrealized is marked the same way state.py books realized P&L
+        ((mark-entry)*qty*dir) so the two stay internally consistent. Equity is
+        the CONSERVATIVE (lower) of two views: the bot's internal book
+        (account_size + realized + unrealized) and — when a real ProjectX
+        balance is available — the live broker balance + unrealized. For live
+        trading the broker balance (with true contract multipliers) is the
+        authority; the internal model is the fallback in sim/mock.
+        """
+        unrealized = 0.0
+        for p in self.state.open_positions:
+            if p.shadow:
+                continue
+            q = self.data.quote(p.symbol)
+            if not q or q.price <= 0:
+                continue
+            direction = 1.0 if p.side == "BUY" else -1.0
+            unrealized += (q.price - p.entry_price) * p.qty * direction
+
+        internal_equity = (CONFIG.topstep_account_size
+                           + self.state.realized_pnl_usd + unrealized)
+        equity = internal_equity
+        try:
+            acct = self.executor.broker.account()
+            src = str(acct.get("source", ""))
+            bal = acct.get("equity")
+            if bal and "mock" not in src and "error" not in src:
+                equity = min(internal_equity, float(bal) + unrealized)
+        except Exception:  # noqa: BLE001
+            pass
+        return equity, unrealized
+
+    def _topstep_flatten_all(self, reason: str) -> None:
+        """Market-close every open real position via ProjectX and book it in
+        state. Used by the breach handler and the EOD flatten window."""
+        from projectx_executor import ProjectXBroker
+        if not isinstance(self.executor.broker, ProjectXBroker):
+            return
+        open_futures = [p for p in self.state.open_positions if not p.shadow]
+        if not open_futures:
+            return
+        notify(f"[Topstep] flatten ({reason}) — {len(open_futures)} position(s) "
+               f"via ProjectX")
+        try:
+            self.executor.broker.flatten_all()
+            for pos in open_futures:
+                q = self.data.quote(pos.symbol)
+                exit_price = q.price if q else pos.entry_price
+                self.state.close(pos, exit_price)
+                self._lucid.record_close(pos.pnl_usd, hold_seconds(pos.opened_at))
+                notify(f"  TOPSTEP-FLATTEN {pos.symbol} qty={pos.qty} @ ~{exit_price:.2f}")
+                if CONFIG.manual_tickets:
+                    notify(exit_ticket(pos, exit_price, reason))
+        except Exception as e:  # noqa: BLE001
+            notify(f"  ! Topstep flatten error: {e}")
+
     # ── manage exits ──────────────────────────────────────
     def _manage_open(self) -> None:
-        # Lucid EOD flatten: if the flatten window is open and the broker is
-        # ProjectXBroker, submit a market close for every open futures position.
-        # This runs BEFORE the per-position exit loop so the state gets cleaned
-        # up correctly on the same scan tick.
+        # Topstep EOD flatten: when the flatten window is open (≥ 16:08 ET, before
+        # the 16:10 futures close) close every open position so no unrealized risk
+        # is carried against the trailing MLL overnight. Runs BEFORE the per-position
+        # exit loop so state is cleaned up on the same scan tick.
         if self._lucid is not None and self._lucid.should_flatten_now():
-            from projectx_executor import ProjectXBroker
-            if isinstance(self.executor.broker, ProjectXBroker):
-                open_futures = [p for p in self.state.open_positions if not p.shadow]
-                if open_futures:
-                    notify(
-                        f"[Lucid] EOD flatten triggered ({len(open_futures)} positions) "
-                        f"— submitting market closes via ProjectX"
-                    )
-                    try:
-                        self.executor.broker.flatten_all()
-                        for pos in open_futures:
-                            q = self.data.quote(pos.symbol)
-                            exit_price = q.price if q else pos.entry_price
-                            self.state.close(pos, exit_price)
-                            self._lucid.record_close(
-                                pos.pnl_usd, hold_seconds(pos.opened_at)
-                            )
-                            notify(
-                                f"  LUCID-FLATTEN {pos.symbol} qty={pos.qty} "
-                                f"@ ~{exit_price:.2f}"
-                            )
-                            if CONFIG.manual_tickets:
-                                notify(exit_ticket(pos, exit_price, "EOD flatten"))
-                    except Exception as e:  # noqa: BLE001
-                        notify(f"  ! Lucid flatten error: {e}")
+            self._topstep_flatten_all("EOD flatten")
 
         for pos in list(self.state.positions):
             if not pos.open:
