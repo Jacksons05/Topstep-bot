@@ -1,6 +1,6 @@
-"""Lucid microscalping guard — deterministic unit tests (no network/broker).
+"""Topstep microscalping guard — deterministic unit tests (no network/broker).
 
-Covers the two-part defense added to LucidRiskManager:
+Covers the two-part defense added to TopstepRiskManager:
   1. soft min-hold on take-profit exits (profit_exit_held_long_enough / hold_seconds)
   2. profit-share attribution that blocks new entries (record_close / scalp_profit_ok)
 """
@@ -11,16 +11,16 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import CONFIG  # noqa: E402
-from lucid_risk import LucidRiskManager, hold_seconds  # noqa: E402
+from topstep_risk import TopstepRiskManager, hold_seconds  # noqa: E402
 
 
 def _iso_ago(seconds: float) -> str:
     return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
 
 
-def _mgr() -> LucidRiskManager:
+def _mgr() -> TopstepRiskManager:
     # explicit equity so the test never depends on CONFIG.bankroll_usd
-    return LucidRiskManager(initial_equity=50_000.0)
+    return TopstepRiskManager(initial_equity=50_000.0)
 
 
 # ── hold_seconds ──────────────────────────────────────────
@@ -97,7 +97,7 @@ def test_reset_day_clears_attribution():
 def test_boundary_hold_counts_as_scalp():
     # held_sec exactly at the limit counts as a ≤Ns scalp (inclusive)
     m = _mgr()
-    m.record_close(100.0, held_sec=CONFIG.lucid_min_profit_hold_sec)
+    m.record_close(100.0, held_sec=CONFIG.topstep_min_profit_hold_sec)
     assert m.scalp_profit_share() == 1.0
 
 

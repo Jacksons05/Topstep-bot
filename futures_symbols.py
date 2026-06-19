@@ -1,4 +1,4 @@
-"""Futures contract specifications for Lucid/Rithmic integration.
+"""Futures contract specifications for Topstep/Rithmic integration.
 
 Each FutureSpec contains the static data the risk layer and sizing logic need
 to operate correctly on futures:
@@ -7,7 +7,7 @@ to operate correctly on futures:
   tick_value  — dollar value of one tick per contract (tick_size * multiplier)
   multiplier  — dollar value of one full point per contract
   margin_est  — approximate intraday margin in USD (VERIFY live with your clearing
-                firm — Lucid and CME update these regularly)
+                firm — Topstep and CME update these regularly)
   exchange    — Rithmic exchange code string
   asset_class — broad category for regime/correlation logic
   micro       — True for Micro contracts (1/10th the notional of the standard)
@@ -41,7 +41,7 @@ class FutureSpec:
 
 # ── Contract specifications ────────────────────────────────────────────────
 # Margin figures are approximate CME SPAN intraday margins as of mid-2026.
-# Lucid Trading typically sets tighter in-house limits — confirm before live.
+# Topstep Trading typically sets tighter in-house limits — confirm before live.
 #
 # Tick size reference:
 #   ES/MES tick  = 0.25 points  → ES tick_value = $12.50, MES = $1.25

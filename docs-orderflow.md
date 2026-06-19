@@ -4,7 +4,7 @@ Synthesized from the NotebookLM notebook *"Agentic AI Portfolio Management and
 Alpaca Trading Integration"* (id `5af0f2cf-65d2-4241-9be4-5b13cb00f811`,
 2026-06-16). The dealer-gamma / GEX breakout strategy treats order-flow as a
 **required entry trigger** at walls and the flip — not optional. This bot
-(Lucid/ES via Rithmic) is the natural home: the same Rithmic connection that
+(Topstep/ES via Rithmic) is the natural home: the same Rithmic connection that
 executes also streams the L2 depth + trade prints these metrics need.
 
 ## 1. Metrics + thresholds (as the sources state them)
@@ -68,7 +68,7 @@ A flagged setup combines, in order:
   subscribes `DataType.BBO` + `DataType.LAST_TRADE` for each futures root in the
   watchlist via `client.subscribe_to_market_data()`. The `on_tick` handler routes
   BBO → `on_depth()` and trades → `on_trade()` per symbol.
-- `engine.py` — builds the feed in `__init__` when LUCID/Rithmic is live and
+- `engine.py` — builds the feed in `__init__` when TOPSTEP/Rithmic is live and
   `ORDERFLOW_GATE_ENABLED`; applies `confirm_entry(sig.side)` as the final entry
   gate (after risk.check, before `executor.open`), and resets CVD each new day.
   **Fails open** when the engine has no data yet (`has_data` False) — warm-up,
@@ -80,7 +80,7 @@ Knobs: `ORDERFLOW_GATE_ENABLED` (master, default on) · `OF_OBI_THRESHOLD=0.85` 
 
 ## 8. Level 2 / full depth (CME DOM)
 
-A funded Lucid futures account **is entitled to CME Level 2** — futures depth is
+A funded Topstep futures account **is entitled to CME Level 2** — futures depth is
 a single consolidated exchange book (DOM), cheap and standard, unlike fragmented
 equity L2. Verified in the protocol: Rithmic's market-data `UpdateBits` defines
 **`ORDER_BOOK = 4`** (full ladder) alongside `BBO=2` / `LAST_TRADE=1`.
@@ -103,7 +103,7 @@ natively — no proto hack needed:
   exposes `DataType.ORDER_BOOK`.
 
 **Remaining (account-side only):** the **CME Level-2 data subscription must be
-enabled** on the Rithmic/Lucid account (non-pro for funded traders) for the
+enabled** on the Rithmic/Topstep account (non-pro for funded traders) for the
 ORDER_BOOK stream to carry depth — otherwise `update_type` returns NO_BOOK and
 the engine falls back to top-of-book BBO. No code change required.
 

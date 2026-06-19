@@ -252,7 +252,7 @@ Before implementation starts, these design choices need your input:
 3. **Asset scope**: ETFs only (simpler), or include individual stock picks (Tier 3 sleeve)?
 4. **Automation level**: Fully autonomous rebalances, or advisory mode (shows recommended trades, you approve before execution)?
 5. **Tax awareness**: Is this in a taxable account (tax-loss harvesting matters) or IRA/tax-advantaged?
-6. **Lucid integration**: Should this eventually tie into the Rithmic/Lucid account for futures overlay (e.g., add ES micro-futures as a hedge layer)?
+6. **Topstep integration**: Should this eventually tie into the Rithmic/Topstep account for futures overlay (e.g., add ES micro-futures as a hedge layer)?
 
 ---
 

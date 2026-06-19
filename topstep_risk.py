@@ -28,15 +28,15 @@ spec (No-Activation-Fee path, Responsible Trading Advantage ON):
        consistency_pct * profit_target ($1,500). Exits are never blocked.
 
   5. EOD Position Flatten + Economic Release Blackout
-       Flatten all by LUCID_FLATTEN_TIME (16:08 ET, before the 16:10 futures
+       Flatten all by TOPSTEP_FLATTEN_TIME (16:08 ET, before the 16:10 futures
        close) to avoid carrying unrealized risk against the trailing MLL.
-       No new entries within LUCID_ECON_BLACKOUT_MIN of a major macro release.
+       No new entries within TOPSTEP_ECON_BLACKOUT_MIN of a major macro release.
 
-NOTE: Topstep does NOT ban scalping — the legacy Lucid ≤5s microscalp guard is
+NOTE: Topstep does NOT ban scalping — the legacy Topstep ≤5s microscalp guard is
 DORMANT (TOPSTEP_SCALP_GUARD_ENABLED=False) but kept for optional use + tests.
 
 Usage in engine.py:
-    from lucid_risk import TopstepRiskManager
+    from topstep_risk import TopstepRiskManager
     ts = TopstepRiskManager(initial_equity=<live balance>)
 
     # each scan, before the check() call:
@@ -96,7 +96,7 @@ def _parse_time(hhmm: str) -> dtime:
         hh, mm = (int(x) for x in hhmm.split(":"))
         return dtime(hh, mm)
     except (ValueError, AttributeError):
-        log.warning(f"[LucidRisk] Could not parse time '{hhmm}', using 16:55")
+        log.warning(f"[TopstepRisk] Could not parse time '{hhmm}', using 16:55")
         return dtime(16, 55)
 
 
@@ -149,7 +149,7 @@ class TopstepRiskManager:
             f"max_contracts={CONFIG.topstep_max_contracts} (account-wide) | "
             f"profit_target=${CONFIG.topstep_profit_target:,.0f} | "
             f"consistency={CONFIG.topstep_consistency_pct:.0%} | "
-            f"flatten_at={CONFIG.lucid_flatten_time} ET"
+            f"flatten_at={CONFIG.topstep_flatten_time} ET"
         )
 
     def reset_day(self, current_equity: float) -> None:
@@ -188,14 +188,14 @@ class TopstepRiskManager:
             return False, reason
         return True, "ok"
 
-    # ── Microscalping guard (Lucid: >50% of profit from ≤5s holds is banned) ──
+    # ── Microscalping guard (Topstep: >50% of profit from ≤5s holds is banned) ──
     def record_close(self, pnl_usd: float, held_sec: float) -> None:
         """Record a closed trade for scalp-profit attribution. Only winning
         trades feed the pool — the firm rule is about the source of *profit*."""
         if pnl_usd <= 0:
             return
         self._win_profit_total += pnl_usd
-        if held_sec <= CONFIG.lucid_min_profit_hold_sec:
+        if held_sec <= CONFIG.topstep_min_profit_hold_sec:
             self._win_profit_scalp += pnl_usd
 
     def scalp_profit_share(self) -> float:
@@ -206,13 +206,13 @@ class TopstepRiskManager:
 
     def scalp_profit_ok(self) -> tuple[bool, str]:
         """Block NEW entries once ≤5s winners dominate realized profit, before
-        the Lucid 0.50 hard cap is breached. Returns (ok, reason)."""
+        the Topstep 0.50 hard cap is breached. Returns (ok, reason)."""
         share = self.scalp_profit_share()
-        if share >= CONFIG.lucid_scalp_profit_pct_limit:
+        if share >= CONFIG.topstep_scalp_profit_pct_limit:
             reason = (
-                f"Lucid microscalp guard: {share:.0%} of profit from ≤"
-                f"{CONFIG.lucid_min_profit_hold_sec:g}s holds "
-                f"(limit {CONFIG.lucid_scalp_profit_pct_limit:.0%}, firm cap 50%)"
+                f"Topstep microscalp guard: {share:.0%} of profit from ≤"
+                f"{CONFIG.topstep_min_profit_hold_sec:g}s holds "
+                f"(limit {CONFIG.topstep_scalp_profit_pct_limit:.0%}, firm cap 50%)"
             )
             return False, reason
         return True, "ok"
@@ -220,7 +220,7 @@ class TopstepRiskManager:
     def profit_exit_held_long_enough(self, opened_at: str) -> bool:
         """True if a take-profit exit is allowed now (held ≥ min hold). Callers
         MUST bypass this for stop-losses — never delay a risk exit."""
-        return hold_seconds(opened_at) >= CONFIG.lucid_min_profit_hold_sec
+        return hold_seconds(opened_at) >= CONFIG.topstep_min_profit_hold_sec
 
     # ── Daily Loss Limit (Responsible Trading Advantage) ────────────────────
 
@@ -289,20 +289,20 @@ class TopstepRiskManager:
     def should_flatten_now(self) -> bool:
         """True when it's time to flatten all positions before EOD.
 
-        Flatten fires at LUCID_FLATTEN_TIME (default 16:55 ET) and stays
+        Flatten fires at TOPSTEP_FLATTEN_TIME (default 16:55 ET) and stays
         True until midnight. The engine calls this once per scan loop and
         submits flatten_all() on the broker when True.
 
         Note: The existing OPTION_TIME_STOP_ET (15:30 by default) handles
         options; this rule handles futures.
         """
-        flatten_t = _parse_time(CONFIG.lucid_flatten_time)
+        flatten_t = _parse_time(CONFIG.topstep_flatten_time)
         now = _now_et()
         current_t = now.time()
         result = current_t >= flatten_t
         if result:
             log.debug(
-                f"[LucidRisk] flatten window active: "
+                f"[TopstepRisk] flatten window active: "
                 f"{current_t} >= {flatten_t} ET"
             )
         return result
@@ -333,7 +333,7 @@ class TopstepRiskManager:
                     f"within {delta} min of scheduled release at {rel_str} "
                     f"(blackout window ±{blackout_min} min)"
                 )
-                log.info(f"[LucidRisk] econ blackout: {reason}")
+                log.info(f"[TopstepRisk] econ blackout: {reason}")
                 return True, reason
 
         return False, "ok"
@@ -383,10 +383,10 @@ class TopstepRiskManager:
 
         # 1. Flatten window: if we should be flat, we shouldn't be opening
         if self.should_flatten_now():
-            return False, "Topstep flatten window active (≥ LUCID_FLATTEN_TIME)"
+            return False, "Topstep flatten window active (≥ TOPSTEP_FLATTEN_TIME)"
 
         # 2. Economic release blackout
-        near_rel, rel_reason = self.near_economic_release(CONFIG.lucid_econ_blackout_min)
+        near_rel, rel_reason = self.near_economic_release(CONFIG.topstep_econ_blackout_min)
         if near_rel:
             return False, f"Topstep econ blackout: {rel_reason}"
 
@@ -419,10 +419,6 @@ class TopstepRiskManager:
         return True, "ok"
 
 
-# Backwards-compatible alias: existing imports / tests use LucidRiskManager.
-LucidRiskManager = TopstepRiskManager
-
-
 # ── Convenience module-level functions (for callers that don't hold an instance) ──
 
 def should_flatten_now() -> bool:
@@ -432,4 +428,4 @@ def should_flatten_now() -> bool:
 
 def near_economic_release(blackout_min: int = 5) -> tuple[bool, str]:
     """Module-level alias for one-off checks."""
-    return LucidRiskManager().near_economic_release(blackout_min)
+    return TopstepRiskManager().near_economic_release(blackout_min)

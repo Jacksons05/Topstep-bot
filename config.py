@@ -235,11 +235,11 @@ class Config:
     ibkr_port: int = _i("IBKR_PORT", 7497)
     ibkr_client_id: int = _i("IBKR_CLIENT_ID", 1)
 
-    # ── Lucid Trading / Rithmic integration ───────────────
-    # DISABLED by default. Set LUCID_MODE_ENABLED=True AND supply
+    # ── Topstep Trading / Rithmic integration ───────────────
+    # DISABLED by default. Set TOPSTEP_MODE_ENABLED=True AND supply
     # RITHMIC_USER + RITHMIC_PASSWORD to activate futures execution
-    # through the Rithmic executor + Lucid risk layer.
-    lucid_mode_enabled: bool = _b("LUCID_MODE_ENABLED", True)  # this is the Lucid futures fork
+    # through the Rithmic executor + Topstep risk layer.
+    topstep_mode_enabled: bool = _b("TOPSTEP_MODE_ENABLED", True)  # this is the Topstep futures fork
     # Order-flow confirmation gate (OBI/CVD/whale from the live Rithmic L1+trade
     # feed). Only applied when a live feed has data for the symbol; fails open
     # otherwise (warm-up, non-futures symbol, mock mode).
@@ -252,14 +252,14 @@ class Config:
     rithmic_url: str = _s("RITHMIC_URL", "rituz00100.rithmic.com:443")  # WebSocket gateway URL (test default; production URL provided by Rithmic after conformance)
     # Rithmic ties each credential set to a REGISTERED app_name/app_version
     # (issued with API access / after conformance). A wrong one → login rp_code 13
-    # "permission denied". Set these to exactly what Rithmic/Lucid assigned you.
+    # "permission denied". Set these to exactly what Rithmic/Topstep assigned you.
     rithmic_app_name: str = _s("RITHMIC_APP_NAME", "JARVIS")
     rithmic_app_version: str = _s("RITHMIC_APP_VERSION", "1.0")
     # ── Topstep / ProjectX Gateway API (current execution path) ────────────
     # ProjectX is Topstep's own REST + SignalR gateway (api.topstepx.com /
     # rtc.topstepx.com). Simple API-key auth — no Rithmic app registration /
     # conformance wall. Set PROJECTX_USERNAME + PROJECTX_API_KEY to activate;
-    # the order-flow engine, Lucid risk, and entry/exit logic are unchanged.
+    # the order-flow engine, Topstep risk, and entry/exit logic are unchanged.
     projectx_username: str = _s("PROJECTX_USERNAME")                   # TopstepX login / username
     projectx_api_key: str = _s("PROJECTX_API_KEY")                     # API key from TopstepX → Settings → API
     projectx_api_base: str = _s("PROJECTX_API_BASE", "https://api.topstepx.com")
@@ -267,7 +267,7 @@ class Config:
     projectx_account_name: str = _s("PROJECTX_ACCOUNT_NAME")          # blank → first tradable account
     projectx_live: bool = _b("PROJECTX_LIVE", False)                   # False = sim/eval data sub; True = funded/live
     # ── Topstep $50K funded-account rules (No-Activation-Fee + Responsible Trading) ──
-    # These are the live risk constraints enforced by lucid_risk.TopstepRiskManager.
+    # These are the live risk constraints enforced by topstep_risk.TopstepRiskManager.
     # Defaults are the official Topstep $50K spec (2026). For $100K/$150K, override
     # via env: account_size 100000/150000, trailing_mll 3000/4500, daily_loss 2000/3000,
     # max_contracts 10/15, profit_target 6000/9000.
@@ -283,29 +283,26 @@ class Config:
     # cumulative profit. Topstep: 50%. Enforced as a per-day profit cap that stops
     # NEW entries once today's profit reaches consistency_pct * profit_target.
     topstep_consistency_pct: float = _f("TOPSTEP_CONSISTENCY_PCT", 0.50)
-    # Topstep does NOT ban scalping (unlike the old Lucid ≤5s rule). The microscalp
+    # Topstep does NOT ban scalping (unlike the old Topstep ≤5s rule). The microscalp
     # guard below is therefore OFF by default; flip on only if your firm reinstates it.
     topstep_scalp_guard_enabled: bool = _b("TOPSTEP_SCALP_GUARD_ENABLED", False)
 
-    # Lucid risk parameters (retuned for Topstep $50K; legacy names kept for the
-    # risk layer + tests). lucid_daily_drawdown_usd now mirrors the DLL.
-    lucid_daily_drawdown_usd: float = _f("LUCID_DAILY_DRAWDOWN_USD", 1_000.0)  # = Topstep daily loss limit ($)
-    lucid_max_contracts: int = _i("LUCID_MAX_CONTRACTS", 5)            # account-wide max open contracts
-    lucid_flatten_time: str = _s("LUCID_FLATTEN_TIME", "16:08")        # flatten all by this ET (before 16:10 futures close)
-    lucid_econ_blackout_min: int = int(os.getenv("LUCID_ECON_BLACKOUT_MIN", "5"))  # blackout window around econ releases (minutes)
+    # Session timing + econ blackout for the Topstep risk layer.
+    topstep_flatten_time: str = _s("TOPSTEP_FLATTEN_TIME", "16:08")        # flatten all by this ET (before 16:10 futures close)
+    topstep_econ_blackout_min: int = int(os.getenv("TOPSTEP_ECON_BLACKOUT_MIN", "5"))  # blackout window around econ releases (minutes)
     # Microscalping guard — DORMANT under Topstep (topstep_scalp_guard_enabled=False).
     # Kept for the optional ≤Ns profit-share attribution + unit tests. When the guard
-    # is enabled: (1) hold profit-target exits until open ≥ lucid_min_profit_hold_sec
+    # is enabled: (1) hold profit-target exits until open ≥ topstep_min_profit_hold_sec
     # (stop-losses are NEVER delayed); (2) block NEW entries once ≤Ns winners exceed
-    # lucid_scalp_profit_pct_limit of realized profit.
-    lucid_min_profit_hold_sec: float = _f("LUCID_MIN_PROFIT_HOLD_SEC", 5.0)
-    lucid_scalp_profit_pct_limit: float = _f("LUCID_SCALP_PROFIT_PCT_LIMIT", 0.40)
+    # topstep_scalp_profit_pct_limit of realized profit.
+    topstep_min_profit_hold_sec: float = _f("TOPSTEP_MIN_PROFIT_HOLD_SEC", 5.0)
+    topstep_scalp_profit_pct_limit: float = _f("TOPSTEP_SCALP_PROFIT_PCT_LIMIT", 0.40)
     # Signal-only bridge: until the bot has direct Rithmic API access, it runs on
     # the Sim broker and emits copy-paste TRADE/EXIT tickets for the user to
     # execute manually on the Tradesea dashboard. Set MANUAL_TICKETS=false once
     # live API execution is wired (no need for hand-off tickets then).
     manual_tickets: bool = _b("MANUAL_TICKETS", True)
-    # Futures symbols to watch when Lucid mode is active (comma-separated roots)
+    # Futures symbols to watch when Topstep mode is active (comma-separated roots)
     futures_symbols: tuple[str, ...] = _csv("FUTURES_SYMBOLS", "ES,NQ,MES,MNQ")
 
     # ── yfinance enrichment ───────────────────────────────
@@ -378,14 +375,14 @@ class Config:
         errs: list[str] = []
         if self.broker not in ("alpaca", "ibkr", "sim"):
             errs.append("BROKER must be alpaca|ibkr|sim")
-        # Lucid / Rithmic: warn when enabled but missing credentials (not fatal —
+        # Topstep / Rithmic: warn when enabled but missing credentials (not fatal —
         # the engine falls back to Alpaca automatically in that case).
-        if self.lucid_mode_enabled and not (self.rithmic_user and self.rithmic_password):
+        if self.topstep_mode_enabled and not (self.rithmic_user and self.rithmic_password):
             print(
-                "WARNING: LUCID_MODE_ENABLED=True but RITHMIC_USER or RITHMIC_PASSWORD "
+                "WARNING: TOPSTEP_MODE_ENABLED=True but RITHMIC_USER or RITHMIC_PASSWORD "
                 "is empty — engine will fall back to Alpaca until credentials are set."
             )
-        if self.lucid_mode_enabled and self.rithmic_env not in ("paper", "live"):
+        if self.topstep_mode_enabled and self.rithmic_env not in ("paper", "live"):
             errs.append("RITHMIC_ENV must be 'paper' or 'live'")
         if self.llm_backend not in ("anthropic", "ollama"):
             errs.append("LLM_BACKEND must be anthropic|ollama")

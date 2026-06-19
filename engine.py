@@ -1,9 +1,9 @@
 """The agentic futures-trading cycle: data -> quant -> agents -> confluence ->
 risk -> execute -> manage. One run_once() = one full pass over the watchlist.
 
-This is the Lucid funded-futures bot: it signals off the shared agentic core
+This is the Topstep funded-futures bot: it signals off the shared agentic core
 (quant indicators + the LLM agent team) and executes through ProjectX with the
-Lucid risk layer (EOD drawdown kill-switch, econ blackout, contract cap, EOD
+Topstep risk layer (EOD drawdown kill-switch, econ blackout, contract cap, EOD
 flatten). The equity-options path (Alpaca/CBOE GEX, 0DTE structures) has been
 removed — see the sister repo Trading-Bot for that variant.
 
@@ -24,7 +24,7 @@ from news import NewsFeed
 from events import Events
 from macro import Macro
 from notifier import notify, signal_msg, trade_ticket, exit_ticket
-from lucid_risk import hold_seconds
+from topstep_risk import hold_seconds
 from regime import classify_last
 from risk import check, circuit_breaker, kill_switch_active, should_exit
 from signals import Signal, label_for, quant_signal
@@ -59,22 +59,22 @@ class Engine:
         # cost control: skip re-running the LLM on a symbol whose quant read hasn't
         # moved since its last evaluation. {symbol: (direction, strength_bucket)}
         self._eval_cache: dict[str, tuple[str, float]] = {}
-        self._lucid_last_reset: date | None = None
+        self._topstep_last_reset: date | None = None
         # Topstep: True once a daily-loss / trailing-MLL breach has flattened the
         # book — blocks all new entries until the next session (cleared on reset).
         self._topstep_day_halt: bool = False
         self._oflow = None  # ProjectXOrderFlowFeed when a live ProjectX feed is up
 
-        # ── Lucid / ProjectX (TopstepX) mode ───────────────────────────────
-        # The Lucid bot executes futures through the ProjectX gateway with the
-        # Lucid risk layer attached. When credentials are missing it degrades to
+        # ── Topstep / ProjectX (TopstepX) mode ───────────────────────────────
+        # The Topstep bot executes futures through the ProjectX gateway with the
+        # Topstep risk layer attached. When credentials are missing it degrades to
         # the base executor (Sim/Alpaca) so the agentic pipeline still runs in
         # paper — but it warns loudly, because live futures need ProjectX.
-        self._lucid: "LucidRiskManager | None" = None  # type: ignore[name-defined]
-        if CONFIG.lucid_mode_enabled and CONFIG.projectx_username and CONFIG.projectx_api_key:
+        self._topstep: "TopstepRiskManager | None" = None  # type: ignore[name-defined]
+        if CONFIG.topstep_mode_enabled and CONFIG.projectx_username and CONFIG.projectx_api_key:
             try:
                 from projectx_executor import ProjectXBroker
-                from lucid_risk import TopstepRiskManager
+                from topstep_risk import TopstepRiskManager
                 self.executor.broker = ProjectXBroker()
                 # Seed the trailing-MLL peak / day base from the live balance.
                 # Falls back to the account size if the call fails (mock mode).
@@ -83,7 +83,7 @@ class Engine:
                     initial_equity = acct.get("equity") or CONFIG.topstep_account_size
                 except Exception:  # noqa: BLE001
                     initial_equity = CONFIG.topstep_account_size
-                self._lucid = TopstepRiskManager(initial_equity=initial_equity)
+                self._topstep = TopstepRiskManager(initial_equity=initial_equity)
                 notify(
                     "⚡ TOPSTEP/PROJECTX MODE ACTIVE — "
                     f"env={'live' if CONFIG.projectx_live else 'sim'} | "
@@ -91,7 +91,7 @@ class Engine:
                     f"trailing_MLL=${CONFIG.topstep_trailing_mll:,.0f} | "
                     f"daily_loss=${CONFIG.topstep_daily_loss_limit:,.0f} | "
                     f"max_contracts={CONFIG.topstep_max_contracts} | "
-                    f"flatten_at={CONFIG.lucid_flatten_time} ET"
+                    f"flatten_at={CONFIG.topstep_flatten_time} ET"
                 )
                 # Live order-flow feed: stream quotes + trades + depth off the
                 # ProjectX market hub into per-symbol OBI/CVD/whale engines. Only
@@ -108,10 +108,10 @@ class Engine:
                         self._oflow = None
             except Exception as e:  # noqa: BLE001
                 notify(
-                    f"⚠ LUCID MODE init failed ({e}) — "
+                    f"⚠ TOPSTEP MODE init failed ({e}) — "
                     "falling back to base executor. Check PROJECTX credentials / signalrcore."
                 )
-                self._lucid = None
+                self._topstep = None
         else:
             notify(
                 "⚠ ProjectX credentials not set (PROJECTX_USERNAME/PROJECTX_API_KEY) — running "
@@ -153,13 +153,13 @@ class Engine:
             return
 
         # Refresh the Topstep day base (Daily Loss Limit anchor) each new session
-        if self._lucid is not None:
+        if self._topstep is not None:
             today = date.today()
-            if self._lucid_last_reset != today:
+            if self._topstep_last_reset != today:
                 try:
                     acct = self.executor.broker.account()
-                    self._lucid.reset_day(acct.get("equity", CONFIG.bankroll_usd))
-                    self._lucid_last_reset = today
+                    self._topstep.reset_day(acct.get("equity", CONFIG.bankroll_usd))
+                    self._topstep_last_reset = today
                     self._topstep_day_halt = False  # new session — limits reset
                     if self._oflow is not None:
                         self._oflow.reset_session()  # CVD is a since-open running total
@@ -170,8 +170,8 @@ class Engine:
             # live equity, then hard-flatten + halt the day on any breach
             # (trailing Max Loss Limit = account fail; Daily Loss Limit = day off).
             equity, unrealized = self._account_equity()
-            self._lucid.update_equity(equity)
-            breached, why = self._lucid.risk_breach(equity, self.state, unrealized)
+            self._topstep.update_equity(equity)
+            breached, why = self._topstep.risk_breach(equity, self.state, unrealized)
             if breached and not self._topstep_day_halt:
                 notify(f"🛑 TOPSTEP BREACH — {why} | flattening all & halting new entries")
                 self._topstep_flatten_all(why)
@@ -268,15 +268,15 @@ class Engine:
             # Topstep risk layer: flatten window, econ blackout, trailing MLL,
             # daily loss limit, account-wide contract cap, consistency cap —
             # all checked BEFORE the base risk.check() call.
-            if self._lucid is not None:
+            if self._topstep is not None:
                 if self._topstep_day_halt:
                     notify(f"  skip (Topstep: day halted by risk breach): {sig.symbol}")
                     continue
                 equity, unrealized = self._account_equity()
-                lucid_ok, lucid_reason = self._lucid.pre_trade_ok(
+                topstep_ok, topstep_reason = self._topstep.pre_trade_ok(
                     sig, self.state, equity, unrealized)
-                if not lucid_ok:
-                    notify(f"  skip (Topstep: {lucid_reason}): {sig.symbol}")
+                if not topstep_ok:
+                    notify(f"  skip (Topstep: {topstep_reason}): {sig.symbol}")
                     continue
             ok, size, reason = check(sig, self.state, cb_mult=cb_mult * (w or 1.0),
                                      cooldowns=self.cooldowns)
@@ -500,7 +500,7 @@ class Engine:
                 q = self.data.quote(pos.symbol)
                 exit_price = q.price if q else pos.entry_price
                 self.state.close(pos, exit_price)
-                self._lucid.record_close(pos.pnl_usd, hold_seconds(pos.opened_at))
+                self._topstep.record_close(pos.pnl_usd, hold_seconds(pos.opened_at))
                 notify(f"  TOPSTEP-FLATTEN {pos.symbol} qty={pos.qty} @ ~{exit_price:.2f}")
                 if CONFIG.manual_tickets:
                     notify(exit_ticket(pos, exit_price, reason))
@@ -513,7 +513,7 @@ class Engine:
         # the 16:10 futures close) close every open position so no unrealized risk
         # is carried against the trailing MLL overnight. Runs BEFORE the per-position
         # exit loop so state is cleaned up on the same scan tick.
-        if self._lucid is not None and self._lucid.should_flatten_now():
+        if self._topstep is not None and self._topstep.should_flatten_now():
             self._topstep_flatten_all("EOD flatten")
 
         for pos in list(self.state.positions):
@@ -527,16 +527,16 @@ class Engine:
             reason = should_exit(pos, q.price)
             if not reason:
                 continue
-            # Lucid microscalp guard: defer a take-profit exit until the position
+            # Topstep microscalp guard: defer a take-profit exit until the position
             # has been open ≥ min hold. Stop-losses are NEVER delayed (risk first).
             if (
                 reason == "take-profit"
-                and self._lucid is not None
+                and self._topstep is not None
                 and not pos.shadow
-                and not self._lucid.profit_exit_held_long_enough(pos.opened_at)
+                and not self._topstep.profit_exit_held_long_enough(pos.opened_at)
             ):
                 notify(
-                    f"  hold (Lucid <{CONFIG.lucid_min_profit_hold_sec:g}s): "
+                    f"  hold (Topstep <{CONFIG.topstep_min_profit_hold_sec:g}s): "
                     f"deferring take-profit {pos.symbol}"
                 )
                 continue
@@ -545,8 +545,8 @@ class Engine:
             except Exception as e:  # noqa: BLE001
                 notify(f"  ! exit failed {pos.symbol}: {e}")
                 continue
-            if self._lucid is not None and not pos.shadow:
-                self._lucid.record_close(pos.pnl_usd, hold_seconds(pos.opened_at))
+            if self._topstep is not None and not pos.shadow:
+                self._topstep.record_close(pos.pnl_usd, hold_seconds(pos.opened_at))
             tag = "EXIT-SHADOW" if pos.shadow else "CLOSE"
             notify(f"{tag} {reason} {pos.symbol} @ {q.price:.2f} pnl=${pos.pnl_usd:.2f}")
             if CONFIG.manual_tickets and not pos.shadow:

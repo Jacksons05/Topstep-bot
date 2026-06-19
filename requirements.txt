@@ -10,7 +10,7 @@ polars>=1.0
 numba>=0.60
 # IBKR adapter (optional, only when BROKER=ibkr):
 # ib-insync>=0.9.86
-# Lucid Trading / ProjectX (TopstepX) adapter: REST execution is plain httpx
+# Topstep / ProjectX (TopstepX) adapter: REST execution is plain httpx
 # (above); the live order-flow feed (quotes/trades/L2 depth) uses the ProjectX
 # SignalR market hub via signalrcore. Optional — projectx_marketdata degrades to
 # a no-op (gate fails open) when absent.

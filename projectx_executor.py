@@ -1,4 +1,4 @@
-"""ProjectX (TopstepX) broker adapter for Lucid Trading integration.
+"""ProjectX (TopstepX) broker adapter for Topstep Trading integration.
 
 Talks to the ProjectX Gateway REST API (https://api.topstepx.com). ProjectX is
 Topstep's own gateway — simple API-key auth (no Rithmic app-registration /
@@ -22,7 +22,7 @@ Environment variables (set in .env):
   PROJECTX_API_BASE      — REST base (default https://api.topstepx.com)
   PROJECTX_ACCOUNT_NAME  — optional; blank picks the first tradable account
   PROJECTX_LIVE          — False = sim/eval, True = funded (controls Contract `live`)
-  LUCID_MODE_ENABLED     — must be True to activate this broker
+  TOPSTEP_MODE_ENABLED     — must be True to activate this broker
 
 REST endpoints used (all POST, JSON, JWT Bearer after login):
   /api/Auth/loginKey        {userName, apiKey}            -> {token, success, ...}
@@ -65,7 +65,7 @@ _TOKEN_TTL_SEC = 23 * 3600
 class ProjectXBroker:
     """ProjectX/TopstepX order execution. Drop-in replacement for RithmicBroker.
 
-    Activated when LUCID_MODE_ENABLED=True and PROJECTX_USERNAME + PROJECTX_API_KEY
+    Activated when TOPSTEP_MODE_ENABLED=True and PROJECTX_USERNAME + PROJECTX_API_KEY
     are set. Falls back to mock mode if credentials are blank — safe to
     instantiate in either case.
     """
@@ -302,13 +302,13 @@ class ProjectXBroker:
 
     def submit_option(self, structure, qty: float, ref_price: float,
                       opening: bool = True) -> Fill:
-        """Options are NOT supported in Lucid/futures mode."""
+        """Options are NOT supported in Topstep/futures mode."""
         raise NotImplementedError(
             "ProjectXBroker does not support options. "
-            "TRADE_OPTIONS is auto-disabled when LUCID_MODE_ENABLED=True."
+            "TRADE_OPTIONS is auto-disabled when TOPSTEP_MODE_ENABLED=True."
         )
 
-    # ── extended / Lucid-specific methods ────────────────────────────────────
+    # ── extended / Topstep-specific methods ────────────────────────────────────
 
     def place_order(self, symbol: str, qty: int, side: str, price: float | None = None,
                     order_type: str = "market", time_in_force: str = "day") -> Fill:
@@ -360,7 +360,7 @@ class ProjectXBroker:
         return self.account()
 
     def flatten_all(self) -> None:
-        """Close ALL open positions (EOD Lucid flatten rule) via closeContract."""
+        """Close ALL open positions (EOD Topstep flatten rule) via closeContract."""
         log.info(f"[ProjectX] flatten_all() | mock={self._mock_mode}")
         if self._mock_mode:
             log.info("[ProjectX] MOCK flatten_all — no real orders placed")
