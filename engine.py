@@ -28,6 +28,9 @@ from topstep_risk import hold_seconds
 from regime import classify_last
 from risk import check, circuit_breaker, kill_switch_active, should_exit
 from signals import Signal, label_for, quant_signal
+from ml_signal import ML
+from datafeed import LiveRecorder
+from futures_symbols import dollar_value_per_point
 from state import State
 from regime_strategy import (
     get_regime_params,
@@ -63,7 +66,15 @@ class Engine:
         # Topstep: True once a daily-loss / trailing-MLL breach has flattened the
         # book — blocks all new entries until the next session (cleared on reset).
         self._topstep_day_halt: bool = False
+        # Fail-closed equity guard: True once a real broker equity read succeeds.
+        # When a LIVE ProjectX equity read fails we block NEW entries (but keep
+        # managing/flattening) rather than trade blind against the trailing MLL.
+        self._equity_trusted: bool = True
+        self._equity_blocked: bool = False
         self._oflow = None  # ProjectXOrderFlowFeed when a live ProjectX feed is up
+        # Record-own data layer (Databento alternative): captures bar+L2 snapshots
+        # to parquet so the ML signal can be retrained on YOUR ProjectX feed.
+        self.recorder = LiveRecorder() if CONFIG.record_data else None
 
         # ── Topstep / ProjectX (TopstepX) mode ───────────────────────────────
         # The Topstep bot executes futures through the ProjectX gateway with the
@@ -131,6 +142,19 @@ class Engine:
         mins = now.hour * 60 + now.minute
         return 9 * 60 + 30 <= mins < 16 * 60
 
+    def _topstep_session_date(self) -> date:
+        """Date of the current CME/Topstep trading session. The futures session
+        rolls at 18:00 ET, so trades placed at/after 18:00 ET belong to the NEXT
+        calendar day's session. Used to anchor the daily-loss / consistency reset
+        to the real session boundary instead of the server's midnight."""
+        from datetime import timedelta
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("America/New_York"))
+        d = now.date()
+        if now.hour >= 18:
+            d = d + timedelta(days=1)
+        return d
+
     def close(self) -> None:
         self.data.close()
         self.news.close()
@@ -152,9 +176,12 @@ class Engine:
             notify("market closed — idle (no scan)")
             return
 
-        # Refresh the Topstep day base (Daily Loss Limit anchor) each new session
+        # Refresh the Topstep day base (Daily Loss Limit anchor) each new session.
+        # Keyed off the CME/Topstep SESSION date (rolls 18:00 ET), NOT the server
+        # UTC/local calendar date — otherwise the daily-loss + consistency limits
+        # reset mid-session and let the bot re-risk after it should be done.
         if self._topstep is not None:
-            today = date.today()
+            today = self._topstep_session_date()
             if self._topstep_last_reset != today:
                 try:
                     acct = self.executor.broker.account()
@@ -170,12 +197,21 @@ class Engine:
             # live equity, then hard-flatten + halt the day on any breach
             # (trailing Max Loss Limit = account fail; Daily Loss Limit = day off).
             equity, unrealized = self._account_equity()
-            self._topstep.update_equity(equity)
-            breached, why = self._topstep.risk_breach(equity, self.state, unrealized)
-            if breached and not self._topstep_day_halt:
-                notify(f"🛑 TOPSTEP BREACH — {why} | flattening all & halting new entries")
-                self._topstep_flatten_all(why)
-                self._topstep_day_halt = True
+            if self._live_projectx() and not self._equity_trusted:
+                # Fail-closed: couldn't read real equity on a live account. Don't
+                # ratchet the MLL peak on a guessed number and don't open new
+                # trades this cycle — but keep managing/flattening open positions.
+                self._equity_blocked = True
+                notify("⚠ Topstep: live equity read failed — fail-closed "
+                       "(no new entries this cycle; open positions still managed)")
+            else:
+                self._equity_blocked = False
+                self._topstep.update_equity(equity)
+                breached, why = self._topstep.risk_breach(equity, self.state, unrealized)
+                if breached and not self._topstep_day_halt:
+                    notify(f"🛑 TOPSTEP BREACH — {why} | flattening all & halting new entries")
+                    self._topstep_flatten_all(why)
+                    self._topstep_day_halt = True
 
         # 0. reconcile provisional entries against real broker fills
         self._reconcile_fills()
@@ -272,6 +308,9 @@ class Engine:
                 if self._topstep_day_halt:
                     notify(f"  skip (Topstep: day halted by risk breach): {sig.symbol}")
                     continue
+                if self._equity_blocked:
+                    notify(f"  skip (Topstep: equity read failed — fail-closed): {sig.symbol}")
+                    continue
                 equity, unrealized = self._account_equity()
                 topstep_ok, topstep_reason = self._topstep.pre_trade_ok(
                     sig, self.state, equity, unrealized)
@@ -320,6 +359,21 @@ class Engine:
 
         self.state.save()
 
+    # ── live order-flow → ML micro-feature dict ──
+    def _micro_for(self, sym: str) -> dict | None:
+        """Snapshot the per-symbol order-flow engine into the micro feature dict
+        features.feature_row expects. None when no live L2/trades for this name."""
+        if self._oflow is None:
+            return None
+        of = self._oflow.get(sym)
+        if of is None or not getattr(of, "has_data", False):
+            return None
+        return {
+            "obi": of.obi, "cvd": of.cvd, "micro_price": of.micro_price,
+            "bid": of.bid, "ask": of.ask, "whale": of.whale(),
+            "cvd_div": of.cvd_divergence(),
+        }
+
     # ── stage 1: cheap quant prescreen (no LLM/news) ──
     def _prescreen(self, sym: str):
         """Fast pass run on the WHOLE universe: bars + indicators only.
@@ -331,7 +385,15 @@ class Engine:
         if not bars.get("close"):
             return None
         spot = bars["close"][-1]
-        quant = quant_signal(bars)
+        micro = self._micro_for(sym)
+        if self.recorder is not None:
+            self.recorder.record(sym, bars, self._oflow.get(sym) if self._oflow else None)
+        # ML quant signal first (LightGBM on bar + order-flow features); fall back
+        # to the deterministic indicator model when no model is loaded or it has
+        # no opinion. Same QuantRead contract either way.
+        quant = ML.read(bars, micro) if (CONFIG.ml_signal_enabled and ML.ready) else None
+        if quant is None:
+            quant = quant_signal(bars)
         if quant is None:
             return None
         if quant.direction == "FLAT":
@@ -448,37 +510,63 @@ class Engine:
         return (now.hour, now.minute) >= (hh, mm)
 
     # ── Topstep equity / breach flatten ───────────────────
+    def _mark(self, symbol: str) -> float | None:
+        """Live mark for a symbol. Prefers the ProjectX order-flow feed's
+        liquidity-weighted micro-price (a REAL futures price) over the Alpaca
+        stocks quote, which returns nothing for futures roots (ES/NQ/…). Falls
+        back to the BBO mid, then the Alpaca quote (equities/sim). None when no
+        price is available — callers must skip marking rather than assume 0."""
+        if self._oflow is not None:
+            of = self._oflow.get(symbol)
+            if of is not None and getattr(of, "has_data", False):
+                mp = of.micro_price
+                if mp and mp > 0:
+                    return float(mp)
+                if of.bid and of.ask:
+                    return (of.bid + of.ask) / 2
+        q = self.data.quote(symbol)
+        return q.price if q and q.price > 0 else None
+
+    def _live_projectx(self) -> bool:
+        """True only when executing against a real (non-mock) ProjectX account."""
+        b = self.executor.broker
+        return b.__class__.__name__ == "ProjectXBroker" and not getattr(b, "_mock_mode", True)
+
     def _account_equity(self) -> tuple[float, float]:
         """Best estimate of live account equity for the trailing-MLL / daily-loss
         guards, plus the open-position unrealized P&L.
 
-        Unrealized is marked the same way state.py books realized P&L
-        ((mark-entry)*qty*dir) so the two stay internally consistent. Equity is
-        the CONSERVATIVE (lower) of two views: the bot's internal book
-        (account_size + realized + unrealized) and — when a real ProjectX
-        balance is available — the live broker balance + unrealized. For live
-        trading the broker balance (with true contract multipliers) is the
-        authority; the internal model is the fallback in sim/mock.
+        Unrealized is marked with the live futures price (_mark) and scaled to
+        DOLLARS by the contract multiplier — the same way state.py books realized
+        P&L — so the two stay consistent. Equity is the CONSERVATIVE (lower) of
+        the bot's internal book (account_size + realized + unrealized) and the
+        live broker balance + open MTM, giving a real-time combined-equity view
+        that a stale balance can't inflate. Sets self._equity_trusted=True only
+        when a real broker balance was read (drives the fail-closed entry gate).
         """
         unrealized = 0.0
         for p in self.state.open_positions:
             if p.shadow:
                 continue
-            q = self.data.quote(p.symbol)
-            if not q or q.price <= 0:
+            mark = self._mark(p.symbol)
+            if mark is None:
                 continue
             direction = 1.0 if p.side == "BUY" else -1.0
-            unrealized += (q.price - p.entry_price) * p.qty * direction
+            mult = dollar_value_per_point(p.symbol)
+            unrealized += (mark - p.entry_price) * p.qty * direction * mult
 
         internal_equity = (CONFIG.topstep_account_size
                            + self.state.realized_pnl_usd + unrealized)
         equity = internal_equity
+        self._equity_trusted = False
         try:
             acct = self.executor.broker.account()
             src = str(acct.get("source", ""))
             bal = acct.get("equity")
             if bal and "mock" not in src and "error" not in src:
+                # Real-time combined equity = realized cash balance + open MTM.
                 equity = min(internal_equity, float(bal) + unrealized)
+                self._equity_trusted = True
         except Exception:  # noqa: BLE001
             pass
         return equity, unrealized
@@ -497,8 +585,8 @@ class Engine:
         try:
             self.executor.broker.flatten_all()
             for pos in open_futures:
-                q = self.data.quote(pos.symbol)
-                exit_price = q.price if q else pos.entry_price
+                mark = self._mark(pos.symbol)
+                exit_price = mark if mark is not None else pos.entry_price
                 self.state.close(pos, exit_price)
                 self._topstep.record_close(pos.pnl_usd, hold_seconds(pos.opened_at))
                 notify(f"  TOPSTEP-FLATTEN {pos.symbol} qty={pos.qty} @ ~{exit_price:.2f}")
@@ -521,10 +609,10 @@ class Engine:
                 continue
             if not pos.filled:
                 continue  # entry order still pending — nothing to exit yet
-            q = self.data.quote(pos.symbol)
-            if not q:
-                continue
-            reason = should_exit(pos, q.price)
+            mark = self._mark(pos.symbol)
+            if mark is None:
+                continue  # no live price (futures need the ProjectX feed) — can't manage
+            reason = should_exit(pos, mark)
             if not reason:
                 continue
             # Topstep microscalp guard: defer a take-profit exit until the position
@@ -541,7 +629,7 @@ class Engine:
                 )
                 continue
             try:
-                self.executor.close(pos, q.price, self.state)
+                self.executor.close(pos, mark, self.state)
             except Exception as e:  # noqa: BLE001
                 notify(f"  ! exit failed {pos.symbol}: {e}")
                 continue

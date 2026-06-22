@@ -390,9 +390,15 @@ class State:
         if pnl_override is not None:
             pos.pnl_usd = pnl_override     # options: premium-based P&L from the executor
         else:
-            # long: (exit-entry)*qty ; short: (entry-exit)*qty
+            # long: (exit-entry)*qty ; short: (entry-exit)*qty, scaled to DOLLARS by
+            # the futures contract multiplier ($/point). dollar_value_per_point returns
+            # 1.0 for non-futures roots, so equities/options book unchanged. Without
+            # this, ES P&L is booked in points (a 50× understatement) and the Topstep
+            # daily-loss / trailing-MLL guards key off numbers that never breach.
+            from futures_symbols import dollar_value_per_point
             direction = 1.0 if pos.side == "BUY" else -1.0
-            pos.pnl_usd = (exit_price - pos.entry_price) * pos.qty * direction
+            mult = dollar_value_per_point(pos.symbol)
+            pos.pnl_usd = (exit_price - pos.entry_price) * pos.qty * direction * mult
         if pos.shadow:
             self.shadow_pnl_usd += pos.pnl_usd
         else:

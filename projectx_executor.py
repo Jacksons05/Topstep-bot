@@ -258,12 +258,16 @@ class ProjectXBroker:
                 f"[ProjectX] order rejected: errorCode={d.get('errorCode')} {d.get('errorMessage')}"
             )
         order_id = str(d.get("orderId", ""))
-        # Market orders fill near-instantly; ProjectX returns only the orderId on
-        # placement (no avg fill price). We mark the entry at ref_price and let the
-        # engine's reconcile step / quote stream true it up. get_fill confirms.
+        # Market orders fill near-instantly. ProjectX returns only the orderId on
+        # placement (no avg fill price), so we mark the entry at ref_price and
+        # report status="filled" — NOT "accepted". With "accepted" the Position is
+        # created filled=False, get_fill returns no price so _reconcile_fills never
+        # promotes it, and _manage_open then skips it forever (no stop/target ever
+        # runs). Marking it filled lets exit management run immediately; avg-fill
+        # price reconciliation via /api/Trade/search is a future refinement.
         return Fill(
             symbol=symbol, qty=float(n_contracts), side=side, price=ref_price,
-            order_id=order_id, status="accepted",
+            order_id=order_id, status="filled",
         )
 
     def get_fill(self, order_id: str) -> tuple[str, float | None]:
