@@ -15,3 +15,11 @@ numba>=0.60
 # SignalR market hub via signalrcore. Optional — projectx_marketdata degrades to
 # a no-op (gate fails open) when absent.
 signalrcore>=0.9.5
+# ML quant signal (ml_signal.py / train.py). OPTIONAL — the engine falls back to
+# signals.quant_signal when lightgbm is absent, so live trading runs without it.
+# Needed only to TRAIN and RUN the LightGBM model:
+# lightgbm>=4.0
+# Data recorder (datafeed.LiveRecorder) writes parquet; absent → JSONL fallback:
+# pyarrow>=15.0
+# Ad-hoc querying of the recorded ProjectX dataset (optional):
+# duckdb>=1.0

@@ -105,6 +105,26 @@ class Config:
     rsi_overbought: float = _f("RSI_OVERBOUGHT", 70)
     atr_period: int = _i("ATR_PERIOD", 14)
 
+    # ── ML quant signal (LightGBM; drop-in for signals.quant_signal) ──────
+    # OFF by default: the engine falls back to the indicator quant_signal until
+    # a model exists AND its purged-CV AUC justifies turning this on. See train.py.
+    ml_signal_enabled: bool = _b("ML_SIGNAL_ENABLED", False)
+    ml_model_path: str = _s("ML_MODEL_PATH", "models/quant_lgbm.txt")
+    ml_features_path: str = _s("ML_FEATURES_PATH", "models/quant_features.json")
+    ml_min_prob: float = _f("ML_MIN_PROB", 0.55)   # deadband: |P-0.5| below this → FLAT
+    # training / labeling
+    ml_label_horizon: int = _i("ML_LABEL_HORIZON", 20)   # vertical-barrier bars
+    ml_label_up_atr: float = _f("ML_LABEL_UP_ATR", 1.0)  # profit barrier = entry + k·ATR
+    ml_label_dn_atr: float = _f("ML_LABEL_DN_ATR", 1.0)  # stop barrier  = entry − k·ATR
+    ml_cv_splits: int = _i("ML_CV_SPLITS", 5)
+    ml_num_rounds: int = _i("ML_NUM_ROUNDS", 300)
+    ml_learning_rate: float = _f("ML_LEARNING_RATE", 0.03)
+    ml_num_leaves: int = _i("ML_NUM_LEAVES", 31)
+    ml_min_leaf: int = _i("ML_MIN_LEAF", 50)
+    # ── data recorder (record-own ProjectX feed → parquet; Databento alt) ──
+    record_data: bool = _b("RECORD_DATA", False)
+    record_path: str = _s("RECORD_PATH", "data/recorded")
+
     # ── options / dealer-positioning (GEX stack) ──────────
     options_source: str = _s("OPTIONS_SOURCE", "none")     # none|cboe|flashalpha|chain (cboe=free, no key)
     flashalpha_api_key: str = _s("FLASHALPHA_API_KEY")

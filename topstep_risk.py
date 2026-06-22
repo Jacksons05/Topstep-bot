@@ -224,20 +224,28 @@ class TopstepRiskManager:
 
     # ── Daily Loss Limit (Responsible Trading Advantage) ────────────────────
 
-    def daily_loss_ok(self, state: State, unrealized: float = 0.0) -> tuple[bool, str]:
+    def daily_loss_ok(self, equity: float | None = None, state: State | None = None,
+                      unrealized: float = 0.0) -> tuple[bool, str]:
         """Check today's P&L against the Topstep Daily Loss Limit.
 
-        day_pnl = realized trades closed today + open-position MTM (unrealized).
-        Hitting the limit deactivates the DAY (engine flattens + halts new
-        entries until the next session). Off entirely if Responsible Trading
-        is disabled.
+        Preferred measure: live combined equity minus the equity anchored at the
+        session reset (reset_day) — day_pnl = equity - day_start_equity. This is
+        independent of state.py's UTC day-roll, so the limit is measured against
+        the real Topstep session boundary (set by the engine's session-date reset).
+        Falls back to the realized+unrealized measure when no equity is supplied
+        (keeps older callers / tests working).
 
+        Hitting the limit deactivates the DAY (engine flattens + halts new entries
+        until the next session). Off entirely if Responsible Trading is disabled.
         Returns (ok, reason). ok=False means the day is done.
         """
         if not CONFIG.topstep_responsible_trading:
             return True, "ok"
         limit = CONFIG.topstep_daily_loss_limit
-        day_pnl = state.daily_pnl() + unrealized
+        if equity is not None:
+            day_pnl = equity - self.day_start_equity
+        else:
+            day_pnl = (state.daily_pnl() if state is not None else 0.0) + unrealized
         if day_pnl <= -limit:
             reason = (
                 f"Topstep daily loss limit hit: day_pnl=${day_pnl:,.2f} "
@@ -353,7 +361,7 @@ class TopstepRiskManager:
         mll_ok, mll_reason = self.trailing_mll_ok(equity)
         if not mll_ok:
             return True, mll_reason
-        dll_ok, dll_reason = self.daily_loss_ok(state, unrealized)
+        dll_ok, dll_reason = self.daily_loss_ok(equity, state, unrealized)
         if not dll_ok:
             return True, dll_reason
         return False, "ok"
@@ -396,7 +404,7 @@ class TopstepRiskManager:
             return False, mll_reason
 
         # 4. Daily loss limit
-        dll_ok, dll_reason = self.daily_loss_ok(state, unrealized)
+        dll_ok, dll_reason = self.daily_loss_ok(equity, state, unrealized)
         if not dll_ok:
             return False, dll_reason
 
