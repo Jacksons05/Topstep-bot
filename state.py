@@ -183,6 +183,10 @@ class Position:
     order_id: str = ""
     filled: bool = True       # False = entry recorded at ref price, awaiting real fill
     contract: str = ""        # option leg(s) as JSON for asset=="option" (empty for equity)
+    # ProjectX orderId of the native exchange-resting protective stop (futures).
+    # In-memory only (not persisted): after a restart the stop still rests on the
+    # exchange, but the bot relies on position reconciliation to re-sync.
+    protective_order_id: str = ""
 
     @property
     def signed_qty(self) -> float:

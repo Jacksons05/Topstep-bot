@@ -299,6 +299,11 @@ class Config:
     # Responsible Trading Advantage: adds a Daily Loss Limit. ON per the funded plan.
     topstep_responsible_trading: bool = _b("TOPSTEP_RESPONSIBLE_TRADING", True)
     topstep_daily_loss_limit: float = _f("TOPSTEP_DAILY_LOSS_LIMIT", 1_000.0)  # DLL ($) — deactivates the day
+    # Per-trade risk budget for ATR/risk-based futures position sizing. The dollar
+    # risk at the stop (qty * stop_distance_pts * $/pt) is capped to the SMALLER of
+    # (pct of account) and (fraction of the Daily Loss Limit). Default: min($500, $500).
+    topstep_per_trade_risk_pct: float = _f("TOPSTEP_PER_TRADE_RISK_PCT", 0.01)            # 1% of $50k = $500
+    topstep_per_trade_risk_dll_frac: float = _f("TOPSTEP_PER_TRADE_RISK_DLL_FRAC", 0.5)   # ≤ 50% of the DLL
     # Consistency rule (payout eligibility): best single day ≤ this fraction of
     # cumulative profit. Topstep: 50%. Enforced as a per-day profit cap that stops
     # NEW entries once today's profit reaches consistency_pct * profit_target.
@@ -404,6 +409,17 @@ class Config:
             )
         if self.topstep_mode_enabled and self.rithmic_env not in ("paper", "live"):
             errs.append("RITHMIC_ENV must be 'paper' or 'live'")
+        # The LIVE Topstep path executes through ProjectX (TopstepX), NOT Rithmic.
+        # When Topstep mode is armed for live/funded trading (PROJECTX_LIVE=True or
+        # TRADING_MODE=live), the ProjectX credentials MUST be present — otherwise
+        # the broker silently degrades to MOCK mode and a "live" config places no
+        # real orders (and never enforces the trailing MLL against the exchange).
+        if self.topstep_mode_enabled and (self.projectx_live or self.is_live):
+            if not self.projectx_username or not self.projectx_api_key:
+                errs.append(
+                    "TOPSTEP_MODE_ENABLED + live (PROJECTX_LIVE/TRADING_MODE=live) requires "
+                    "PROJECTX_USERNAME and PROJECTX_API_KEY — refusing to run 'live' in mock mode"
+                )
         if self.llm_backend not in ("anthropic", "ollama"):
             errs.append("LLM_BACKEND must be anthropic|ollama")
         if self.llm_enabled and self.llm_backend == "anthropic" and not self.anthropic_api_key:

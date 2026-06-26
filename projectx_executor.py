@@ -40,6 +40,7 @@ Enums: Order type 2 = Market. Side 0 = Bid(buy), 1 = Ask(sell).
 from __future__ import annotations
 
 import logging
+import math
 import time
 import uuid
 from typing import Any
@@ -53,7 +54,9 @@ from futures_symbols import spec_for
 log = logging.getLogger(__name__)
 
 # ── ProjectX enum constants ───────────────────────────────────────────────────
+_ORDER_TYPE_LIMIT = 1
 _ORDER_TYPE_MARKET = 2
+_ORDER_TYPE_STOP = 4   # resting stop (stopPrice). VERIFY enum + field in live-sim.
 _SIDE_BUY = 0   # Bid
 _SIDE_SELL = 1  # Ask
 _POS_LONG = 1   # Position.type long (else short)
@@ -269,6 +272,66 @@ class ProjectXBroker:
             symbol=symbol, qty=float(n_contracts), side=side, price=ref_price,
             order_id=order_id, status="filled",
         )
+
+    def place_stop_order(self, symbol: str, qty: int, side: str,
+                         stop_price: float) -> str:
+        """Place a NATIVE exchange-resting protective STOP order (C1).
+
+        Submitted on the OPPOSITE side of the entry immediately after the fill so
+        the position is protected on the exchange even if the bot crashes or the
+        feed drops — the client-side polled stop is no longer the only line of
+        defense against the trailing MLL.
+
+        Returns the ProjectX orderId (so the caller can cancel it on a managed
+        exit), or "" on failure / mock mode.
+
+        NOTE (live-sim verification required): the ProjectX stop order TYPE enum
+        (4) and the `stopPrice` field name are assumed from the gateway's order
+        schema. A true OCO/bracket that auto-cancels the sibling on fill is NOT
+        used here — the entry's take-profit stays client-side, and the engine
+        cancels this resting stop when it flattens. VERIFY against a live-sim
+        account before arming real money.
+        """
+        n = max(1, int(qty))
+        if self._mock_mode:
+            log.info(f"[ProjectX] MOCK protective STOP | {side} {n}x {symbol} @ {stop_price:.2f}")
+            return f"projectx-mock-stop-{uuid.uuid4().hex[:8]}"
+        cid = self.contract_id(symbol)
+        if cid is None:
+            log.error(f"[ProjectX] protective STOP: cannot resolve contract for {symbol}")
+            return ""
+        # Snap the stop to the contract tick grid — an off-tick stopPrice is
+        # rejected by the exchange. Round CONSERVATIVELY (toward worse fill) so the
+        # rounded stop is never further from entry than the risk-sized stop: a SELL
+        # stop (protecting a long) rounds UP, a BUY stop (protecting a short) DOWN.
+        stop_px = float(stop_price)
+        spec = spec_for(symbol)
+        if spec and spec.tick_size > 0:
+            ticks = stop_px / spec.tick_size
+            ticks = math.ceil(ticks) if side == "SELL" else math.floor(ticks)
+            stop_px = ticks * spec.tick_size
+        body = {
+            "accountId": self.account_id,
+            "contractId": cid,
+            "type": _ORDER_TYPE_STOP,
+            "side": _SIDE_BUY if side == "BUY" else _SIDE_SELL,
+            "size": n,
+            "stopPrice": round(stop_px, 6),
+            "customTag": f"jarvis_stop_{symbol}_{uuid.uuid4().hex[:8]}",
+        }
+        try:
+            d = self._post("/api/Order/place", body)
+        except Exception as exc:  # noqa: BLE001
+            log.error(f"[ProjectX] protective STOP submit failed for {symbol}: {exc}")
+            return ""
+        if not d.get("success"):
+            log.error(f"[ProjectX] protective STOP rejected: errorCode="
+                      f"{d.get('errorCode')} {d.get('errorMessage')}")
+            return ""
+        oid = str(d.get("orderId", ""))
+        log.info(f"[ProjectX] protective STOP resting | {side} {n}x {symbol} "
+                 f"@ {stop_price:.2f} (order {oid})")
+        return oid
 
     def get_fill(self, order_id: str) -> tuple[str, float | None]:
         """Poll fill status. ProjectX market orders fill immediately; the place

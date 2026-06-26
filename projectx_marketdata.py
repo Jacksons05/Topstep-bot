@@ -54,6 +54,7 @@ class ProjectXOrderFlowFeed:
         self._engines: dict[str, OrderFlowEngine] = {}   # root symbol -> engine
         self._cid_to_sym: dict[str, str] = {}            # contractId -> root symbol
         self._subscribed: set[str] = set()
+        self._sub_cids: list[str] = []                   # contractIds to re-subscribe on reconnect
         self._conn = None
         self.depth_available = _SIGNALR_AVAILABLE and not getattr(broker, "_mock_mode", True)
 
@@ -108,6 +109,8 @@ class ProjectXOrderFlowFeed:
                 self._conn.send("SubscribeContractTrades", [cid])
                 self._conn.send("SubscribeContractMarketDepth", [cid])
                 self._subscribed.add(sym)
+                if cid not in self._sub_cids:
+                    self._sub_cids.append(cid)   # remember for reconnect re-subscribe
                 n += 1
                 log.info(f"[OrderFlow] subscribed {sym} ({cid}) "
                          "(GatewayQuote + GatewayTrade + GatewayDepth/L2)")
@@ -136,6 +139,12 @@ class ProjectXOrderFlowFeed:
             self._conn.on("GatewayQuote", self._on_quote)
             self._conn.on("GatewayTrade", self._on_trade)
             self._conn.on("GatewayDepth", self._on_depth)
+            # Re-subscribe after an automatic reconnect: SignalR drops all server
+            # subscriptions on a dropped connection, so without this the feed comes
+            # back "connected" but silent → the book freezes → has_data goes stale
+            # → the order-flow gate fails CLOSED (no blind entries on a dead feed).
+            if hasattr(self._conn, "on_reconnect"):
+                self._conn.on_reconnect(self._on_reconnect)
             self._conn.start()
             log.info("[OrderFlow] SignalR market hub connected")
             return True
@@ -143,6 +152,20 @@ class ProjectXOrderFlowFeed:
             log.warning(f"[OrderFlow] market hub connect failed: {exc} — gate fails open")
             self._conn = None
             return False
+
+    def _on_reconnect(self) -> None:
+        """Replay every contract subscription after an automatic reconnect."""
+        if self._conn is None:
+            return
+        log.warning(f"[OrderFlow] SignalR reconnected — re-subscribing "
+                    f"{len(self._sub_cids)} contract(s)")
+        for cid in self._sub_cids:
+            try:
+                self._conn.send("SubscribeContractQuotes", [cid])
+                self._conn.send("SubscribeContractTrades", [cid])
+                self._conn.send("SubscribeContractMarketDepth", [cid])
+            except Exception as exc:  # noqa: BLE001
+                log.warning(f"[OrderFlow] re-subscribe failed for {cid}: {exc}")
 
     # ── SignalR event handlers (args = [contractId, payload]) ─────────────────
 
@@ -158,7 +181,11 @@ class ProjectXOrderFlowFeed:
             # supplies the real ladder sizes for OBI when available).
             bid_size = float(data.get("bestBidSize", data.get("bidSize", 0)) or 0)
             ask_size = float(data.get("bestAskSize", data.get("askSize", 0)) or 0)
-            if bid or ask:
+            # Reject one-sided / zero / crossed books — only a sane two-sided market
+            # (0 < bid < ask) yields a trustworthy mark. A crossed or half-empty
+            # quote (auction, gap, bad tick) must NOT record a mark or refresh the
+            # freshness timestamp, so the book reads stale instead of poisoned.
+            if 0 < bid < ask:
                 eng.on_depth(bid=bid, bid_size=bid_size, ask=ask, ask_size=ask_size)
         except Exception as exc:  # noqa: BLE001 - never let a bad tick kill the loop
             log.debug(f"[OrderFlow] quote handler error: {exc}")
