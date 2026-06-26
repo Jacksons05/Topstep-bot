@@ -39,6 +39,9 @@ WHALE_NOTIONAL_USD = _f("OF_WHALE_NOTIONAL_USD", 1_000_000.0)
 FOOTPRINT_RATIO    = _f("OF_FOOTPRINT_RATIO", 10.0)
 WINDOW_SEC         = int(_f("OF_WINDOW_SEC", 120))
 DEPTH_LEVELS       = int(_f("OF_DEPTH_LEVELS", 5))   # ladder levels summed for depth OBI
+# Staleness window: a quote/trade older than this (wall-clock arrival) makes the
+# book report has_data=False (fail closed) — a frozen feed must NOT pass the gate.
+STALENESS_SEC      = _f("OF_STALENESS_SEC", 5.0)
 
 
 def mad_modified_z(x: float, series: list[float]) -> float:
@@ -131,6 +134,10 @@ class OrderFlowEngine:
         self.ask = 0.0
         self.bid_size = 0.0
         self.ask_size = 0.0
+        # Wall-clock arrival timestamps of the most recent quote / trade. Drive the
+        # has_data freshness check (a reconnect-frozen book latches stale, not True).
+        self.last_quote_ts = 0.0
+        self.last_trade_ts = 0.0
         self.multiplier = multiplier          # $ per point (futures contract spec)
         self._window = window_sec
         self.cvd = 0.0
@@ -145,15 +152,37 @@ class OrderFlowEngine:
         self.depth_levels = DEPTH_LEVELS
 
     @property
+    def _last_update_ts(self) -> float:
+        return max(self.last_quote_ts, self.last_trade_ts)
+
+    @property
+    def ever_had_data(self) -> bool:
+        """True once ANY quote/trade has ever arrived for this symbol."""
+        return self._last_update_ts > 0.0
+
+    @property
     def has_data(self) -> bool:
-        """True once real depth or trades have arrived. The engine only applies
-        the order-flow gate when this is True, so a cold feed fails OPEN rather
-        than blocking every entry during warm-up."""
+        """True only when a FRESH (within STALENESS_SEC) quote/trade backs a real
+        book. A cold feed (never warmed) returns False → the engine fails OPEN
+        during warm-up; a frozen/reconnected feed also returns False but is
+        reported `stale` so the engine fails CLOSED on stale microstructure."""
+        if not self.ever_had_data:
+            return False
+        if (time.time() - self._last_update_ts) > STALENESS_SEC:
+            return False
         return (self.bid_size + self.ask_size) > 0 or self._trades_seen > 0 or self.book.has_depth
+
+    @property
+    def stale(self) -> bool:
+        """True when the feed HAD data but the latest update is older than the
+        staleness window (a frozen book). Distinguishes a stalled feed from a
+        never-warmed one so the gate can fail closed only on the former."""
+        return self.ever_had_data and (time.time() - self._last_update_ts) > STALENESS_SEC
 
     # ── L2 depth ingest (Rithmic ORDER_BOOK / template 156) ──
     def on_depth_snapshot(self, bids: list[tuple[float, float]], asks: list[tuple[float, float]]) -> None:
         self.book.apply_snapshot(bids, asks)
+        self.last_quote_ts = time.time()
         bb, ba = self.book.best_bid(), self.book.best_ask()
         if bb and ba:                          # keep top-of-book mirror in sync
             self.bid, self.bid_size = bb
@@ -161,6 +190,7 @@ class OrderFlowEngine:
 
     def on_depth_update(self, side: str, price: float, size: float) -> None:
         self.book.apply_update(side, price, size)
+        self.last_quote_ts = time.time()
         bb, ba = self.book.best_bid(), self.book.best_ask()
         if bb:
             self.bid, self.bid_size = bb
@@ -170,6 +200,7 @@ class OrderFlowEngine:
     # ── ingest ────────────────────────────────────────────
     def on_depth(self, bid: float, bid_size: float, ask: float, ask_size: float) -> None:
         self.bid, self.bid_size, self.ask, self.ask_size = bid, bid_size, ask, ask_size
+        self.last_quote_ts = time.time()
 
     def on_trade(self, price: float, size: float, ts: float | None = None) -> int:
         """Classify aggressor vs NBBO, update CVD + whale buckets.
@@ -177,6 +208,9 @@ class OrderFlowEngine:
         Returns the signed direction of the trade (+1 buy, -1 sell, 0 unknown).
         """
         ts = ts if ts is not None else time.time()
+        # Staleness is keyed off real arrival time (NOT the possibly-synthetic
+        # exchange ts used for the 1-sec notional buckets below).
+        self.last_trade_ts = time.time()
         # aggressor: at/above ask = buyer-initiated, at/below bid = seller-initiated;
         # between → tick rule vs last print.
         if self.ask and price >= self.ask:

@@ -38,35 +38,28 @@ class MarketData:
     def close(self) -> None:
         self._http.close()
 
-    def bars(self, symbol: str, timeframe: str = "1Day", limit: int = 120) -> dict:
-        """Return {"close":[...], "high":[...], "low":[...]} oldest->newest.
-
-        Empty dict on any failure. `timeframe` follows Alpaca syntax
-        (1Min, 5Min, 15Min, 1Hour, 1Day).
-        """
-        # Index underlyings (SPX/XSP) have no Alpaca stocks feed — read direction off
-        # the tracking ETF (SPX->SPY). Price/GEX still come from the real index chain.
+    def _fetch_bars(self, symbol: str, timeframe: str, limit: int) -> dict:
+        """Fetch bars, RAISING on any transport/HTTP error so callers can tell a
+        data OUTAGE apart from a genuine empty/flat result. See bars() for the
+        error-swallowing wrapper used where {} is an acceptable degrade."""
         if CONFIG.is_index(symbol):
             symbol = CONFIG.proxy_for(symbol)
         start = (datetime.now(timezone.utc) - timedelta(days=limit * 2 + 5)).date().isoformat()
-        try:
-            r = self._http.get(
-                f"{CONFIG.alpaca_data_url}/v2/stocks/{symbol}/bars",
-                params={
-                    "timeframe": timeframe,
-                    "start": start,
-                    "limit": limit,
-                    "adjustment": "split",
-                    "feed": _DATA_FEED,
-                    # newest-first so `limit` returns the MOST RECENT bars, not the oldest
-                    # in the window (which left intraday timeframes on months-stale data).
-                    "sort": "desc",
-                },
-            )
-            r.raise_for_status()
-            data = r.json().get("bars") or []
-        except Exception:  # noqa: BLE001
-            return {}
+        r = self._http.get(
+            f"{CONFIG.alpaca_data_url}/v2/stocks/{symbol}/bars",
+            params={
+                "timeframe": timeframe,
+                "start": start,
+                "limit": limit,
+                "adjustment": "split",
+                "feed": _DATA_FEED,
+                # newest-first so `limit` returns the MOST RECENT bars, not the oldest
+                # in the window (which left intraday timeframes on months-stale data).
+                "sort": "desc",
+            },
+        )
+        r.raise_for_status()
+        data = r.json().get("bars") or []
         data = list(reversed(data))  # back to oldest->newest for the indicators
         return {
             "close": [float(b["c"]) for b in data],
@@ -74,6 +67,17 @@ class MarketData:
             "low": [float(b["l"]) for b in data],
             "volume": [float(b.get("v", 0)) for b in data],
         }
+
+    def bars(self, symbol: str, timeframe: str = "1Day", limit: int = 120) -> dict:
+        """Return {"close":[...], "high":[...], "low":[...]} oldest->newest.
+
+        Empty dict on any failure. `timeframe` follows Alpaca syntax
+        (1Min, 5Min, 15Min, 1Hour, 1Day).
+        """
+        try:
+            return self._fetch_bars(symbol, timeframe, limit)
+        except Exception:  # noqa: BLE001
+            return {}
 
     def quote(self, symbol: str) -> Quote | None:
         try:
@@ -97,10 +101,17 @@ class MarketData:
                 out[s] = q
         return out
 
-    def intraday_change_pct(self, symbol: str) -> float:
-        """Today's % move vs the prior close — powers the circuit breaker."""
-        b = self.bars(symbol, timeframe="1Day", limit=2)
+    def intraday_change_pct(self, symbol: str) -> float | None:
+        """Today's % move vs the prior close — powers the circuit breaker.
+
+        Returns None on a DATA OUTAGE or insufficient history (caller must fail
+        CLOSED — halt new entries), distinct from a genuine 0.0% move (flat tape).
+        """
+        try:
+            b = self._fetch_bars(symbol, "1Day", 2)
+        except Exception:  # noqa: BLE001
+            return None  # transport/HTTP failure → unknown, caller fails closed
         closes = b.get("close") or []
         if len(closes) < 2 or closes[-2] == 0:
-            return 0.0
+            return None  # not enough data to determine a move
         return (closes[-1] - closes[-2]) / closes[-2] * 100.0

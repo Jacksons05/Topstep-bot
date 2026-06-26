@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from pathlib import Path
 
 from config import CONFIG
@@ -58,8 +59,16 @@ class MLQuant:
                 names = json.loads(self._features_path.read_text())
                 self._feature_names = tuple(names)
                 if self._feature_names != FEATURE_NAMES:
-                    log.warning("[ML] model feature order differs from features.FEATURE_NAMES "
-                                "— retrain after changing the feature set.")
+                    # HARD FAIL: row_to_vector always emits columns in module
+                    # FEATURE_NAMES order, so a model trained on a different order
+                    # would silently receive features in the WRONG columns. Refuse
+                    # to load — the engine falls back to the deterministic
+                    # quant_signal rather than trade on scrambled inputs.
+                    log.error("[ML] feature contract mismatch: model features != "
+                              "features.FEATURE_NAMES — refusing to load. Retrain the "
+                              "model. Falling back to quant_signal.")
+                    self._load_failed = True
+                    return False
             self._loaded = True
             log.info(f"[ML] model loaded from {self._model_path.name} "
                      f"({len(self._feature_names)} features)")
@@ -91,16 +100,29 @@ class MLQuant:
             log.error(f"[ML] predict failed: {e} — falling back")
             return None
 
-        lean = 2.0 * p_up - 1.0
-        # deadband: weak edge → no signal, let confluence stay flat
-        if abs(p_up - 0.5) < (CONFIG.ml_min_prob - 0.5):
+        # Fail closed on a NaN/inf or out-of-range probability: a bad p_up must map
+        # to FLAT/None, never bypass the deadband and clamp to a max-confidence BUY.
+        if not math.isfinite(p_up) or not (0.0 <= p_up <= 1.0):
+            log.warning(f"[ML] non-finite / out-of-range P(up)={p_up} — no signal")
+            return None
+
+        # deadband as a POSITIVE condition: a tradeable edge ONLY when the
+        # probability is far enough from 0.5; otherwise FLAT. (Written this way so
+        # there is no path by which a degenerate value falls through to a lean.)
+        if abs(p_up - 0.5) >= (CONFIG.ml_min_prob - 0.5):
+            lean = max(-1.0, min(1.0, 2.0 * p_up - 1.0))
+        else:
             lean = 0.0
-        lean = max(-1.0, min(1.0, lean))
 
         closes = bars.get("close") or []
         highs = bars.get("high") or closes
         lows = bars.get("low") or closes
         a = _atr_list(highs, lows, closes, CONFIG.atr_period) or row.get("atr_pct", 0.0) * (closes[-1] if closes else 0.0)
+        # ATR must be a finite, strictly-positive number: it sizes the risk stop
+        # downstream. A NaN/0 ATR would produce a stop that never triggers.
+        if not (math.isfinite(a) and a > 0):
+            log.warning(f"[ML] invalid ATR={a} — no signal (would yield a dead stop)")
+            return None
         micro_note = ""
         if micro and micro.get("obi") is not None:
             micro_note = f" · OBI {float(micro['obi']):+.2f}"

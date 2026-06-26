@@ -18,7 +18,7 @@ from datetime import date, datetime, timezone
 
 from agents import AgentTeam, SymbolContext, portfolio_weights
 from config import CONFIG
-from executor import build_executor
+from executor import build_executor, futures_plan
 from marketdata import MarketData
 from news import NewsFeed
 from events import Events
@@ -30,8 +30,8 @@ from risk import check, circuit_breaker, kill_switch_active, should_exit
 from signals import Signal, label_for, quant_signal
 from ml_signal import ML
 from datafeed import LiveRecorder
-from futures_symbols import dollar_value_per_point
-from state import State
+from futures_symbols import dollar_value_per_point, is_futures_symbol
+from state import Position, State
 from regime_strategy import (
     get_regime_params,
     regime_allows_signal,
@@ -71,6 +71,9 @@ class Engine:
         # managing/flattening) rather than trade blind against the trailing MLL.
         self._equity_trusted: bool = True
         self._equity_blocked: bool = False
+        # Aggressive equity estimate used to ratchet the trailing-MLL peak (set by
+        # _account_equity each scan); seeded at the account size.
+        self._peak_equity_est: float = CONFIG.topstep_account_size
         self._oflow = None  # ProjectXOrderFlowFeed when a live ProjectX feed is up
         # Record-own data layer (Databento alternative): captures bar+L2 snapshots
         # to parquet so the ML signal can be retrained on YOUR ProjectX feed.
@@ -130,6 +133,13 @@ class Engine:
                 ".env to trade futures live via ProjectX/TopstepX."
             )
 
+        # Startup reconciliation (H6): adopt/drop positions against the live broker
+        # so a restart after a Topstep auto-liquidation never manages ghosts.
+        try:
+            self._reconcile_positions()
+        except Exception as e:  # noqa: BLE001
+            notify(f"⚠ startup reconcile failed ({e})")
+
     def _market_open(self) -> bool:
         """True during US regular trading hours (Mon–Fri 9:30–16:00 ET, skip
         holidays). Always True when MARKET_HOURS_ONLY is off."""
@@ -176,6 +186,18 @@ class Engine:
             notify("market closed — idle (no scan)")
             return
 
+        # Kill switch (M14): a disk file / env flag instantly FLATTENS every open
+        # position and halts management+entries for this cycle — not merely blocks
+        # new entries. Checked before anything else so a panic-stop takes effect now.
+        if kill_switch_active():
+            self._kill_switch_halt()
+            return
+
+        # Reconcile the local book against the broker's real open positions (H6)
+        # BEFORE managing anything: drop phantoms Topstep auto-liquidated / closed,
+        # adopt orphans, so we never manage a position that no longer exists.
+        self._reconcile_positions()
+
         # Refresh the Topstep day base (Daily Loss Limit anchor) each new session.
         # Keyed off the CME/Topstep SESSION date (rolls 18:00 ET), NOT the server
         # UTC/local calendar date — otherwise the daily-loss + consistency limits
@@ -206,7 +228,9 @@ class Engine:
                        "(no new entries this cycle; open positions still managed)")
             else:
                 self._equity_blocked = False
-                self._topstep.update_equity(equity)
+                # Ratchet the trailing-MLL peak off the aggressive live estimate;
+                # check the breach off the conservative equity.
+                self._topstep.update_equity(self._peak_equity_est)
                 breached, why = self._topstep.risk_breach(equity, self.state, unrealized)
                 if breached and not self._topstep_day_halt:
                     notify(f"🛑 TOPSTEP BREACH — {why} | flattening all & halting new entries")
@@ -216,9 +240,15 @@ class Engine:
         # 0. reconcile provisional entries against real broker fills
         self._reconcile_fills()
 
-        # 1. regime + circuit breaker
+        # 1. regime + circuit breaker. A None move = data outage (NOT a genuine 0%
+        #    move) → fail CLOSED: force the breaker RED so no new entries fire blind
+        #    during a feed blackout (open positions are still managed/flattened).
         regime_move = self.data.intraday_change_pct(CONFIG.regime_symbol)
-        self.cb_level, cb_mult = circuit_breaker(regime_move)
+        if regime_move is None:
+            self.cb_level, cb_mult = "red", 0.0
+            notify("⚠ regime data unavailable — circuit breaker RED (fail closed, no new entries)")
+        else:
+            self.cb_level, cb_mult = circuit_breaker(regime_move)
 
         # 2. manage exits first
         self._manage_open()
@@ -344,13 +374,37 @@ class Engine:
                         notify(f"  skip (order-flow: {of_reason}): {sig.symbol}")
                         continue
                     notify(f"  order-flow OK ({of_reason}): {sig.symbol}")
+                elif of.stale:
+                    # Feed HAD data but is now frozen → fail CLOSED: do not enter on
+                    # stale microstructure (a warm-up/cold feed still fails open above).
+                    notify(f"  skip (order-flow feed stale — fail closed): {sig.symbol}")
+                    continue
 
-            qty = max(1, int(size / sig.price)) if sig.price > 0 else 0
+            # ── Risk-based futures sizing + worst-case MLL pre-check (C3/H7) ──
+            # For a futures symbol, size off the per-trade risk budget and reject
+            # outright if (a) the stop is too wide for the budget (qty=0) or (b) the
+            # full stop-out would breach the LIVE trailing-MLL floor.
+            if is_futures_symbol(sig.symbol):
+                plan = futures_plan(sig, sig.price)
+                if plan is None:
+                    notify(f"  skip (sizing: stop too wide / invalid ATR for risk budget): {sig.symbol}")
+                    continue
+                if self._topstep is not None:
+                    eq_chk, _u = self._account_equity()
+                    if (eq_chk - plan.risk_usd) <= self._topstep.mll_floor():
+                        notify(f"  skip (worst-case loss ${plan.risk_usd:,.0f} would breach "
+                               f"trailing MLL floor ${self._topstep.mll_floor():,.0f}): {sig.symbol}")
+                        continue
+
             try:
                 pos = self.executor.open(sig, size, self.state)
             except Exception as e:  # noqa: BLE001
                 notify(f"  ! execute failed {sig.symbol}: {e}")
                 continue
+            if pos is None:
+                notify(f"  skip (sizing rejected — no order placed): {sig.symbol}")
+                continue
+            qty = pos.qty
             self.cooldowns[sig.symbol] = time.time()
             notify("OPEN  " + signal_msg(sig, qty, size, self.executor.mode) +
                    f" [regime={rk} sz={regime_params['size_mult']:.0%}]")
@@ -558,6 +612,13 @@ class Engine:
         internal_equity = (CONFIG.topstep_account_size
                            + self.state.realized_pnl_usd + unrealized)
         equity = internal_equity
+        # Peak estimate for the trailing-MLL high-water-mark. Topstep ratchets its
+        # floor on the HIGHER (more aggressive) live unrealized peak, so for the
+        # PEAK we take the max of the two equity views — under-ratcheting the peak
+        # would set our floor BELOW Topstep's real floor and let us breach theirs
+        # while we still think we have room. The breach CHECK still uses the
+        # conservative (min) equity below.
+        peak_est = internal_equity
         self._equity_trusted = False
         try:
             acct = self.executor.broker.account()
@@ -566,10 +627,102 @@ class Engine:
             if bal and "mock" not in src and "error" not in src:
                 # Real-time combined equity = realized cash balance + open MTM.
                 equity = min(internal_equity, float(bal) + unrealized)
+                peak_est = max(internal_equity, float(bal) + unrealized)
                 self._equity_trusted = True
         except Exception:  # noqa: BLE001
             pass
+        self._peak_equity_est = peak_est
         return equity, unrealized
+
+    def _flatten_all(self, reason: str) -> None:
+        """Broker-agnostic flatten of every open real position via the executor
+        (used by the kill switch when no ProjectX/Topstep layer is attached)."""
+        for pos in list(self.state.open_positions):
+            if pos.shadow:
+                continue
+            mark = self._mark(pos.symbol)
+            exit_price = mark if mark is not None else pos.entry_price
+            try:
+                self.executor.close(pos, exit_price, self.state)
+                if self._topstep is not None:
+                    self._topstep.record_close(pos.pnl_usd, hold_seconds(pos.opened_at))
+                notify(f"  FLATTEN ({reason}) {pos.symbol} qty={pos.qty} @ ~{exit_price:.2f}")
+            except Exception as e:  # noqa: BLE001
+                notify(f"  ! flatten error {pos.symbol}: {e}")
+
+    def _kill_switch_halt(self) -> None:
+        """M14: kill switch — flatten ALL positions and halt management for the
+        cycle (the base risk.check only blocks NEW entries)."""
+        notify("🛑 KILL SWITCH active — flattening ALL positions and halting management")
+        if self._topstep is not None:
+            self._topstep_flatten_all("kill switch")
+            self._topstep_day_halt = True
+        else:
+            self._flatten_all("kill switch")
+        self.state.save()
+
+    def _reconcile_positions(self) -> None:
+        """H6: sync the local book against the broker's actual open positions.
+
+        Phantom (local-open, not at broker) → closed locally (Topstep
+        auto-liquidation or a manual/native-stop close) so the engine stops
+        managing it. Orphan (at broker, not local) → adopted as a managed
+        Position so it is counted and EOD-flattened. Only runs against a real
+        (non-mock) ProjectX account."""
+        broker = self.executor.broker
+        get_positions = getattr(broker, "get_positions", None)
+        if not callable(get_positions) or not self._live_projectx():
+            return
+        try:
+            broker_positions = get_positions()
+        except Exception as e:  # noqa: BLE001
+            notify(f"⚠ reconcile: broker.get_positions() failed ({e}) — skipped")
+            return
+
+        bro: dict[str, dict] = {}
+        for bp in broker_positions or []:
+            sym = str(bp.get("symbol", "")).upper()
+            if sym:
+                bro[sym] = bp
+
+        changed = False
+        # phantom: local open (non-shadow) with no matching broker position
+        for pos in list(self.state.open_positions):
+            if pos.shadow:
+                continue
+            if pos.symbol.upper() not in bro:
+                mark = self._mark(pos.symbol)
+                exit_price = mark if mark is not None else pos.entry_price
+                self.state.close(pos, exit_price)
+                if self._topstep is not None:
+                    self._topstep.record_close(pos.pnl_usd, hold_seconds(pos.opened_at))
+                notify(f"♻ reconcile: phantom {pos.symbol} not at broker — closed "
+                       f"locally @ ~{exit_price:.2f} pnl=${pos.pnl_usd:.2f}")
+                changed = True
+
+        # orphan: broker position with no local counterpart → adopt
+        local_syms = {p.symbol.upper() for p in self.state.open_positions if not p.shadow}
+        for sym, bp in bro.items():
+            if sym in local_syms:
+                continue
+            qty = float(bp.get("qty") or 0.0)
+            if qty <= 0:
+                continue
+            entry = float(bp.get("avg_price") or 0.0) or (self._mark(sym) or 0.0)
+            side = bp.get("side", "BUY")
+            self.state.add(Position(
+                symbol=sym, asset="future", side=side, qty=qty,
+                entry_price=entry, size_usd=entry * qty, stop=0.0, target=0.0,
+                kind="adopted", thesis="reconciled orphan (broker position)",
+                opened_at=datetime.now(timezone.utc).isoformat(),
+                mode=self.executor.mode, order_id="", filled=True,
+            ))
+            notify(f"⚠ reconcile: ORPHAN broker position {sym} {side} qty={qty} "
+                   f"adopted (no protective stop attached — will EOD-flatten; review)")
+            changed = True
+
+        if changed:
+            self.state.save()
 
     def _topstep_flatten_all(self, reason: str) -> None:
         """Market-close every open real position via ProjectX and book it in
@@ -636,6 +789,7 @@ class Engine:
             if self._topstep is not None and not pos.shadow:
                 self._topstep.record_close(pos.pnl_usd, hold_seconds(pos.opened_at))
             tag = "EXIT-SHADOW" if pos.shadow else "CLOSE"
-            notify(f"{tag} {reason} {pos.symbol} @ {q.price:.2f} pnl=${pos.pnl_usd:.2f}")
+            exit_px = pos.exit_price if pos.exit_price is not None else mark
+            notify(f"{tag} {reason} {pos.symbol} @ {exit_px:.2f} pnl=${pos.pnl_usd:.2f}")
             if CONFIG.manual_tickets and not pos.shadow:
-                notify(exit_ticket(pos, q.price, reason))
+                notify(exit_ticket(pos, exit_px, reason))
