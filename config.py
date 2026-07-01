@@ -1,8 +1,8 @@
 """Typed config loaded from environment / .env.
 
-Stock + options trading bot (2026 agentic framework). Equities trade live in
-paper mode via Alpaca; the options-exposure (GEX/DEX/VEX/CHEX) stack is wired
-but needs a dealer-positioning data source to produce live numbers.
+Topstep futures trading bot (2026 agentic framework). Futures execute via the
+ProjectX (TopstepX) REST + SignalR gateway; the Topstep risk layer enforces
+trailing MLL, DLL, and contract caps on every order.
 """
 from __future__ import annotations
 
@@ -47,12 +47,12 @@ class Config:
     # shut so the loop just checks the clock instead of burning API credits 24/7.
     market_hours_only: bool = _b("MARKET_HOURS_ONLY", True)
     closed_interval_sec: int = _i("CLOSED_INTERVAL_SEC", 900)
-    watchlist: tuple[str, ...] = _csv("WATCHLIST", "AAPL,MSFT,NVDA,SPY,QQQ,TSLA,AMZN,META")
+    watchlist: tuple[str, ...] = _csv("WATCHLIST", "ES,NQ,MES,MNQ")
     # Universe index used for regime / circuit-breaker reads.
     regime_symbol: str = _s("REGIME_SYMBOL", "SPY")
 
     # ── asset classes enabled ─────────────────────────────
-    trade_equities: bool = _b("TRADE_EQUITIES", True)
+    trade_equities: bool = _b("TRADE_EQUITIES", False)  # futures-only fork; flip True to re-enable equity scanning
     trade_options: bool = _b("TRADE_OPTIONS", False)   # needs OPTIONS data source
 
     # ── confluence thresholds ─────────────────────────────
@@ -255,24 +255,22 @@ class Config:
     ibkr_port: int = _i("IBKR_PORT", 7497)
     ibkr_client_id: int = _i("IBKR_CLIENT_ID", 1)
 
-    # ── Topstep Trading / Rithmic integration ───────────────
-    # DISABLED by default. Set TOPSTEP_MODE_ENABLED=True AND supply
-    # RITHMIC_USER + RITHMIC_PASSWORD to activate futures execution
-    # through the Rithmic executor + Topstep risk layer.
-    topstep_mode_enabled: bool = _b("TOPSTEP_MODE_ENABLED", True)  # this is the Topstep futures fork
-    # Order-flow confirmation gate (OBI/CVD/whale from the live Rithmic L1+trade
+    # ── Topstep / ProjectX integration ──────────────────────
+    # Enabled by default (this is the Topstep futures fork). The engine will
+    # attempt to authenticate with ProjectX at startup; if credentials are absent
+    # it falls back to the sim broker so the loop can still run offline.
+    topstep_mode_enabled: bool = _b("TOPSTEP_MODE_ENABLED", True)
+    # Order-flow confirmation gate (OBI/CVD/whale from the live ProjectX SignalR
     # feed). Only applied when a live feed has data for the symbol; fails open
-    # otherwise (warm-up, non-futures symbol, mock mode).
+    # otherwise (warm-up, non-futures symbol, mock/sim mode).
     orderflow_gate_enabled: bool = _b("ORDERFLOW_GATE_ENABLED", True)
-    # Rithmic credentials — leave blank until you have your account.
-    rithmic_user: str = _s("RITHMIC_USER")                             # your Rithmic username
-    rithmic_password: str = _s("RITHMIC_PASSWORD")                     # your Rithmic password
-    rithmic_system: str = _s("RITHMIC_SYSTEM", "Rithmic Paper Trading")  # system/gateway name
-    rithmic_env: str = _s("RITHMIC_ENV", "paper")                      # "paper" | "live"
-    rithmic_url: str = _s("RITHMIC_URL", "rituz00100.rithmic.com:443")  # WebSocket gateway URL (test default; production URL provided by Rithmic after conformance)
-    # Rithmic ties each credential set to a REGISTERED app_name/app_version
-    # (issued with API access / after conformance). A wrong one → login rp_code 13
-    # "permission denied". Set these to exactly what Rithmic/Topstep assigned you.
+    # Legacy Rithmic fields — kept so existing .env files with RITHMIC_* vars don't
+    # error on load. The active execution path is ProjectX (below); Rithmic is unused.
+    rithmic_user: str = _s("RITHMIC_USER")
+    rithmic_password: str = _s("RITHMIC_PASSWORD")
+    rithmic_system: str = _s("RITHMIC_SYSTEM", "Rithmic Paper Trading")
+    rithmic_env: str = _s("RITHMIC_ENV", "paper")
+    rithmic_url: str = _s("RITHMIC_URL", "rituz00100.rithmic.com:443")
     rithmic_app_name: str = _s("RITHMIC_APP_NAME", "JARVIS")
     rithmic_app_version: str = _s("RITHMIC_APP_VERSION", "1.0")
     # ── Topstep / ProjectX Gateway API (current execution path) ────────────
@@ -322,10 +320,10 @@ class Config:
     # topstep_scalp_profit_pct_limit of realized profit.
     topstep_min_profit_hold_sec: float = _f("TOPSTEP_MIN_PROFIT_HOLD_SEC", 5.0)
     topstep_scalp_profit_pct_limit: float = _f("TOPSTEP_SCALP_PROFIT_PCT_LIMIT", 0.40)
-    # Signal-only bridge: until the bot has direct Rithmic API access, it runs on
-    # the Sim broker and emits copy-paste TRADE/EXIT tickets for the user to
-    # execute manually on the Tradesea dashboard. Set MANUAL_TICKETS=false once
-    # live API execution is wired (no need for hand-off tickets then).
+    # Signal-only bridge: when ProjectX credentials are absent the bot runs on the
+    # sim broker and emits copy-paste TRADE/EXIT tickets for the user to execute
+    # manually on the TopstepX dashboard. Set MANUAL_TICKETS=false once live API
+    # execution is confirmed working (no need for hand-off tickets then).
     manual_tickets: bool = _b("MANUAL_TICKETS", True)
     # Futures symbols to watch when Topstep mode is active (comma-separated roots)
     futures_symbols: tuple[str, ...] = _csv("FUTURES_SYMBOLS", "ES,NQ,MES,MNQ")
@@ -400,15 +398,13 @@ class Config:
         errs: list[str] = []
         if self.broker not in ("alpaca", "ibkr", "sim"):
             errs.append("BROKER must be alpaca|ibkr|sim")
-        # Topstep / Rithmic: warn when enabled but missing credentials (not fatal —
-        # the engine falls back to Alpaca automatically in that case).
-        if self.topstep_mode_enabled and not (self.rithmic_user and self.rithmic_password):
+        # ProjectX credentials: warn when Topstep mode is on but keys are absent
+        # (not fatal — the engine falls back to sim broker until credentials are set).
+        if self.topstep_mode_enabled and not (self.projectx_username and self.projectx_api_key):
             print(
-                "WARNING: TOPSTEP_MODE_ENABLED=True but RITHMIC_USER or RITHMIC_PASSWORD "
-                "is empty — engine will fall back to Alpaca until credentials are set."
+                "WARNING: TOPSTEP_MODE_ENABLED=True but PROJECTX_USERNAME or PROJECTX_API_KEY "
+                "is empty — engine will fall back to sim broker until credentials are set."
             )
-        if self.topstep_mode_enabled and self.rithmic_env not in ("paper", "live"):
-            errs.append("RITHMIC_ENV must be 'paper' or 'live'")
         # The LIVE Topstep path executes through ProjectX (TopstepX), NOT Rithmic.
         # When Topstep mode is armed for live/funded trading (PROJECTX_LIVE=True or
         # TRADING_MODE=live), the ProjectX credentials MUST be present — otherwise
