@@ -132,7 +132,7 @@ class ProjectXOrderFlowFeed:
                 HubConnectionBuilder()
                 .with_url(url, options={"skip_negotiation": True})
                 .with_automatic_reconnect({
-                    "type": "raw", "keep_alive_interval": 10, "reconnect_interval": 5,
+                    "type": "raw", "keep_alive_interval": 5, "reconnect_interval": 2,
                 })
                 .build()
             )

@@ -101,7 +101,14 @@ class ProjectXBroker:
             )
             return
 
-        self._http = httpx.Client(base_url=self._base, timeout=15.0)
+        # Shorter keepalive_expiry than a typical server idle-drop window forces
+        # httpx to open fresh connections proactively instead of handing back a
+        # pooled one the server may have already killed — the main source of the
+        # "SSL: BAD_LENGTH" / "EOF violation" resets seen on this connection pool.
+        self._http = httpx.Client(
+            base_url=self._base, timeout=8.0,
+            limits=httpx.Limits(max_keepalive_connections=5, keepalive_expiry=20.0),
+        )
         try:
             self._authenticate()
             self._load_account()
@@ -150,19 +157,30 @@ class ProjectXBroker:
             log.warning(f"[ProjectX] token validate failed ({exc}); re-logging in")
         self._authenticate()  # fall back to a fresh login
 
+    _TRANSPORT_RETRIES = 3
+    _TRANSPORT_RETRY_BACKOFF_S = 0.4  # doubles each attempt: 0.4, 0.8, 1.6
+
     def _post(self, path: str, body: dict) -> dict:
         """POST helper: refreshes token, retries once on 401, returns parsed JSON.
 
-        Also retries once on a transport-level failure (dropped keep-alive
-        connection, SSL reset, etc.) — these are transient and common on
-        long-lived connection pools; a bare retry with a fresh connection
-        clears them almost always."""
+        Also retries on a transport-level failure (dropped keep-alive connection,
+        SSL reset, etc.) — these are transient and common on long-lived connection
+        pools, especially right after startup while the network path settles.
+        A short exponential backoff between attempts avoids hammering a link
+        that's still down; a fresh connection from the pool clears it otherwise."""
         self._ensure_token()
-        try:
-            r = self._http.post(path, json=body)
-        except httpx.TransportError as exc:
-            log.warning(f"[ProjectX] transport error on POST {path} ({exc}); retrying once")
-            r = self._http.post(path, json=body)
+        r = None
+        for attempt in range(self._TRANSPORT_RETRIES):
+            try:
+                r = self._http.post(path, json=body)
+                break
+            except httpx.TransportError as exc:
+                if attempt == self._TRANSPORT_RETRIES - 1:
+                    raise
+                backoff = self._TRANSPORT_RETRY_BACKOFF_S * (2 ** attempt)
+                log.warning(f"[ProjectX] transport error on POST {path} ({exc}); "
+                            f"retry {attempt + 1}/{self._TRANSPORT_RETRIES - 1} in {backoff:.1f}s")
+                time.sleep(backoff)
         if r.status_code == 401:
             self._authenticate()
             r = self._http.post(path, json=body)
