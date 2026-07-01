@@ -306,9 +306,12 @@ class TopstepRiskManager:
         options; this rule handles futures.
         """
         flatten_t = _parse_time(CONFIG.topstep_flatten_time)
+        # Flatten window: flatten_time → 17:00 ET (CME maintenance close).
+        # After 18:00 ET the overnight Globex session is open — new entries allowed.
+        close_t = _parse_time("17:00")
         now = _now_et()
         current_t = now.time()
-        result = current_t >= flatten_t
+        result = flatten_t <= current_t < close_t
         if result:
             log.debug(
                 f"[TopstepRisk] flatten window active: "
