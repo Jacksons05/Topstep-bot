@@ -15,7 +15,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 
@@ -50,6 +50,7 @@ _DDL_MIGRATE = [
     "ALTER TABLE positions ADD COLUMN IF NOT EXISTS order_id TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE positions ADD COLUMN IF NOT EXISTS filled BOOLEAN NOT NULL DEFAULT TRUE",
     "ALTER TABLE positions ADD COLUMN IF NOT EXISTS contract TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE state_meta ADD COLUMN IF NOT EXISTS trading_days TEXT NOT NULL DEFAULT ''",
 ]
 
 _DDL_META = """
@@ -59,6 +60,7 @@ CREATE TABLE IF NOT EXISTS state_meta (
     shadow_pnl    REAL    NOT NULL DEFAULT 0,
     day           TEXT    NOT NULL DEFAULT '',
     day_start_pnl REAL    NOT NULL DEFAULT 0,
+    trading_days  TEXT    NOT NULL DEFAULT '',
     CONSTRAINT single_row CHECK (id = 1)
 )
 """
@@ -200,6 +202,7 @@ class State:
     shadow_pnl_usd: float = 0.0
     day: str = ""
     day_start_pnl: float = 0.0
+    trading_days: set[str] = field(default_factory=set)
 
     @classmethod
     def load(cls) -> "State":
@@ -211,13 +214,14 @@ class State:
         _ensure_schema()
         with _db() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT realized_pnl, shadow_pnl, day, day_start_pnl "
+                cur.execute("SELECT realized_pnl, shadow_pnl, day, day_start_pnl, trading_days "
                             "FROM state_meta WHERE id = 1")
                 row = cur.fetchone()
                 realized = float(row[0]) if row else 0.0
                 shadow = float(row[1]) if row else 0.0
                 day = str(row[2]) if row else _today()
                 day_start = float(row[3]) if row else 0.0
+                trading_days = set(row[4].split(",")) if row and row[4] else set()
 
                 cur.execute(
                     "SELECT symbol, asset, side, qty, entry_price, size_usd, stop, "
@@ -238,7 +242,7 @@ class State:
                 ]
 
         s = cls(positions=positions, realized_pnl_usd=realized, shadow_pnl_usd=shadow,
-                day=day, day_start_pnl=day_start)
+                day=day, day_start_pnl=day_start, trading_days=trading_days)
         s._roll_day()
         return s
 
@@ -292,14 +296,16 @@ class State:
 
                 # ── state_meta (single-row upsert — no ordering needed) ──────
                 cur.execute(
-                    """INSERT INTO state_meta (id, realized_pnl, shadow_pnl, day, day_start_pnl)
-                       VALUES (1, %s, %s, %s, %s)
+                    """INSERT INTO state_meta (id, realized_pnl, shadow_pnl, day, day_start_pnl, trading_days)
+                       VALUES (1, %s, %s, %s, %s, %s)
                        ON CONFLICT (id) DO UPDATE
                          SET realized_pnl=EXCLUDED.realized_pnl,
                              shadow_pnl=EXCLUDED.shadow_pnl,
                              day=EXCLUDED.day,
-                             day_start_pnl=EXCLUDED.day_start_pnl""",
-                    (self.realized_pnl_usd, self.shadow_pnl_usd, self.day, self.day_start_pnl),
+                             day_start_pnl=EXCLUDED.day_start_pnl,
+                             trading_days=EXCLUDED.trading_days""",
+                    (self.realized_pnl_usd, self.shadow_pnl_usd, self.day, self.day_start_pnl,
+                     ",".join(sorted(self.trading_days))),
                 )
 
                 # ── positions: sort → lock existing rows → upsert ────────────
@@ -386,6 +392,8 @@ class State:
 
     def add(self, pos: Position) -> None:
         self.positions.append(pos)
+        if not pos.shadow:
+            self.trading_days.add(_topstep_session_date())
 
     def close(self, pos: Position, exit_price: float, pnl_override: float | None = None) -> None:
         pos.open = False
@@ -415,3 +423,15 @@ def _now() -> str:
 
 def _today() -> str:
     return datetime.now(timezone.utc).date().isoformat()
+
+
+def _topstep_session_date() -> str:
+    """Date of the current CME/Topstep trading session (rolls 18:00 ET),
+    matching Engine._topstep_session_date — used to count distinct active
+    trading days toward the Combine's minimum-days requirement."""
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("America/New_York"))
+    d = now.date()
+    if now.hour >= 18:
+        d += timedelta(days=1)
+    return d.isoformat()

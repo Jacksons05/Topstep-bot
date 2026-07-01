@@ -292,6 +292,7 @@ class Config:
     topstep_account_size: float = _f("TOPSTEP_ACCOUNT_SIZE", 50_000.0)        # starting balance
     topstep_trailing_mll: float = _f("TOPSTEP_TRAILING_MLL", 2_000.0)         # trailing Max Loss Limit ($) — HARD fail rule
     topstep_profit_target: float = _f("TOPSTEP_PROFIT_TARGET", 3_000.0)       # Combine profit objective
+    topstep_min_trading_days: int = _i("TOPSTEP_MIN_TRADING_DAYS", 3)         # Combine min separate active-trading days
     topstep_max_contracts: int = _i("TOPSTEP_MAX_CONTRACTS", 5)               # max ACCOUNT-WIDE open minis (50 micros @ 10:1)
     topstep_micro_ratio: int = _i("TOPSTEP_MICRO_RATIO", 10)                  # micros per 1 mini toward the limit (TopstepX)
     # Responsible Trading Advantage: adds a Daily Loss Limit. ON per the funded plan.

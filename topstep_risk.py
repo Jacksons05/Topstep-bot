@@ -140,6 +140,7 @@ class TopstepRiskManager:
         # winning trades, and the slice of it earned on trades held ≤Ns.
         self._win_profit_total: float = 0.0
         self._win_profit_scalp: float = 0.0
+        self._min_days_warned: bool = False
         log.info(
             f"[Topstep] initialized | account=${self.account_size:,.0f} | "
             f"start_equity=${start:,.2f} | trailing_MLL=${self.mll_buffer:,.0f} "
@@ -365,6 +366,22 @@ class TopstepRiskManager:
         if not dll_ok:
             return True, dll_reason
         return False, "ok"
+
+    def check_combine_progress(self, state: State) -> None:
+        """Warn once if the profit target is hit before the Combine's minimum
+        active-trading-days requirement is satisfied — the P&L number alone
+        can look like a pass when it isn't yet."""
+        if self._min_days_warned:
+            return
+        days = len(state.trading_days)
+        if (state.realized_pnl_usd >= CONFIG.topstep_profit_target
+                and days < CONFIG.topstep_min_trading_days):
+            self._min_days_warned = True
+            log.warning(
+                f"[Topstep] profit target (${CONFIG.topstep_profit_target:,.0f}) hit "
+                f"but only {days}/{CONFIG.topstep_min_trading_days} active trading days "
+                "logged — Combine not yet passable on the min-days rule."
+            )
 
     # ── Combined pre-trade gate ─────────────────────────────────────────────
 

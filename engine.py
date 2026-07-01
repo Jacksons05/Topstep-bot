@@ -252,6 +252,7 @@ class Engine:
                     notify(f"🛑 TOPSTEP BREACH — {why} | flattening all & halting new entries")
                     self._topstep_flatten_all(why)
                     self._topstep_day_halt = True
+                self._topstep.check_combine_progress(self.state)
 
         # 0. reconcile provisional entries against real broker fills
         self._reconcile_fills()
