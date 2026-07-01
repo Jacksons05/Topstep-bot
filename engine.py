@@ -166,16 +166,26 @@ class Engine:
             notify(f"⚠ startup reconcile failed ({e})")
 
     def _market_open(self) -> bool:
-        """True during US regular trading hours (Mon–Fri 9:30–16:00 ET, skip
-        holidays). Always True when MARKET_HOURS_ONLY is off."""
+        """True during CME futures trading hours.
+
+        CME Globex session: Sun 18:00 ET → Fri 17:00 ET, with a daily
+        maintenance break 17:00–18:00 ET. Saturday is always closed.
+        Always True when MARKET_HOURS_ONLY is off.
+        """
         if not CONFIG.market_hours_only:
             return True
         from zoneinfo import ZoneInfo
         now = datetime.now(ZoneInfo("America/New_York"))
-        if now.weekday() >= 5 or now.date().isoformat() in _US_HOLIDAYS:
-            return False
+        wd = now.weekday()   # Mon=0 … Sun=6
         mins = now.hour * 60 + now.minute
-        return 9 * 60 + 30 <= mins < 16 * 60
+        # Saturday: always closed
+        if wd == 5:
+            return False
+        # Sunday: open only after 18:00 ET (Globex Sunday open)
+        if wd == 6:
+            return mins >= 18 * 60
+        # Mon–Fri: closed during 17:00–18:00 ET maintenance window
+        return not (17 * 60 <= mins < 18 * 60)
 
     def _topstep_session_date(self) -> date:
         """Date of the current CME/Topstep trading session. The futures session
