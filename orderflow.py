@@ -20,6 +20,7 @@ Thresholds (overridable via env, defaults from the sources):
 from __future__ import annotations
 
 import os
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -150,6 +151,7 @@ class OrderFlowEngine:
         self._trades_seen = 0
         self.book = MultiLevelBook()          # L2 ladder when ORDER_BOOK feed is live
         self.depth_levels = DEPTH_LEVELS
+        self._lock = threading.Lock()         # guards _buckets + _trail (writer=websocket, reader=engine)
 
     @property
     def _last_update_ts(self) -> float:
@@ -229,14 +231,15 @@ class OrderFlowEngine:
         notional = price * size * self.multiplier * side
 
         sec = int(ts)
-        if self._buckets and self._buckets[-1][0] == sec:
-            self._buckets[-1] = (sec, self._buckets[-1][1] + notional)
-        else:
-            self._buckets.append((sec, notional))
-        self._evict(ts)
-        self._trail.append((price, self.cvd))
-        while len(self._trail) > 5000:
-            self._trail.popleft()
+        with self._lock:
+            if self._buckets and self._buckets[-1][0] == sec:
+                self._buckets[-1] = (sec, self._buckets[-1][1] + notional)
+            else:
+                self._buckets.append((sec, notional))
+            self._evict(ts)
+            self._trail.append((price, self.cvd))
+            while len(self._trail) > 5000:
+                self._trail.popleft()
         return side
 
     def _evict(self, now: float) -> None:
@@ -266,10 +269,11 @@ class OrderFlowEngine:
         """+1 / -1 if the latest 1-sec bucket is a statistically large block on
         the buy / sell side (MAD z > WHALE_Z and |notional| ≥ WHALE_NOTIONAL_USD),
         else 0."""
-        if len(self._buckets) < 3:
-            return 0
-        sec, signed = self._buckets[-1]
-        mags = [abs(v) for _, v in self._buckets]
+        with self._lock:
+            if len(self._buckets) < 3:
+                return 0
+            sec, signed = self._buckets[-1]
+            mags = [abs(v) for _, v in self._buckets]
         z = mad_modified_z(abs(signed), mags)
         if z > WHALE_Z and abs(signed) >= WHALE_NOTIONAL_USD:
             self._last_whale = 1 if signed > 0 else -1
@@ -283,10 +287,12 @@ class OrderFlowEngine:
         'bullish' = price makes a new low while CVD turns up (seller exhaustion);
         '' = none.
         """
-        if len(self._trail) < 10:
-            return ""
-        prices = [p for p, _ in self._trail]
-        cvds = [c for _, c in self._trail]
+        with self._lock:
+            if len(self._trail) < 10:
+                return ""
+            trail_snap = list(self._trail)
+        prices = [p for p, _ in trail_snap]
+        cvds = [c for _, c in trail_snap]
         cur_p, cur_c = prices[-1], cvds[-1]
         prior_p = prices[:-1]
         prior_c = cvds[:-1]
@@ -334,6 +340,7 @@ class OrderFlowEngine:
     def reset_session(self) -> None:
         """Zero CVD + buckets at the open (CVD is a since-open running total)."""
         self.cvd = 0.0
-        self._buckets.clear()
-        self._trail.clear()
+        with self._lock:
+            self._buckets.clear()
+            self._trail.clear()
         self._last_whale = 0

@@ -53,6 +53,19 @@ _DDL_MIGRATE = [
     "ALTER TABLE state_meta ADD COLUMN IF NOT EXISTS trading_days TEXT NOT NULL DEFAULT ''",
 ]
 
+_DDL_DECISIONS = """
+CREATE TABLE IF NOT EXISTS decisions (
+    symbol      TEXT    NOT NULL,
+    opened_at   TEXT    NOT NULL,
+    regime      TEXT    NOT NULL DEFAULT '',
+    quant_lean  REAL    NOT NULL DEFAULT 0,
+    qual_lean   REAL    NOT NULL DEFAULT 0,
+    confidence  REAL    NOT NULL DEFAULT 0,
+    went_up     INTEGER,
+    PRIMARY KEY (symbol, opened_at)
+)
+"""
+
 _DDL_META = """
 CREATE TABLE IF NOT EXISTS state_meta (
     id            INTEGER PRIMARY KEY DEFAULT 1,
@@ -156,6 +169,7 @@ def _ensure_schema() -> None:
                 # Serialize against any concurrent writer before touching locks.
                 cur.execute("SELECT pg_advisory_xact_lock(%s)", (_WRITE_LOCK_KEY,))
                 cur.execute(_DDL_POSITIONS)
+                cur.execute(_DDL_DECISIONS)
                 cur.execute(_DDL_META)
                 for stmt in _DDL_MIGRATE:
                     cur.execute(stmt)
@@ -350,6 +364,39 @@ class State:
                          p.order_id, p.filled, p.contract),
                     )
 
+    def journal_decision(self, sym: str, opened_at: str,
+                         regime: str, quant_lean: float,
+                         qual_lean: float, confidence: float) -> None:
+        """Insert a decisions row at entry time (outcome = NULL, filled later)."""
+        if not DATABASE_URL:
+            return
+        try:
+            with _db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO decisions (symbol, opened_at, regime, quant_lean, qual_lean, confidence)
+                           VALUES (%s, %s, %s, %s, %s, %s)
+                           ON CONFLICT (symbol, opened_at) DO NOTHING""",
+                        (sym, opened_at, regime, quant_lean, qual_lean, confidence),
+                    )
+        except Exception:  # noqa: BLE001
+            pass  # non-critical: learning degrades gracefully without this row
+
+    def _journal_outcome(self, pos: Position) -> None:
+        """Update decisions row with direction outcome after a position closes."""
+        if not DATABASE_URL or pos.shadow:
+            return
+        try:
+            went_up = 1 if (pos.pnl_usd or 0) > 0 else 0
+            with _db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE decisions SET went_up = %s WHERE symbol = %s AND opened_at = %s",
+                        (went_up, pos.symbol, pos.opened_at),
+                    )
+        except Exception:  # noqa: BLE001
+            pass
+
     def _roll_day(self) -> None:
         today = _today()
         if self.day != today:
@@ -415,6 +462,7 @@ class State:
             self.shadow_pnl_usd += pos.pnl_usd
         else:
             self.realized_pnl_usd += pos.pnl_usd
+            self._journal_outcome(pos)
 
 
 def _now() -> str:

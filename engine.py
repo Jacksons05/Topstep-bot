@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import time
 from datetime import date, datetime, timezone
+import day_learner as _day_learner
 
 from agents import AgentTeam, SymbolContext, portfolio_weights
 from config import CONFIG
@@ -58,10 +59,15 @@ class Engine:
         self.executor = build_executor()
         self.state = State.load()
         self.cooldowns: dict[str, float] = {}
+        # Apply yesterday's EOD adaptations at startup (conf threshold, size mult, etc.)
+        _day_learner.apply_to_config(CONFIG, _day_learner.load_adapt(), notify)
         self.cb_level = "green"
+        # EOD learning: fired once per calendar day on first market-close tick.
+        self._day_learn_fired: str = ""
         # cost control: skip re-running the LLM on a symbol whose quant read hasn't
         # moved since its last evaluation. {symbol: (direction, strength_bucket)}
         self._eval_cache: dict[str, tuple[str, float]] = {}
+        self._eval_cache_ts: dict[str, float] = {}   # last full-eval timestamp per symbol
         self._topstep_last_reset: date | None = None
         # Topstep: True once a daily-loss / trailing-MLL breach has flattened the
         # book — blocks all new entries until the next session (cleared on reset).
@@ -205,6 +211,14 @@ class Engine:
         # Cost gate: outside market hours, do nothing (no fills happen, no LLM spend).
         if not self._market_open():
             notify("market closed — idle (no scan)")
+            # EOD learning: fire once per calendar day on first closed-market tick.
+            _today = str(date.today())
+            if self._day_learn_fired != _today:
+                self._day_learn_fired = _today
+                try:
+                    _day_learner.trigger("topstep", cfg=CONFIG, also_retrain=False)
+                except Exception as _e:  # noqa: BLE001
+                    notify(f"⚠ day_learner failed: {_e}")
             return
 
         # Kill switch (M14): a disk file / env flag instantly FLATTENS every open
@@ -280,8 +294,15 @@ class Engine:
 
         # 3a. cheap quant prescreen across the WHOLE watchlist (no LLM)
         prescreened = []  # (sym, quant, spot, regime_label)
+        # Day-adapt: hour block + symbol cooldown check before any LLM work.
+        _now_et_hour = f"{((datetime.now(timezone.utc).hour - 4) % 24):02d}"
+        _hour_blocked = _now_et_hour in getattr(CONFIG, "_day_hour_block", set())
         for sym in CONFIG.watchlist:
             if sym in held:
+                continue
+            if sym in getattr(CONFIG, "_day_symbol_cooldown", set()):
+                continue
+            if _hour_blocked:
                 continue
             ps = self._prescreen(sym)
             if ps is not None:
@@ -296,10 +317,13 @@ class Engine:
         for sym, quant, spot, regime_label in top:
             # cost control: skip the LLM team when this symbol's quant read hasn't
             # moved since we last evaluated it (same direction + strength bucket).
+            # Force re-evaluate after 5 min even if quant unchanged — macro/news evolve.
             key = (quant.direction, round(quant.strength / 0.05) * 0.05)
-            if self._eval_cache.get(sym) == key:
+            cache_age = time.time() - self._eval_cache_ts.get(sym, 0.0)
+            if self._eval_cache.get(sym) == key and cache_age < 300:
                 continue
             self._eval_cache[sym] = key
+            self._eval_cache_ts[sym] = time.time()
             sig = self._evaluate_full(sym, quant, spot)
             if sig:
                 rp = get_regime_params(regime_label, CONFIG)
@@ -378,6 +402,12 @@ class Engine:
             # (d) Regime sizing multiplier applied AFTER the base risk.check()
             #     so the min-size guard still runs against the un-scaled base.
             size = apply_regime_sizing(size, regime_params)
+            # Day-adapt: apply EOD-learned side + regime size multipliers.
+            _day_side_mult = getattr(CONFIG, "_day_side_size", {}).get(sig.side, 1.0)
+            _day_regime_mult = getattr(CONFIG, "_day_regime_size", {}).get(rk, 1.0)
+            _day_mult = _day_side_mult * _day_regime_mult
+            if _day_mult != 1.0:
+                size = round(size * _day_mult, 2)
             if size < CONFIG.min_executable_size_usd:
                 notify(f"  skip (regime {rk} sized to {size:.0f} < min "
                        f"{CONFIG.min_executable_size_usd:.0f}): {sig.symbol}")
@@ -428,6 +458,14 @@ class Engine:
                 continue
             qty = pos.qty
             self.cooldowns[sig.symbol] = time.time()
+            if not pos.shadow:
+                self.state.journal_decision(
+                    pos.symbol, pos.opened_at,
+                    regime=rk,
+                    quant_lean=sig.confidence,
+                    qual_lean=sig.confidence,
+                    confidence=sig.confidence,
+                )
             notify("OPEN  " + signal_msg(sig, qty, size, self.executor.mode) +
                    f" [regime={rk} sz={regime_params['size_mult']:.0%}]")
             if CONFIG.manual_tickets and not pos.shadow:
