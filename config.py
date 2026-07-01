@@ -345,6 +345,17 @@ class Config:
     iv_rank_sell_threshold: float = _f("IV_RANK_SELL_THRESHOLD", 50.0)
     iv_rank_buy_threshold:  float = _f("IV_RANK_BUY_THRESHOLD",  30.0)
 
+    # ── Unusual Whales flow integration ──────────────────
+    uw_api_key: str = _s("UW_API_KEY")
+    uw_flow_enabled: bool = _b("UW_FLOW_ENABLED", False)
+    # Weight of UW lean blended into the quant signal (0.30 = 30% UW, 70% indicators).
+    uw_flow_lean_weight: float = _f("UW_FLOW_LEAN_WEIGHT", 0.30)
+    # Futures→proxy map override ("ES:SPX,NQ:NDX,MES:SPX,MNQ:NDX"); defaults built in uw_flow.py.
+    uw_proxy_map_raw: str = _s("UW_PROXY_MAP", "")
+    uw_flow_limit: int = _i("UW_FLOW_LIMIT", 50)              # flow tickets to fetch per cycle
+    uw_flow_cache_sec: int = _i("UW_FLOW_CACHE_SEC", 120)     # TTL before re-fetching
+    uw_whale_premium_usd: float = _f("UW_WHALE_PREMIUM_USD", 500_000.0)  # $500K+ = whale block
+
     # ── notify / logging ──────────────────────────────────
     discord_webhook: str = _s("DISCORD_WEBHOOK")
     log_file: str = _s("LOG_FILE", "signals.log")
@@ -376,6 +387,8 @@ class Config:
             return bool(self.finnhub_api_key)
         if src == "alpaca":
             return bool(self.alpaca_api_key and self.alpaca_secret_key)
+        if src == "unusualwhales":
+            return bool(self.uw_api_key)
         return False
 
     @property
@@ -420,6 +433,10 @@ class Config:
             errs.append("LLM_BACKEND must be anthropic|ollama")
         if self.llm_enabled and self.llm_backend == "anthropic" and not self.anthropic_api_key:
             errs.append("LLM_ENABLED (anthropic) but ANTHROPIC_API_KEY is empty")
+        if self.uw_flow_enabled and not self.uw_api_key:
+            errs.append("UW_FLOW_ENABLED=true but UW_API_KEY is empty")
+        if not 0.0 <= self.uw_flow_lean_weight <= 1.0:
+            errs.append("UW_FLOW_LEAN_WEIGHT must be in [0, 1]")
         if self.min_confidence not in ("low", "medium", "high"):
             errs.append("MIN_CONFIDENCE must be low|medium|high")
         if not 0 < self.max_position_pct <= 1:
@@ -434,7 +451,7 @@ class Config:
             errs.append("OPTIONS_SOURCE=flashalpha but FLASHALPHA_API_KEY is empty")
         if not self.watchlist:
             errs.append("WATCHLIST is empty")
-        _valid_news = {"google", "rss", "polygon", "finnhub", "alpaca", "sec", "none"}
+        _valid_news = {"google", "rss", "polygon", "finnhub", "alpaca", "sec", "unusualwhales", "none"}
         bad = [s for s in self.news_sources if s not in _valid_news]
         if bad:
             errs.append(f"NEWS_SOURCES has unknown source(s): {','.join(bad)} "

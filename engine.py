@@ -75,6 +75,7 @@ class Engine:
         # _account_equity each scan); seeded at the account size.
         self._peak_equity_est: float = CONFIG.topstep_account_size
         self._oflow = None  # ProjectXOrderFlowFeed when a live ProjectX feed is up
+        self._uw = None     # UWFlowFeed when UW_FLOW_ENABLED=true + UW_API_KEY set
         # Record-own data layer (Databento alternative): captures bar+L2 snapshots
         # to parquet so the ML signal can be retrained on YOUR ProjectX feed.
         self.recorder = LiveRecorder() if CONFIG.record_data else None
@@ -133,6 +134,19 @@ class Engine:
                 ".env to trade futures live via ProjectX/TopstepX."
             )
 
+        # Unusual Whales flow feed (optional) — options flow lean for futures proxies.
+        if CONFIG.uw_flow_enabled and CONFIG.uw_api_key:
+            try:
+                from uw_flow import UWFlowFeed
+                self._uw = UWFlowFeed()
+                notify("🐋 Unusual Whales flow feed enabled "
+                       f"(lean_weight={CONFIG.uw_flow_lean_weight:.0%} | "
+                       f"cache={CONFIG.uw_flow_cache_sec}s | "
+                       f"whale≥${CONFIG.uw_whale_premium_usd:,.0f})")
+            except Exception as e:  # noqa: BLE001
+                notify(f"⚠ UW flow feed init failed ({e}) — disabled")
+                self._uw = None
+
         # Startup reconciliation (H6): adopt/drop positions against the live broker
         # so a restart after a Topstep auto-liquidation never manages ghosts.
         try:
@@ -172,6 +186,8 @@ class Engine:
         self.events.close()
         self.executor.close_broker()
         self.state.save()
+        if self._uw is not None:
+            self._uw.close()
 
     # ── adaptive cadence: poll faster when the breaker trips, idle when closed ──
     def next_interval(self) -> int:
@@ -450,6 +466,25 @@ class Engine:
             quant = quant_signal(bars)
         if quant is None:
             return None
+
+        # Blend Unusual Whales options-flow lean into the quant read.
+        # UW lean is derived from net call-vs-put premium on the futures proxy
+        # (ES→SPX, NQ→NDX). A weight of 0.30 means 70% indicators + 30% UW flow.
+        if self._uw is not None:
+            uw = self._uw.get(sym)
+            if uw is not None:
+                w = CONFIG.uw_flow_lean_weight
+                blended = (1.0 - w) * quant.lean + w * uw.lean
+                blended = max(-1.0, min(1.0, blended))
+                from signals import QuantRead
+                whale_tag = " 🐋" if uw.whale else ""
+                quant = QuantRead(
+                    lean=round(blended, 4),
+                    strength=round(abs(blended), 4),
+                    atr=quant.atr,
+                    detail=quant.detail + f" · UW={uw.lean:+.2f}{whale_tag}",
+                )
+
         if quant.direction == "FLAT":
             return None
 
@@ -482,6 +517,8 @@ class Engine:
         # Headlines only matter when an LLM agent will read them — skip the
         # news call on the quant-only path to save rate limit.
         headlines = self.news.headlines(sym) if self.team.ready else []
+        if self.team.ready and self._uw is not None:
+            headlines = self._uw.headlines(sym) + headlines
 
         ctx = SymbolContext(
             symbol=sym, spot=spot, quant_detail=quant.detail, quant_lean=quant.lean,

@@ -95,7 +95,25 @@ class NewsFeed:
             return self._fetch_alpaca(symbol)
         if src == "sec":
             return self._fetch_sec(symbol)
+        if src == "unusualwhales":
+            return self._fetch_uw(symbol)
         return []
+
+    def _fetch_uw(self, symbol: str) -> list[NewsItem]:
+        """Pull UW flow alerts for *symbol* and return them as NewsItems."""
+        try:
+            from uw_flow import UWFlowFeed
+            feed = UWFlowFeed()
+            lines = feed.headlines(symbol)
+            feed.close()
+            now = __import__("datetime").datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+            return [
+                NewsItem(title=line, publisher="UnusualWhales",
+                         published_utc=now, sentiment="")
+                for line in lines
+            ]
+        except Exception:  # noqa: BLE001
+            return []
 
     @staticmethod
     def _merge(per_source: list[list[NewsItem]]) -> list[NewsItem]:
