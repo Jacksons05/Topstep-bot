@@ -74,6 +74,11 @@ class Engine:
         # Aggressive equity estimate used to ratchet the trailing-MLL peak (set by
         # _account_equity each scan); seeded at the account size.
         self._peak_equity_est: float = CONFIG.topstep_account_size
+        # Last trusted broker equity reading. Used instead of the internal book
+        # when the local state has no recorded trading history for this account
+        # (realized_pnl_usd == 0), so a fresh/blank local DB doesn't clamp a real,
+        # already-profitable broker account down to the raw account_size floor.
+        self._last_good_broker_equity: float | None = None
         self._oflow = None  # ProjectXOrderFlowFeed when a live ProjectX feed is up
         self._uw = None     # UWFlowFeed when UW_FLOW_ENABLED=true + UW_API_KEY set
         # Record-own data layer (Databento alternative): captures bar+L2 snapshots
@@ -452,7 +457,14 @@ class Engine:
         Returns (quant, spot, regime_label) for a passable read, else None.
         No LLM, no network beyond bars.
         """
-        bars = self.data.bars(sym, timeframe=CONFIG.scalp_timeframe, limit=200)
+        # Futures roots (MNQ/ES/etc.) have no data on Alpaca's equities-only
+        # /v2/stocks endpoint — route those through ProjectX's own history feed.
+        # Fall back to Alpaca (self.data) for any non-futures symbol.
+        broker = self.executor.broker
+        if hasattr(broker, "historical_bars"):
+            bars = broker.historical_bars(sym, timeframe=CONFIG.scalp_timeframe, limit=200)
+        else:
+            bars = self.data.bars(sym, timeframe=CONFIG.scalp_timeframe, limit=200)
         if not bars.get("close"):
             return None
         spot = bars["close"][-1]
@@ -635,6 +647,16 @@ class Engine:
         live broker balance + open MTM, giving a real-time combined-equity view
         that a stale balance can't inflate. Sets self._equity_trusted=True only
         when a real broker balance was read (drives the fail-closed entry gate).
+
+        Exception: when the local book has NO recorded trading history for this
+        account (realized_pnl_usd == 0 — e.g. a fresh/blank local DB pointed at
+        an account that already has real broker history), the conservative-min
+        has nothing meaningful to reconcile against and would permanently clamp
+        equity down to the raw account_size, tripping the trailing-MLL floor
+        forever. In that case trust the live broker balance directly. On a failed
+        read, fall back to the last trusted broker reading (not the raw
+        account_size) so a transient connection error can't manufacture a false
+        breach either.
         """
         unrealized = 0.0
         for p in self.state.open_positions:
@@ -649,6 +671,7 @@ class Engine:
 
         internal_equity = (CONFIG.topstep_account_size
                            + self.state.realized_pnl_usd + unrealized)
+        has_local_history = self.state.realized_pnl_usd != 0.0
         equity = internal_equity
         # Peak estimate for the trailing-MLL high-water-mark. Topstep ratchets its
         # floor on the HIGHER (more aggressive) live unrealized peak, so for the
@@ -664,11 +687,20 @@ class Engine:
             bal = acct.get("equity")
             if bal and "mock" not in src and "error" not in src:
                 # Real-time combined equity = realized cash balance + open MTM.
-                equity = min(internal_equity, float(bal) + unrealized)
-                peak_est = max(internal_equity, float(bal) + unrealized)
+                broker_equity = float(bal) + unrealized
+                self._last_good_broker_equity = broker_equity
+                equity = (min(internal_equity, broker_equity) if has_local_history
+                          else broker_equity)
+                peak_est = max(internal_equity, broker_equity)
                 self._equity_trusted = True
         except Exception:  # noqa: BLE001
             pass
+        if not self._equity_trusted and not has_local_history \
+                and self._last_good_broker_equity is not None:
+            # Blank local book + failed read: trust the last known-good broker
+            # figure rather than falling all the way back to account_size.
+            equity = self._last_good_broker_equity
+            peak_est = max(peak_est, self._last_good_broker_equity)
         self._peak_equity_est = peak_est
         return equity, unrealized
 

@@ -21,5 +21,7 @@ bot.out
 bot.err
 dash.out
 dash.err
+topstep-stdout.log
+topstep-stderr.log
 .pids
 .DS_Store

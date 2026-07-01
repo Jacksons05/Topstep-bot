@@ -43,6 +43,7 @@ import logging
 import math
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -150,9 +151,18 @@ class ProjectXBroker:
         self._authenticate()  # fall back to a fresh login
 
     def _post(self, path: str, body: dict) -> dict:
-        """POST helper: refreshes token, retries once on 401, returns parsed JSON."""
+        """POST helper: refreshes token, retries once on 401, returns parsed JSON.
+
+        Also retries once on a transport-level failure (dropped keep-alive
+        connection, SSL reset, etc.) — these are transient and common on
+        long-lived connection pools; a bare retry with a fresh connection
+        clears them almost always."""
         self._ensure_token()
-        r = self._http.post(path, json=body)
+        try:
+            r = self._http.post(path, json=body)
+        except httpx.TransportError as exc:
+            log.warning(f"[ProjectX] transport error on POST {path} ({exc}); retrying once")
+            r = self._http.post(path, json=body)
         if r.status_code == 401:
             self._authenticate()
             r = self._http.post(path, json=body)
@@ -206,6 +216,61 @@ class ProjectXBroker:
         except Exception as exc:  # noqa: BLE001
             log.warning(f"[ProjectX] contract_id({sym}) failed: {exc}")
             return None
+
+    # Alpaca-style "5Min" / "1Hour" / "1Day" -> ProjectX History unit enum.
+    # ProjectX units: 1=Second, 2=Minute, 3=Hour, 4=Day, 5=Week, 6=Month.
+    _TIMEFRAME_UNIT = {"Min": 2, "Hour": 3, "Day": 4, "Week": 5, "Month": 6}
+
+    @classmethod
+    def _parse_timeframe(cls, timeframe: str) -> tuple[int, int]:
+        for suffix, unit in cls._TIMEFRAME_UNIT.items():
+            if timeframe.endswith(suffix):
+                n = timeframe[: -len(suffix)]
+                return unit, int(n) if n else 1
+        return 2, 5  # default: 5-minute bars
+
+    def historical_bars(self, symbol: str, timeframe: str = "5Min",
+                         limit: int = 200, days_back: int = 5) -> dict:
+        """Recent OHLCV bars for a futures root via ProjectX's own history feed.
+
+        Alpaca's /v2/stocks endpoint has no futures data at all — MNQ/ES/etc.
+        always return empty there. This is the real bar source for this bot's
+        watchlist. Returns the canonical {"close":[...],...} shape, oldest->newest,
+        same as MarketData.bars(); empty dict on any failure (fail-open, matching
+        MarketData.bars()'s contract so callers don't need to special-case source).
+        """
+        if self._mock_mode:
+            return {}
+        cid = self.contract_id(symbol)
+        if not cid:
+            return {}
+        unit, unit_number = self._parse_timeframe(timeframe)
+        now = datetime.now(timezone.utc)
+        try:
+            d = self._post("/api/History/retrieveBars", {
+                "contractId": cid,
+                "live": self._live,
+                "startTime": (now - timedelta(days=days_back)).isoformat(),
+                "endTime": now.isoformat(),
+                "unit": unit,
+                "unitNumber": unit_number,
+                "limit": limit,
+                "includePartialBar": True,
+            })
+            bars = d.get("bars") or []
+            if not bars:
+                return {}
+            bars = list(reversed(bars))  # API returns newest-first; we want oldest->newest
+            return {
+                "open": [float(b["o"]) for b in bars],
+                "high": [float(b["h"]) for b in bars],
+                "low": [float(b["l"]) for b in bars],
+                "close": [float(b["c"]) for b in bars],
+                "volume": [float(b["v"]) for b in bars],
+            }
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"[ProjectX] historical_bars({symbol}) failed: {exc}")
+            return {}
 
     def root_for_contract(self, contract_id: str) -> str:
         """Reverse a contractId to its root symbol (best-effort, for positions)."""
