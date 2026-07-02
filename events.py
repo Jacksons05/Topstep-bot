@@ -90,7 +90,30 @@ class Events:
                        if (d := _parse_day(e.get("date", ""))) is not None],
         )
 
-    def _macro_events(self) -> list[datetime]:
+    # Per-event-type asymmetric blackout windows (minutes before/after release).
+    # Research: FOMC spike resolves in ~60 min; CPI/NFP in ~30 min.
+    # Key: lowercase substring match against the Finnhub event name.
+    _EVENT_WINDOWS: list[tuple[str, int, int]] = [
+        # (name_substr, pre_min, post_min)
+        ("fomc",              30, 60),
+        ("federal",           30, 60),   # "Federal Open Market"
+        ("interest rate",     30, 60),
+        ("cpi",               15, 30),
+        ("consumer price",    15, 30),
+        ("nonfarm",           15, 30),
+        ("nfp",               15, 30),
+        ("ppi",               15, 30),
+        ("producer price",    15, 30),
+        ("gdp",               10, 20),
+        ("pce",               10, 20),
+        ("core pce",          10, 20),
+        ("retail sales",      10, 15),
+    ]
+    _DEFAULT_PRE_MIN  = 30    # fallback pre-window for unlisted high-impact events
+    _DEFAULT_POST_MIN = 60
+
+    def _macro_events(self) -> list[tuple[datetime, str]]:
+        """Returns list of (event_time_utc, event_name) for upcoming high-impact prints."""
         frm, to = self._window()
         countries = {c.upper() for c in CONFIG.event_countries}
         def extract(j):
@@ -99,31 +122,39 @@ class Events:
             for e in rows:
                 if str(e.get("impact", "")).lower() not in ("high", "3"):
                     continue
-                # Only block on events for the configured countries (default US) — a
-                # high-impact print in AU/CN/DE shouldn't freeze US-equity options.
                 if countries and str(e.get("country", "")).upper() not in countries:
                     continue
                 d = _parse_dt(e.get("time", "") or e.get("date", ""))
                 if d:
-                    out.append(d)
+                    name = str(e.get("event", "")).strip()
+                    out.append((d, name))
             return out
-        return self._get(f"econ:{frm}", "/calendar/economic", {"from": frm, "to": to}, extract)
+        return self._get(f"econ2:{frm}", "/calendar/economic", {"from": frm, "to": to}, extract)  # type: ignore[return-value]
+
+    def _event_window(self, name: str) -> tuple[timedelta, timedelta]:
+        """Return (pre_blackout, post_blackout) for an event name."""
+        n = name.lower()
+        for substr, pre, post in self._EVENT_WINDOWS:
+            if substr in n:
+                return timedelta(minutes=pre), timedelta(minutes=post)
+        return timedelta(minutes=self._DEFAULT_PRE_MIN), timedelta(minutes=self._DEFAULT_POST_MIN)
 
     def blackout(self, symbol: str, now: datetime | None = None) -> tuple[bool, str]:
         """(True, reason) if `symbol` is within the blackout window of an event."""
         if not self.enabled:
             return False, ""
         now = now or datetime.now(timezone.utc)
-        win = timedelta(hours=CONFIG.event_blackout_hours)
+        earn_win = timedelta(hours=CONFIG.event_blackout_hours)
 
         for d in self._earnings(symbol):
-            # earnings is date-only -> blackout the whole day window around it
-            if abs((d - now)) <= win + timedelta(days=1):
+            if abs((d - now)) <= earn_win + timedelta(days=1):
                 return True, f"{symbol} earnings ~{d.date()}"
 
-        for d in self._macro_events():
-            # macro has a real event time -> tight symmetric window, no day buffer
-            if abs((d - now)) <= win:
-                return True, f"high-impact macro ~{d:%Y-%m-%d %H:%M}"
+        for d, name in self._macro_events():
+            pre, post = self._event_window(name)
+            delta = now - d   # positive = we're AFTER the event
+            if -pre <= delta <= post:
+                label = name or "high-impact macro"
+                return True, f"{label} ~{d:%Y-%m-%d %H:%M}"
 
         return False, ""

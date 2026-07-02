@@ -52,6 +52,21 @@ class Config:
     # QQQ tracks Nasdaq-100 (same underlying as NQ/MNQ) and is available on Alpaca.
     regime_symbol: str = _s("REGIME_SYMBOL", "QQQ")
 
+    # Session-phase confidence multipliers (applied to quant strength/lean in
+    # _prescreen). Open/close momentum windows get full weight; midday + overnight
+    # are discounted for lower predictability (Gao et al. JFE 2018). Overnight is
+    # tunable: raise toward 1.0 to open night trading, lower to suppress it.
+    phase_mult_open: float = _f("PHASE_MULT_OPEN", 1.00)
+    phase_mult_close: float = _f("PHASE_MULT_CLOSE", 0.85)
+    phase_mult_midday: float = _f("PHASE_MULT_MIDDAY", 0.70)
+    phase_mult_overnight: float = _f("PHASE_MULT_OVERNIGHT", 0.75)
+    # Overnight confluence blend: quant strength is thin overnight, so trust the
+    # qualitative (LLM) stream more. qual_weight is the LLM share of the blended
+    # confidence; RTH uses a fixed 50/50. Overnight also gets its own (looser)
+    # confidence gate so RTH stays strict.
+    qual_weight_overnight: float = _f("QUAL_WEIGHT_OVERNIGHT", 0.65)
+    confidence_threshold_overnight: float = _f("CONFIDENCE_THRESHOLD_OVERNIGHT", 0.58)
+
     # ── asset classes enabled ─────────────────────────────
     trade_equities: bool = _b("TRADE_EQUITIES", False)  # futures-only fork; flip True to re-enable equity scanning
     trade_options: bool = _b("TRADE_OPTIONS", False)   # needs OPTIONS data source
@@ -95,7 +110,7 @@ class Config:
 
     # ── event-risk blackout (Finnhub calendars) ───────────
     event_blackout_enabled: bool = _b("EVENT_BLACKOUT_ENABLED", True)
-    event_blackout_hours: float = _f("EVENT_BLACKOUT_HOURS", 12.0)  # no new entries within N h of a high-impact event / earnings
+    event_blackout_hours: float = _f("EVENT_BLACKOUT_HOURS", 2.0)  # no new entries within N h of a high-impact event / earnings (FOMC/CPI use per-event windows in events.py)
     event_countries: tuple[str, ...] = _csv("EVENT_COUNTRIES", "US")  # only blackout on these countries' macro prints
 
     # quant indicators

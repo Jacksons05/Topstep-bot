@@ -1,0 +1,28 @@
+{
+  "date": "2026-07-01",
+  "bot": "topstep",
+  "stats": {
+    "date": "2026-07-01",
+    "bot": "topstep",
+    "n_trades": 0,
+    "n_wins": 0,
+    "total_pnl": 0.0,
+    "avg_win": 0.0,
+    "avg_loss": 0.0,
+    "shadow_pnl": 0.0,
+    "by_regime": {},
+    "by_side": {},
+    "by_hour": {},
+    "by_confidence": {},
+    "symbol_streaks": {}
+  },
+  "confidence_threshold_adj": 0.0,
+  "side_size": {},
+  "regime_size": {},
+  "hour_block": [],
+  "symbol_cooldown": [],
+  "cramer_flip_enabled": false,
+  "reasoning": [
+    "only 0 trades \u2014 too few to learn from; no adaptation"
+  ]
+}

@@ -188,6 +188,32 @@ class Executor:
             ))
         return pos
 
+    def close_partial(self, pos: Position, close_qty: int, exit_price: float) -> bool:
+        """Close a partial qty of a futures position without fully closing it.
+
+        Cancels the resting protective stop first (it will be re-placed at the
+        new BE stop price by the caller), then submits the reduction order.
+        Returns True on success. Caller is responsible for updating pos.qty and pos.stop.
+        Shadow positions are bookkeeping-only — no broker order is placed.
+        """
+        if pos.shadow or close_qty <= 0:
+            return False
+        pid = getattr(pos, "protective_order_id", "")
+        if pid:
+            cancel = getattr(self.broker, "cancel_order", None)
+            if callable(cancel):
+                try:
+                    cancel(pid)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("[exec] cancel protective stop %s for partial: %s", pid, exc)
+            pos.protective_order_id = ""
+        try:
+            self.broker.submit(pos.symbol, close_qty, _flip(pos.side), exit_price)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.error("[exec] partial close %s qty=%d failed: %s", pos.symbol, close_qty, exc)
+            return False
+
     def close(self, pos: Position, exit_price: float, state: State) -> None:
         if not pos.shadow:  # shadow book is paper-only bookkeeping
             # Cancel the native resting stop FIRST so it can't fill after we

@@ -26,7 +26,7 @@ from events import Events
 from macro import Macro
 from notifier import notify, signal_msg, trade_ticket, exit_ticket
 from topstep_risk import hold_seconds
-from regime import classify_last
+from regime import classify_atr_percentile, classify_last
 from risk import check, circuit_breaker, kill_switch_active, should_exit
 from signals import Signal, label_for, quant_signal
 from ml_signal import ML
@@ -87,6 +87,9 @@ class Engine:
         self._last_good_broker_equity: float | None = None
         self._oflow = None  # ProjectXOrderFlowFeed when a live ProjectX feed is up
         self._uw = None     # UWFlowFeed when UW_FLOW_ENABLED=true + UW_API_KEY set
+        # Partial-exit / BE-ratchet state keyed by position symbol.
+        # {symbol: {"partial_done": bool, "be_done": bool, "trail_peak": float}}
+        self._be_state: dict[str, dict] = {}
         # Record-own data layer (Databento alternative): captures bar+L2 snapshots
         # to parquet so the ML signal can be retrained on YOUR ProjectX feed.
         self.recorder = LiveRecorder() if CONFIG.record_data else None
@@ -370,8 +373,15 @@ class Engine:
                 notify(f"  skip ({dir_reason}): {sig.symbol}")
                 continue
 
-            # (b) Per-regime minimum confidence (stricter than global threshold)
+            # (b) Per-regime minimum confidence (stricter than global threshold).
+            # Overnight: cap the regime floor at the looser overnight gate so the
+            # regime playbook can't re-impose the strict RTH threshold at night.
             regime_min_conf = regime_params.get("min_conf", CONFIG.confidence_threshold)
+            from zoneinfo import ZoneInfo as _ZIr
+            _mr = datetime.now(_ZIr("America/New_York"))
+            _minsr = _mr.hour * 60 + _mr.minute
+            if not (9 * 60 + 30 <= _minsr <= 16 * 60):
+                regime_min_conf = min(regime_min_conf, CONFIG.confidence_threshold_overnight)
             if sig.confidence < regime_min_conf:
                 notify(f"  skip (regime {rk} conf {sig.confidence:.2f} < {regime_min_conf:.2f}): "
                        f"{sig.symbol}")
@@ -572,13 +582,13 @@ class Engine:
         _h, _m = _now_et.hour, _now_et.minute
         _mins = _h * 60 + _m
         if (9 * 60 + 30) <= _mins <= (10 * 60):
-            _phase, _phase_mult = "open_momentum", 1.00
+            _phase, _phase_mult = "open_momentum", CONFIG.phase_mult_open
         elif (15 * 60 + 30) <= _mins <= (16 * 60):
-            _phase, _phase_mult = "close_momentum", 0.85
+            _phase, _phase_mult = "close_momentum", CONFIG.phase_mult_close
         elif (10 * 60) < _mins < (15 * 60 + 30):
-            _phase, _phase_mult = "midday", 0.70
+            _phase, _phase_mult = "midday", CONFIG.phase_mult_midday
         else:
-            _phase, _phase_mult = "overnight", 0.50
+            _phase, _phase_mult = "overnight", CONFIG.phase_mult_overnight
 
         if _phase_mult < 1.0:
             from signals import QuantRead
@@ -619,11 +629,18 @@ class Engine:
         # the regime-adaptive playbook in run_once).
         regime_label = "Unknown"
         if CONFIG.regime_gate_enabled:
-            regime_label = classify_last(
-                bars["close"],
-                bars.get("high") or bars["close"],
-                bars.get("low") or bars["close"],
-            )
+            _highs = bars.get("high") or bars["close"]
+            _lows = bars.get("low") or bars["close"]
+            if _phase == "overnight":
+                # ATR-percentile regime is more robust overnight: SMA/trend signals
+                # have near-zero edge during Globex sessions (arXiv 2605.04004).
+                # EXTREME volatility = block trade; otherwise use SMA classifier.
+                _atr_regime = classify_atr_percentile(bars["close"], _highs, _lows)
+                if _atr_regime == "EXTREME":
+                    return None  # overnight EXTREME vol — no new entries
+                regime_label = classify_last(bars["close"], _highs, _lows)
+            else:
+                regime_label = classify_last(bars["close"], _highs, _lows)
             reg_upper = regime_label.upper()
             if CONFIG.regime_allow:
                 if reg_upper not in CONFIG.regime_allow:
@@ -669,8 +686,20 @@ class Engine:
         if qual_dir != quant.direction:
             return None
 
-        confidence = round(0.5 * quant.strength + 0.5 * qual_conv, 3)
-        if confidence < CONFIG.confidence_threshold:
+        # Phase-aware confluence blend. Overnight quant is thin, so weight the LLM
+        # stream more heavily and use the looser overnight gate; RTH stays 50/50 @
+        # the strict threshold. Overnight = outside 09:30–16:00 ET.
+        from zoneinfo import ZoneInfo as _ZIc
+        _mc = datetime.now(_ZIc("America/New_York"))
+        _mins_c = _mc.hour * 60 + _mc.minute
+        _is_overnight_c = not (9 * 60 + 30 <= _mins_c <= 16 * 60)
+        if _is_overnight_c:
+            _qw = CONFIG.qual_weight_overnight
+            _thresh = CONFIG.confidence_threshold_overnight
+        else:
+            _qw, _thresh = 0.5, CONFIG.confidence_threshold
+        confidence = round((1.0 - _qw) * quant.strength + _qw * qual_conv, 3)
+        if confidence < _thresh:
             return None
 
         agents = dict(verdict.trail)
@@ -932,6 +961,80 @@ class Engine:
         except Exception as e:  # noqa: BLE001
             notify(f"  ! Topstep flatten error: {e}")
 
+    # ── partial exits + BE ratchet + ATR trail ────────────
+    def _manage_partial_exit(self, pos: "Position", mark: float) -> None:
+        """Three-step partial-exit ladder for futures positions (research: NQ backtest
+        ATR-trail PF 1.6 vs fixed-tick PF 1.1).
+
+        Step 1 — BE ratchet at +1R: move stop to entry_price.
+        Step 2 — Partial at +1.5R: close floor(qty/2), remaining qty runs to target.
+        Step 3 — Chandelier trail: after BE+partial, trail peak minus 1.5×ATR(implied).
+
+        State stored in self._be_state[pos.symbol] so it survives scan ticks.
+        Shadow positions are skipped (no broker order, pure bookkeeping).
+        Only runs when pos.stop is set (adopted orphans with stop=0 are skipped).
+        """
+        if pos.shadow or pos.qty < 1 or not pos.stop or pos.stop == 0.0:
+            return
+        long = pos.side == "BUY"
+        initial_risk = abs(pos.entry_price - pos.stop)
+        if initial_risk <= 0:
+            return
+
+        st = self._be_state.setdefault(pos.symbol, {
+            "partial_done": False, "be_done": False,
+            "trail_peak": mark,
+        })
+        if long:
+            st["trail_peak"] = max(st["trail_peak"], mark)
+        else:
+            st["trail_peak"] = min(st["trail_peak"], mark)
+
+        pnl_r = ((mark - pos.entry_price) * (1.0 if long else -1.0)) / initial_risk
+
+        # Step 1: move stop to BE at +1R
+        if not st["be_done"] and pnl_r >= 1.0:
+            old_stop = pos.stop
+            pos.stop = pos.entry_price
+            st["be_done"] = True
+            notify(f"  BE-RATCHET {pos.symbol}: stop {old_stop:.2f} → {pos.entry_price:.2f} "
+                   f"(+{pnl_r:.1f}R breakeven locked)")
+
+        # Step 2: partial close at +1.5R
+        if not st["partial_done"] and pnl_r >= 1.5 and pos.qty >= 2:
+            close_qty = max(1, pos.qty // 2)
+            if close_qty < pos.qty:
+                ok = self.executor.close_partial(pos, close_qty, mark)
+                if ok:
+                    pos.qty -= close_qty
+                    st["partial_done"] = True
+                    if self._topstep is not None and not pos.shadow:
+                        from topstep_risk import hold_seconds
+                        partial_pnl = (
+                            (mark - pos.entry_price)
+                            * (1.0 if long else -1.0)
+                            * close_qty
+                            * dollar_value_per_point(pos.symbol)
+                        )
+                        self._topstep.record_close(partial_pnl, hold_seconds(pos.opened_at))
+                    notify(f"  PARTIAL-EXIT {pos.symbol}: closed {close_qty} @ {mark:.2f} "
+                           f"(+{pnl_r:.1f}R), {pos.qty} remaining, trailing ATR")
+
+        # Step 3: Chandelier trail after BE + partial done.
+        # ATR_implied ≈ initial_risk / ATR_STOP_MULT (stop was placed at mult×ATR).
+        # Trail at 1.5×ATR_implied anchored to peak since entry.
+        if st["be_done"] and st["partial_done"]:
+            atr_implied = initial_risk / max(CONFIG.atr_stop_mult, 1.0)
+            trail_dist = 1.5 * atr_implied
+            if long:
+                trail_stop = st["trail_peak"] - trail_dist
+                if trail_stop > pos.stop:
+                    pos.stop = trail_stop
+            else:
+                trail_stop = st["trail_peak"] + trail_dist
+                if trail_stop < pos.stop:
+                    pos.stop = trail_stop
+
     # ── manage exits ──────────────────────────────────────
     def _manage_open(self) -> None:
         # Topstep EOD flatten: when the flatten window is open (≥ 16:08 ET, before
@@ -949,6 +1052,7 @@ class Engine:
             mark = self._mark(pos.symbol)
             if mark is None:
                 continue  # no live price (futures need the ProjectX feed) — can't manage
+            self._manage_partial_exit(pos, mark)
             reason = should_exit(pos, mark)
             if not reason:
                 continue
@@ -972,6 +1076,7 @@ class Engine:
                 continue
             if self._topstep is not None and not pos.shadow:
                 self._topstep.record_close(pos.pnl_usd, hold_seconds(pos.opened_at))
+            self._be_state.pop(pos.symbol, None)
             tag = "EXIT-SHADOW" if pos.shadow else "CLOSE"
             exit_px = pos.exit_price if pos.exit_price is not None else mark
             notify(f"{tag} {reason} {pos.symbol} @ {exit_px:.2f} pnl=${pos.pnl_usd:.2f}")
