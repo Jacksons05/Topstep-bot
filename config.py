@@ -243,7 +243,13 @@ class Config:
     cramer_mode: bool = _b("CRAMER_MODE", True)
 
     # ── broker creds ──────────────────────────────────────
-    broker: str = _s("BROKER", "alpaca")                   # alpaca | ibkr | sim
+    # Futures-only fork: the live execution path is ProjectX/TopstepX (selected by
+    # TOPSTEP_MODE_ENABLED + PROJECTX creds, NOT by BROKER). This base broker is
+    # only the fallback the engine uses when ProjectX creds are absent, so it
+    # defaults to `sim` — that keeps a clean checkout (no .env) starting in paper
+    # instead of hard-failing validate() on missing Alpaca keys. Set BROKER=alpaca
+    # or ibkr explicitly only if you re-enable the (stripped-out) equity path.
+    broker: str = _s("BROKER", "sim")                      # sim | alpaca | ibkr
     alpaca_api_key: str = _s("ALPACA_API_KEY")
     alpaca_secret_key: str = _s("ALPACA_SECRET_KEY")
     # Paper endpoint by default; live endpoint only when TRADING_MODE=live.
