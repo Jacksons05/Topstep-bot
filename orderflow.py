@@ -34,15 +34,19 @@ def _f(name: str, default: float) -> float:
         return default
 
 
-OBI_THRESHOLD      = _f("OF_OBI_THRESHOLD", 0.85)
-WHALE_Z            = _f("OF_WHALE_Z", 3.5)
-WHALE_NOTIONAL_USD = _f("OF_WHALE_NOTIONAL_USD", 1_000_000.0)
+OBI_THRESHOLD      = _f("OF_OBI_THRESHOLD", 0.70)   # RTH fixed threshold; z-score path preferred
+OBI_THRESHOLD_OVERNIGHT = _f("OF_OBI_THRESHOLD_OVERNIGHT", 0.60)  # Globex overnight (thinner book)
+OBI_Z_RTH          = _f("OF_OBI_Z_RTH", 1.5)        # z-score path: RTH signal threshold
+OBI_Z_OVERNIGHT    = _f("OF_OBI_Z_OVERNIGHT", 1.2)  # z-score path: overnight threshold
+OBI_Z_WINDOW       = int(_f("OF_OBI_Z_WINDOW", 60)) # bars for rolling z-score normalization
+WHALE_Z            = _f("OF_WHALE_Z", 2.0)           # lowered from 3.5 — MNQ/MES are retail-scale
+WHALE_NOTIONAL_USD = _f("OF_WHALE_NOTIONAL_USD", 250_000.0)  # ~6 MNQ contracts vs prior $1M
 FOOTPRINT_RATIO    = _f("OF_FOOTPRINT_RATIO", 10.0)
 WINDOW_SEC         = int(_f("OF_WINDOW_SEC", 120))
 DEPTH_LEVELS       = int(_f("OF_DEPTH_LEVELS", 5))   # ladder levels summed for depth OBI
-# Staleness window: a quote/trade older than this (wall-clock arrival) makes the
-# book report has_data=False (fail closed) — a frozen feed must NOT pass the gate.
-STALENESS_SEC      = _f("OF_STALENESS_SEC", 5.0)
+# Staleness window: raised from 5s to 15s per research — 5s is too tight for
+# Globex overnight sessions where ticks arrive less frequently.
+STALENESS_SEC      = _f("OF_STALENESS_SEC", 15.0)
 
 
 def mad_modified_z(x: float, series: list[float]) -> float:
@@ -152,6 +156,8 @@ class OrderFlowEngine:
         self.book = MultiLevelBook()          # L2 ladder when ORDER_BOOK feed is live
         self.depth_levels = DEPTH_LEVELS
         self._lock = threading.Lock()         # guards _buckets + _trail (writer=websocket, reader=engine)
+        # Rolling OBI history for z-score normalization (research: z-score > fixed threshold)
+        self._obi_history: "deque[float]" = deque(maxlen=OBI_Z_WINDOW)
 
     @property
     def _last_update_ts(self) -> float:
@@ -253,9 +259,24 @@ class OrderFlowEngine:
         # Prefer multi-level depth imbalance (summed over top N ladder levels)
         # when the L2 book is live; fall back to top-of-book BBO sizes.
         if self.book.has_depth:
-            return self.book.depth_obi(self.depth_levels)
-        tot = self.bid_size + self.ask_size
-        return (self.bid_size - self.ask_size) / tot if tot > 0 else 0.0
+            raw = self.book.depth_obi(self.depth_levels)
+        else:
+            tot = self.bid_size + self.ask_size
+            raw = (self.bid_size - self.ask_size) / tot if tot > 0 else 0.0
+        self._obi_history.append(raw)
+        return raw
+
+    def obi_z(self) -> float:
+        """Z-score normalized OBI vs rolling window. Returns raw OBI when window too short."""
+        hist = list(self._obi_history)
+        if len(hist) < 10:
+            return self.obi  # not enough history; fall back to raw
+        mean = sum(hist) / len(hist)
+        variance = sum((v - mean) ** 2 for v in hist) / len(hist)
+        std = variance ** 0.5
+        if std < 1e-6:
+            return 0.0
+        return (hist[-1] - mean) / std
 
     @property
     def micro_price(self) -> float:
@@ -303,22 +324,39 @@ class OrderFlowEngine:
         return ""
 
     # ── the gate the engine calls ─────────────────────────
-    def confirm_entry(self, direction: str, near_wall: bool = True) -> tuple[bool, str]:
+    def confirm_entry(self, direction: str, near_wall: bool = True,
+                      is_overnight: bool = False) -> tuple[bool, str]:
         """Order-flow confirmation for a GEX entry at a wall/flip.
 
-        direction : "BUY" or "SELL" (the structural lean from GEX).
-        Requires extreme OBI in the trade direction; a same-side whale flag or a
-        confirming CVD read strengthens it. Returns (ok, reason).
+        direction   : "BUY" or "SELL" (the structural lean from GEX).
+        is_overnight: True during Globex overnight (18:00–09:29 ET); uses looser
+                      thresholds since L2 books are thinner overnight.
+
+        Uses z-score normalized OBI when rolling window is long enough (>=10 bars),
+        falling back to fixed threshold otherwise. Research: arXiv:1907.06230 shows
+        z-score > fixed threshold for 5-level L2 futures books.
         """
         want = 1 if direction == "BUY" else -1
         obi = self.obi
-        obi_ok = (obi >= OBI_THRESHOLD) if want > 0 else (obi <= -OBI_THRESHOLD)
+        hist = list(self._obi_history)
+        use_z = len(hist) >= 10
+        if use_z:
+            z = self.obi_z()
+            z_thresh = OBI_Z_OVERNIGHT if is_overnight else OBI_Z_RTH
+            obi_ok = z >= z_thresh if want > 0 else z <= -z_thresh
+            obi_desc = f"OBI z={z:+.2f} (raw={obi:+.2f})"
+            obi_need = f"{'≥' if want>0 else '≤'}{want*z_thresh:+.1f}σ"
+        else:
+            thresh = OBI_THRESHOLD_OVERNIGHT if is_overnight else OBI_THRESHOLD
+            obi_ok = (obi >= thresh) if want > 0 else (obi <= -thresh)
+            obi_desc = f"OBI {obi:+.2f}"
+            obi_need = f"{'≥' if want>0 else '≤'}{want*thresh:+.2f}"
         if not (near_wall and obi_ok):
-            return False, f"OBI {obi:+.2f} not extreme for {direction} (need {'≥' if want>0 else '≤'}{want*OBI_THRESHOLD:+.2f})"
+            return False, f"{obi_desc} not extreme for {direction} (need {obi_need})"
 
         wh = self.whale()
         div = self.cvd_divergence()
-        bits = [f"OBI {obi:+.2f}"]
+        bits = [obi_desc]
         if wh == want:
             bits.append("whale-confirm")
         elif wh == -want:

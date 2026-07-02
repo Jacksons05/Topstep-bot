@@ -49,7 +49,8 @@ class Config:
     closed_interval_sec: int = _i("CLOSED_INTERVAL_SEC", 900)
     watchlist: tuple[str, ...] = _csv("WATCHLIST", "ES,NQ,MES,MNQ")
     # Universe index used for regime / circuit-breaker reads.
-    regime_symbol: str = _s("REGIME_SYMBOL", "SPY")
+    # QQQ tracks Nasdaq-100 (same underlying as NQ/MNQ) and is available on Alpaca.
+    regime_symbol: str = _s("REGIME_SYMBOL", "QQQ")
 
     # ── asset classes enabled ─────────────────────────────
     trade_equities: bool = _b("TRADE_EQUITIES", False)  # futures-only fork; flip True to re-enable equity scanning
@@ -241,6 +242,9 @@ class Config:
     # Cramer mode: run an inverse shadow book; if it beats the real one the
     # primary signals are systematically flawed.
     cramer_mode: bool = _b("CRAMER_MODE", True)
+    # Cramer flip: set True by day_learner when shadow crushes real (signals inverted).
+    cramer_flip_enabled: bool = _b("CRAMER_FLIP_ENABLED", False)
+    cramer_flip_threshold_usd: float = _f("CRAMER_FLIP_THRESHOLD_USD", 1000.0)
 
     # ── broker creds ──────────────────────────────────────
     broker: str = _s("BROKER", "alpaca")                   # alpaca | ibkr | sim

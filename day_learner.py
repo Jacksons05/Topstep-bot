@@ -150,12 +150,12 @@ def _load_postgres(db_url: str, lookback_days: int = 1) -> list[dict]:
 # ── analysis ──────────────────────────────────────────────────────────────
 
 def _hour_et(ts_str: str) -> str:
-    """Extract 2-digit hour string in ET from an ISO timestamp."""
+    """Extract 2-digit hour string in ET from an ISO timestamp (DST-aware)."""
     try:
+        from zoneinfo import ZoneInfo
         dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-        # Convert UTC to ET (UTC-4 EDT, UTC-5 EST; approximate with -4 in summer)
-        et_hour = (dt.hour - 4) % 24
-        return f"{et_hour:02d}"
+        et = dt.astimezone(ZoneInfo("America/New_York"))
+        return f"{et.hour:02d}"
     except Exception:  # noqa: BLE001
         return "??"
 

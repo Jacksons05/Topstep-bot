@@ -305,7 +305,8 @@ class Engine:
         # 3a. cheap quant prescreen across the WHOLE watchlist (no LLM)
         prescreened = []  # (sym, quant, spot, regime_label)
         # Day-adapt: hour block + symbol cooldown check before any LLM work.
-        _now_et_hour = f"{((datetime.now(timezone.utc).hour - 4) % 24):02d}"
+        from zoneinfo import ZoneInfo as _ZI3
+        _now_et_hour = f"{datetime.now(_ZI3('America/New_York')).hour:02d}"
         _hour_blocked = _now_et_hour in getattr(CONFIG, "_day_hour_block", set())
         for sym in CONFIG.watchlist:
             if sym in held:
@@ -431,7 +432,11 @@ class Engine:
             if self._oflow is not None:
                 of = self._oflow.get(sig.symbol)
                 if of.has_data:
-                    of_ok, of_reason = of.confirm_entry(sig.side)
+                    from zoneinfo import ZoneInfo as _ZI2
+                    _et2 = datetime.now(_ZI2("America/New_York"))
+                    _m2 = _et2.hour * 60 + _et2.minute
+                    _is_overnight = not (9 * 60 + 30 <= _m2 <= 16 * 60)
+                    of_ok, of_reason = of.confirm_entry(sig.side, is_overnight=_is_overnight)
                     if not of_ok:
                         notify(f"  skip (order-flow: {of_reason}): {sig.symbol}")
                         continue
@@ -554,6 +559,58 @@ class Engine:
                     atr=quant.atr,
                     detail=quant.detail + f" · UW={uw.lean:+.2f}{whale_tag}{align_tag}",
                 )
+
+        if quant.direction == "FLAT":
+            return None
+
+        # ── Session phase: time-of-day confidence scaling ────────────────────
+        # Research (Gao et al. JFE 2018): open 09:30-10:00 and close 15:30-16:00 ET
+        # are momentum windows; midday and overnight have lower predictability.
+        # Overnight Globex gets 50% size via confidence multiplier.
+        from zoneinfo import ZoneInfo as _ZI
+        _now_et = datetime.now(_ZI("America/New_York"))
+        _h, _m = _now_et.hour, _now_et.minute
+        _mins = _h * 60 + _m
+        if (9 * 60 + 30) <= _mins <= (10 * 60):
+            _phase, _phase_mult = "open_momentum", 1.00
+        elif (15 * 60 + 30) <= _mins <= (16 * 60):
+            _phase, _phase_mult = "close_momentum", 0.85
+        elif (10 * 60) < _mins < (15 * 60 + 30):
+            _phase, _phase_mult = "midday", 0.70
+        else:
+            _phase, _phase_mult = "overnight", 0.50
+
+        if _phase_mult < 1.0:
+            from signals import QuantRead
+            quant = QuantRead(
+                lean=round(quant.lean * _phase_mult, 4),
+                strength=round(quant.strength * _phase_mult, 4),
+                atr=quant.atr,
+                detail=quant.detail + f" · phase={_phase}({_phase_mult:.0%})",
+            )
+
+        # ── VWAP directional gate ─────────────────────────────────────────────
+        # RTH VWAP (reset conceptually at 09:30 ET) used as intraday fair-value
+        # anchor. Longs only above VWAP; shorts only below. Don't enter when price
+        # is extended > 0.5×ATR from VWAP (chasing). Research: self-fulfilling
+        # institutional benchmark; most execution desks target VWAP ± bands.
+        _closes = bars.get("close") or []
+        _volumes = bars.get("volume") or []
+        if len(_closes) >= 20 and len(_volumes) >= 20 and sum(_volumes[-100:]) > 0:
+            _n = min(len(_closes), len(_volumes))
+            _tv = sum(_volumes[-_n:])
+            _vwap = sum(_closes[i] * _volumes[i] for i in range(len(_closes) - _n, len(_closes))) / _tv if _tv > 0 else spot
+            _vwap_dev = abs(spot - _vwap)
+            _atr_val = quant.atr if quant.atr and quant.atr > 0 else spot * 0.001
+            if _phase != "overnight":
+                # VWAP gate: longs need price above VWAP, shorts need price below
+                _vwap_ok = (spot > _vwap) if quant.direction == "BUY" else (spot < _vwap)
+                # Extension filter: skip when price is already >0.5 ATR from VWAP
+                _extended = _vwap_dev > 0.5 * _atr_val
+                if not _vwap_ok:
+                    return None  # direction conflicts with VWAP anchor
+                if _extended:
+                    return None  # chasing extended move; wait for pullback
 
         if quant.direction == "FLAT":
             return None
