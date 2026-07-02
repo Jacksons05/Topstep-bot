@@ -147,6 +147,20 @@ class Engine:
                 notify(f"⚠ UW flow feed init failed ({e}) — disabled")
                 self._uw = None
 
+        # UW signal-quality logger (optional) — records uw_lean vs forward return
+        # so the blend's edge can be measured offline. Behavior-neutral.
+        self._uw_log = None
+        if CONFIG.uw_flow_log:
+            try:
+                from uw_logger import UWFlowLogger
+                self._uw_log = UWFlowLogger(CONFIG.uw_flow_log)
+                if self._uw_log.enabled:
+                    notify(f"📊 UW signal logger → {CONFIG.uw_flow_log} "
+                           "(analyze: python uw_logger.py)")
+            except Exception as e:  # noqa: BLE001
+                notify(f"⚠ UW logger init failed ({e}) — disabled")
+                self._uw_log = None
+
         # Startup reconciliation (H6): adopt/drop positions against the live broker
         # so a restart after a Topstep auto-liquidation never manages ghosts.
         try:
@@ -188,6 +202,8 @@ class Engine:
         self.state.save()
         if self._uw is not None:
             self._uw.close()
+        if self._uw_log is not None:
+            self._uw_log.close()
 
     # ── adaptive cadence: poll faster when the breaker trips, idle when closed ──
     def next_interval(self) -> int:
@@ -473,6 +489,7 @@ class Engine:
         if self._uw is not None:
             uw = self._uw.get(sym)
             if uw is not None:
+                raw_quant_lean = quant.lean  # pre-blend, for the signal logger
                 w = CONFIG.uw_flow_lean_weight
                 blended = (1.0 - w) * quant.lean + w * uw.lean
                 blended = max(-1.0, min(1.0, blended))
@@ -484,6 +501,8 @@ class Engine:
                     atr=quant.atr,
                     detail=quant.detail + f" · UW={uw.lean:+.2f}{whale_tag}",
                 )
+                if self._uw_log is not None:
+                    self._uw_log.log(sym, spot, uw.lean, raw_quant_lean)
 
         if quant.direction == "FLAT":
             return None

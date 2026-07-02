@@ -361,6 +361,10 @@ class Config:
     uw_flow_limit: int = _i("UW_FLOW_LIMIT", 50)              # flow tickets to fetch per cycle
     uw_flow_cache_sec: int = _i("UW_FLOW_CACHE_SEC", 120)     # TTL before re-fetching
     uw_whale_premium_usd: float = _f("UW_WHALE_PREMIUM_USD", 500_000.0)  # $500K+ = whale block
+    # Correlation logger: append (ts, symbol, spot, uw_lean, quant_lean) per cycle
+    # to this CSV so UW's predictive value can be measured offline (behavior-neutral,
+    # never affects trades). Empty path = disabled. Analyze with `python uw_logger.py`.
+    uw_flow_log: str = _s("UW_FLOW_LOG", "")
 
     # ── notify / logging ──────────────────────────────────
     discord_webhook: str = _s("DISCORD_WEBHOOK")
