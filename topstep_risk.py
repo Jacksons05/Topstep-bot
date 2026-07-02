@@ -47,8 +47,10 @@ Usage in engine.py:
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date, datetime, time as dtime, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from config import CONFIG
@@ -153,6 +155,54 @@ class TopstepRiskManager:
             f"consistency={CONFIG.topstep_consistency_pct:.0%} | "
             f"flatten_at={CONFIG.topstep_flatten_time} ET"
         )
+
+    # ── Restart persistence ──────────────────────────────────────────────────
+    # day_start_equity (DLL anchor), peak_equity (trailing-MLL high-water mark)
+    # and the day-halt flag must survive a process restart: without this every
+    # restart re-arms a fresh Daily Loss Limit allowance and reseeds the MLL
+    # peak from the current balance, so repeated restarts turn the $1k/day
+    # limit into an unbounded daily loss.
+    _DAY_STATE_FILE = Path(__file__).with_name("topstep_day_state.json")
+
+    def save_day_state(self, session_date: str, day_halt: bool) -> None:
+        """Persist the session anchors. Call on day reset and whenever the
+        engine sets/clears its day-halt flag."""
+        try:
+            self._DAY_STATE_FILE.write_text(json.dumps({
+                "session_date": session_date,
+                "day_start_equity": self.day_start_equity,
+                "peak_equity": self.peak_equity,
+                "day_halt": day_halt,
+            }))
+        except OSError as exc:
+            log.warning(f"[Topstep] day-state save failed: {exc}")
+
+    def load_day_state(self, session_date: str) -> tuple[bool, bool]:
+        """Restore persisted anchors at startup. peak_equity is restored
+        unconditionally (the trailing MLL spans the whole account cycle);
+        day_start_equity and the halt flag apply only when the saved session
+        matches the current one. Returns (session_restored, day_halt)."""
+        try:
+            d = json.loads(self._DAY_STATE_FILE.read_text())
+        except (OSError, ValueError):
+            return False, False
+        try:
+            pk = float(d.get("peak_equity") or 0.0)
+        except (TypeError, ValueError):
+            pk = 0.0
+        if pk > self.peak_equity:
+            self.peak_equity = pk
+        if str(d.get("session_date")) != session_date:
+            return False, False
+        try:
+            dse = float(d.get("day_start_equity") or 0.0)
+        except (TypeError, ValueError):
+            dse = 0.0
+        if dse > 0:
+            self.day_start_equity = dse
+        log.info(f"[Topstep] restored session state | day_base=${self.day_start_equity:,.2f} "
+                 f"| peak=${self.peak_equity:,.2f} | halt={bool(d.get('day_halt'))}")
+        return True, bool(d.get("day_halt"))
 
     def reset_day(self, current_equity: float) -> None:
         """Call at the start of each new trading day to anchor the Daily Loss

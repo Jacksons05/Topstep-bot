@@ -481,7 +481,8 @@ class ProjectXBroker:
 
     def get_positions(self) -> list[dict]:
         """Fetch open futures positions from ProjectX."""
-        log.info(f"[ProjectX] get_positions() | mock={self._mock_mode}")
+        # debug: called every reconcile (~5s) — INFO here floods the log
+        log.debug(f"[ProjectX] get_positions() | mock={self._mock_mode}")
         if self._mock_mode:
             return []
         try:
@@ -502,8 +503,11 @@ class ProjectXBroker:
                 })
             return positions
         except Exception as exc:  # noqa: BLE001
+            # Re-raise: returning [] here is indistinguishable from "flat at
+            # broker" and makes the reconciler phantom-close the entire local
+            # book (and flatten_all() a no-op) on a transient API error.
             log.warning(f"[ProjectX] get_positions() failed: {exc}")
-            return []
+            raise
 
     def get_account(self) -> dict:
         """Alias for account() — kept for compatibility."""

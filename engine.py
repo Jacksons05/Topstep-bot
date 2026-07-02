@@ -85,6 +85,12 @@ class Engine:
         # (realized_pnl_usd == 0), so a fresh/blank local DB doesn't clamp a real,
         # already-profitable broker account down to the raw account_size floor.
         self._last_good_broker_equity: float | None = None
+        # Broker-synced ledger anchor: broker_cash − local_realized captured on
+        # the first trusted balance read. The local DB rarely holds the account's
+        # full lifetime history, so account_size + realized is a phantom ledger —
+        # anchoring to the broker makes the internal cross-check honest instead
+        # of manufacturing false MLL breaches after the first local close.
+        self._equity_baseline: float | None = None
         self._oflow = None  # ProjectXOrderFlowFeed when a live ProjectX feed is up
         self._uw = None     # UWFlowFeed when UW_FLOW_ENABLED=true + UW_API_KEY set
         # Partial-exit / BE-ratchet state keyed by position symbol.
@@ -113,6 +119,16 @@ class Engine:
                 except Exception:  # noqa: BLE001
                     initial_equity = CONFIG.topstep_account_size
                 self._topstep = TopstepRiskManager(initial_equity=initial_equity)
+                # Restore the persisted session anchors (DLL day base, MLL peak,
+                # day-halt) so a restart can't re-arm a fresh daily allowance.
+                _sess = str(self._topstep_session_date())
+                _restored, _halt = self._topstep.load_day_state(_sess)
+                if _restored:
+                    self._topstep_last_reset = self._topstep_session_date()
+                    if _halt:
+                        self._topstep_day_halt = True
+                        notify("🛑 Topstep: DAY HALT restored from persisted "
+                               "session state — no new entries until next session")
                 notify(
                     "⚡ TOPSTEP/PROJECTX MODE ACTIVE — "
                     f"env={'live' if CONFIG.projectx_live else 'sim'} | "
@@ -255,9 +271,18 @@ class Engine:
             if self._topstep_last_reset != today:
                 try:
                     acct = self.executor.broker.account()
-                    self._topstep.reset_day(acct.get("equity", CONFIG.bankroll_usd))
+                    src = str(acct.get("source", ""))
+                    bal = acct.get("equity")
+                    if not bal or "mock" in src or "error" in src:
+                        # Failed/mock balance read at the session roll: do NOT
+                        # anchor the Daily Loss Limit to a fallback figure (a
+                        # $50k anchor on a $99k account disarms the DLL for the
+                        # whole session). Retry next scan.
+                        raise RuntimeError(f"untrusted equity read ({src})")
+                    self._topstep.reset_day(float(bal))
                     self._topstep_last_reset = today
                     self._topstep_day_halt = False  # new session — limits reset
+                    self._topstep.save_day_state(str(today), False)
                     if self._oflow is not None:
                         self._oflow.reset_session()  # CVD is a since-open running total
                 except Exception:  # noqa: BLE001
@@ -284,6 +309,7 @@ class Engine:
                     notify(f"🛑 TOPSTEP BREACH — {why} | flattening all & halting new entries")
                     self._topstep_flatten_all(why)
                     self._topstep_day_halt = True
+                    self._topstep.save_day_state(str(today), True)
                 self._topstep.check_combine_progress(self.state)
 
         # 0. reconcile provisional entries against real broker fills
@@ -429,6 +455,13 @@ class Engine:
             _day_mult = _day_side_mult * _day_regime_mult
             if _day_mult != 1.0:
                 size = round(size * _day_mult, 2)
+            # Combined defensive multiplier for FUTURES contract sizing: the
+            # USD `size` above never reaches futures_plan (which sizes off the
+            # per-trade risk budget), so without this the circuit breaker,
+            # regime haircut and day-adapt haircuts silently do nothing for
+            # futures — every trade risks the full budget.
+            risk_mult = (cb_mult * (w or 1.0)
+                         * regime_params["size_mult"] * _day_mult)
             if size < CONFIG.min_executable_size_usd:
                 notify(f"  skip (regime {rk} sized to {size:.0f} < min "
                        f"{CONFIG.min_executable_size_usd:.0f}): {sig.symbol}")
@@ -462,7 +495,7 @@ class Engine:
             # outright if (a) the stop is too wide for the budget (qty=0) or (b) the
             # full stop-out would breach the LIVE trailing-MLL floor.
             if is_futures_symbol(sig.symbol):
-                plan = futures_plan(sig, sig.price)
+                plan = futures_plan(sig, sig.price, risk_mult=risk_mult)
                 if plan is None:
                     notify(f"  skip (sizing: stop too wide / invalid ATR for risk budget): {sig.symbol}")
                     continue
@@ -474,7 +507,7 @@ class Engine:
                         continue
 
             try:
-                pos = self.executor.open(sig, size, self.state)
+                pos = self.executor.open(sig, size, self.state, risk_mult=risk_mult)
             except Exception as e:  # noqa: BLE001
                 notify(f"  ! execute failed {sig.symbol}: {e}")
                 continue
@@ -482,6 +515,10 @@ class Engine:
                 notify(f"  skip (sizing rejected — no order placed): {sig.symbol}")
                 continue
             qty = pos.qty
+            # Fresh entry: drop any BE/trail state left by a prior trade in this
+            # symbol that exited via flatten/reconcile (which don't pop it) — a
+            # re-entry must not inherit be_done/partial_done/trail_peak.
+            self._be_state.pop(sig.symbol, None)
             self.cooldowns[sig.symbol] = time.time()
             if not pos.shadow:
                 self.state.journal_decision(
@@ -812,9 +849,14 @@ class Engine:
             mult = dollar_value_per_point(p.symbol)
             unrealized += (mark - p.entry_price) * p.qty * direction * mult
 
-        internal_equity = (CONFIG.topstep_account_size
-                           + self.state.realized_pnl_usd + unrealized)
-        has_local_history = self.state.realized_pnl_usd != 0.0
+        # Internal ledger view, anchored to the broker-synced baseline when one
+        # has been captured. account_size + realized is only valid if the local
+        # DB holds every trade since account inception — it usually doesn't, so
+        # unanchored it clamps a profitable account down to a phantom figure the
+        # moment the first local trade closes (false MLL breach).
+        ledger_base = (self._equity_baseline if self._equity_baseline is not None
+                       else CONFIG.topstep_account_size)
+        internal_equity = ledger_base + self.state.realized_pnl_usd + unrealized
         equity = internal_equity
         # Peak estimate for the trailing-MLL high-water-mark. Topstep ratchets its
         # floor on the HIGHER (more aggressive) live unrealized peak, so for the
@@ -829,18 +871,22 @@ class Engine:
             src = str(acct.get("source", ""))
             bal = acct.get("equity")
             if bal and "mock" not in src and "error" not in src:
+                if self._equity_baseline is None:
+                    # First trusted read of this process: sync the ledger anchor.
+                    self._equity_baseline = float(bal) - self.state.realized_pnl_usd
+                    internal_equity = (self._equity_baseline
+                                       + self.state.realized_pnl_usd + unrealized)
                 # Real-time combined equity = realized cash balance + open MTM.
                 broker_equity = float(bal) + unrealized
                 self._last_good_broker_equity = broker_equity
-                equity = (min(internal_equity, broker_equity) if has_local_history
-                          else broker_equity)
+                equity = min(internal_equity, broker_equity)
                 peak_est = max(internal_equity, broker_equity)
                 self._equity_trusted = True
         except Exception:  # noqa: BLE001
             pass
-        if not self._equity_trusted and not has_local_history \
+        if not self._equity_trusted and self._equity_baseline is None \
                 and self._last_good_broker_equity is not None:
-            # Blank local book + failed read: trust the last known-good broker
+            # No broker sync yet + failed read: trust the last known-good broker
             # figure rather than falling all the way back to account_size.
             equity = self._last_good_broker_equity
             peak_est = max(peak_est, self._last_good_broker_equity)
@@ -870,6 +916,7 @@ class Engine:
         if self._topstep is not None:
             self._topstep_flatten_all("kill switch")
             self._topstep_day_halt = True
+            self._topstep.save_day_state(str(self._topstep_session_date()), True)
         else:
             self._flatten_all("kill switch")
         self.state.save()
@@ -1006,16 +1053,25 @@ class Engine:
             if close_qty < pos.qty:
                 ok = self.executor.close_partial(pos, close_qty, mark)
                 if ok:
+                    partial_pnl = (
+                        (mark - pos.entry_price)
+                        * (1.0 if long else -1.0)
+                        * close_qty
+                        * dollar_value_per_point(pos.symbol)
+                    )
                     pos.qty -= close_qty
+                    pos.size_usd = round(pos.qty * pos.entry_price, 2)
                     st["partial_done"] = True
+                    # Book the realized partial into the ledger — state.close()
+                    # only books full closes, so without this internal equity
+                    # permanently understates profit (false-MLL-breach fuel).
+                    self.state.realized_pnl_usd += partial_pnl
+                    # Re-arm the resting stop for the remaining contracts:
+                    # close_partial cancels the original full-qty stop and the
+                    # remainder must not run naked against the trailing MLL.
+                    self.executor.replace_protective_stop(pos, pos.stop)
                     if self._topstep is not None and not pos.shadow:
                         from topstep_risk import hold_seconds
-                        partial_pnl = (
-                            (mark - pos.entry_price)
-                            * (1.0 if long else -1.0)
-                            * close_qty
-                            * dollar_value_per_point(pos.symbol)
-                        )
                         self._topstep.record_close(partial_pnl, hold_seconds(pos.opened_at))
                     notify(f"  PARTIAL-EXIT {pos.symbol}: closed {close_qty} @ {mark:.2f} "
                            f"(+{pnl_r:.1f}R), {pos.qty} remaining, trailing ATR")
