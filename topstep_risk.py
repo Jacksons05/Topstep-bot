@@ -141,6 +141,7 @@ class TopstepRiskManager:
         self._win_profit_total: float = 0.0
         self._win_profit_scalp: float = 0.0
         self._min_days_warned: bool = False
+        self._mll_breach_warned: bool = False
         log.info(
             f"[Topstep] initialized | account=${self.account_size:,.0f} | "
             f"start_equity=${start:,.2f} | trailing_MLL=${self.mll_buffer:,.0f} "
@@ -160,6 +161,7 @@ class TopstepRiskManager:
         self.peak_equity = max(self.peak_equity, current_equity)
         self._win_profit_total = 0.0
         self._win_profit_scalp = 0.0
+        self._mll_breach_warned = False
         log.info(f"[Topstep] day reset | day_base=${current_equity:,.2f} | "
                  f"peak=${self.peak_equity:,.2f} | floor=${self.mll_floor():,.2f}")
 
@@ -185,8 +187,11 @@ class TopstepRiskManager:
                 f"<= floor=${floor:,.2f} (peak=${self.peak_equity:,.2f}, "
                 f"buffer=${self.mll_buffer:,.0f})"
             )
-            log.warning(f"[Topstep] LIQUIDATE: {reason}")
+            if not self._mll_breach_warned:
+                log.warning(f"[Topstep] LIQUIDATE: {reason}")
+                self._mll_breach_warned = True
             return False, reason
+        self._mll_breach_warned = False
         return True, "ok"
 
     # ── Microscalping guard (Topstep: >50% of profit from ≤5s holds is banned) ──
