@@ -530,20 +530,29 @@ class Engine:
 
         # Blend Unusual Whales options-flow lean into the quant read.
         # UW lean is derived from net call-vs-put premium on the futures proxy
-        # (ES→SPX, NQ→NDX). A weight of 0.30 means 70% indicators + 30% UW flow.
+        # (ES→SPX, NQ→NDX). Weight scales dynamically:
+        #   base (config default, 30%) → aligned with quant (45%) → whale + aligned (60%)
+        # "Aligned" = UW and quant lean point the same direction.
         if self._uw is not None:
             uw = self._uw.get(sym)
             if uw is not None:
-                w = CONFIG.uw_flow_lean_weight
+                aligned = (uw.lean >= 0) == (quant.lean >= 0)
+                if uw.whale and aligned:
+                    w = min(0.60, CONFIG.uw_flow_lean_weight * 2.0)
+                elif aligned:
+                    w = min(0.45, CONFIG.uw_flow_lean_weight * 1.5)
+                else:
+                    w = CONFIG.uw_flow_lean_weight
                 blended = (1.0 - w) * quant.lean + w * uw.lean
                 blended = max(-1.0, min(1.0, blended))
                 from signals import QuantRead
                 whale_tag = " 🐋" if uw.whale else ""
+                align_tag = f" w={w:.0%}" if w != CONFIG.uw_flow_lean_weight else ""
                 quant = QuantRead(
                     lean=round(blended, 4),
                     strength=round(abs(blended), 4),
                     atr=quant.atr,
-                    detail=quant.detail + f" · UW={uw.lean:+.2f}{whale_tag}",
+                    detail=quant.detail + f" · UW={uw.lean:+.2f}{whale_tag}{align_tag}",
                 )
 
         if quant.direction == "FLAT":
