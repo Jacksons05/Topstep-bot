@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS positions (
     order_id    TEXT    NOT NULL DEFAULT '',
     filled      BOOLEAN NOT NULL DEFAULT TRUE,
     contract    TEXT    NOT NULL DEFAULT '',
+    protective_order_id TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (symbol, opened_at, shadow)
 )
 """
@@ -50,6 +51,10 @@ _DDL_MIGRATE = [
     "ALTER TABLE positions ADD COLUMN IF NOT EXISTS order_id TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE positions ADD COLUMN IF NOT EXISTS filled BOOLEAN NOT NULL DEFAULT TRUE",
     "ALTER TABLE positions ADD COLUMN IF NOT EXISTS contract TEXT NOT NULL DEFAULT ''",
+    # Native resting-stop id: without persistence, a restart orphans the
+    # exchange stop — the engine can't cancel it on close and a later fill
+    # opens an unwanted opposite position.
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS protective_order_id TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE state_meta ADD COLUMN IF NOT EXISTS trading_days TEXT NOT NULL DEFAULT ''",
 ]
 
@@ -240,7 +245,8 @@ class State:
                 cur.execute(
                     "SELECT symbol, asset, side, qty, entry_price, size_usd, stop, "
                     "target, kind, thesis, opened_at, mode, shadow, open, "
-                    "exit_price, closed_at, pnl_usd, order_id, filled, contract FROM positions"
+                    "exit_price, closed_at, pnl_usd, order_id, filled, contract, "
+                    "protective_order_id FROM positions"
                 )
                 positions = [
                     Position(
@@ -251,6 +257,7 @@ class State:
                         exit_price=float(r[14]) if r[14] is not None else None,
                         closed_at=r[15], pnl_usd=float(r[16]),
                         order_id=r[17] or "", filled=bool(r[18]), contract=r[19] or "",
+                        protective_order_id=r[20] or "",
                     )
                     for r in cur.fetchall()
                 ]
@@ -350,18 +357,21 @@ class State:
                         """INSERT INTO positions (
                                symbol, asset, side, qty, entry_price, size_usd, stop,
                                target, kind, thesis, opened_at, mode, shadow,
-                               open, exit_price, closed_at, pnl_usd, order_id, filled, contract
-                           ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                               open, exit_price, closed_at, pnl_usd, order_id, filled, contract,
+                               protective_order_id
+                           ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                            ON CONFLICT (symbol, opened_at, shadow) DO UPDATE
                              SET open=EXCLUDED.open, exit_price=EXCLUDED.exit_price,
                                  closed_at=EXCLUDED.closed_at, pnl_usd=EXCLUDED.pnl_usd,
                                  stop=EXCLUDED.stop, target=EXCLUDED.target,
                                  entry_price=EXCLUDED.entry_price, size_usd=EXCLUDED.size_usd,
-                                 filled=EXCLUDED.filled""",
+                                 filled=EXCLUDED.filled, qty=EXCLUDED.qty,
+                                 protective_order_id=EXCLUDED.protective_order_id""",
                         (p.symbol, p.asset, p.side, p.qty, p.entry_price, p.size_usd,
                          p.stop, p.target, p.kind, p.thesis, p.opened_at, p.mode,
                          p.shadow, p.open, p.exit_price, p.closed_at, p.pnl_usd,
-                         p.order_id, p.filled, p.contract),
+                         p.order_id, p.filled, p.contract,
+                         getattr(p, "protective_order_id", "")),
                     )
 
     def journal_decision(self, sym: str, opened_at: str,

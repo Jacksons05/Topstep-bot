@@ -961,19 +961,38 @@ class Engine:
                 bro[sym] = bp
 
         changed = False
-        # phantom: local open (non-shadow) with no matching broker position
+        # phantom: local open (non-shadow) with no matching broker position.
+        # Matching is by symbol + side + qty, not symbol alone: a local BUY 2
+        # vs broker BUY 1 (or SELL) is NOT the same position — symbol-only
+        # matching let real side/qty drift persist unmanaged (seen live:
+        # broker ES x2 vs adopted local ES x1).
         for pos in list(self.state.open_positions):
             if pos.shadow:
                 continue
-            if pos.symbol.upper() not in bro:
-                mark = self._mark(pos.symbol)
-                exit_price = mark if mark is not None else pos.entry_price
-                self.state.close(pos, exit_price)
-                if self._topstep is not None:
-                    self._topstep.record_close(pos.pnl_usd, hold_seconds(pos.opened_at))
-                notify(f"♻ reconcile: phantom {pos.symbol} not at broker — closed "
-                       f"locally @ ~{exit_price:.2f} pnl=${pos.pnl_usd:.2f}")
+            bp = bro.get(pos.symbol.upper())
+            b_side = str(bp.get("side", "")).upper() if bp else ""
+            b_qty = float(bp.get("qty") or 0.0) if bp else 0.0
+            if bp is not None and b_side == pos.side.upper() and b_qty == pos.qty:
+                continue        # exact match — nothing to do
+            if bp is not None and b_side == pos.side.upper() and 0 < b_qty != pos.qty:
+                # Same direction, different size (partial fill / external
+                # reduction): adopt the broker's qty as truth.
+                notify(f"♻ reconcile: {pos.symbol} qty {pos.qty:g} → {b_qty:g} "
+                       f"(broker truth adopted)")
+                pos.qty = b_qty
+                pos.size_usd = round(b_qty * pos.entry_price, 2)
                 changed = True
+                continue
+            # No broker position, or side flipped: the local position is gone.
+            mark = self._mark(pos.symbol)
+            exit_price = mark if mark is not None else pos.entry_price
+            self.state.close(pos, exit_price)
+            if self._topstep is not None:
+                self._topstep.record_close(pos.pnl_usd, hold_seconds(pos.opened_at))
+            notify(f"♻ reconcile: phantom {pos.symbol} not at broker "
+                   f"({'side mismatch' if bp is not None else 'flat'}) — closed "
+                   f"locally @ ~{exit_price:.2f} pnl=${pos.pnl_usd:.2f}")
+            changed = True
 
         # orphan: broker position with no local counterpart → adopt
         local_syms = {p.symbol.upper() for p in self.state.open_positions if not p.shadow}
