@@ -325,6 +325,17 @@ class ProjectXBroker:
                 symbol=symbol, qty=float(n_contracts), side=side, price=ref_price,
                 order_id=f"projectx-mock-{uuid.uuid4().hex[:8]}", status="filled",
             )
+        # Choke-point guard (real orders only): this bot must never order
+        # outside its watchlist. Unattributed full-size ES orders kept
+        # appearing on the account with our customTag; if any code path in
+        # THIS process tries that, refuse and dump the stack so the culprit
+        # is identified.
+        watch = {w.upper() for w in CONFIG.watchlist}
+        if symbol.upper() not in watch:
+            import traceback
+            log.error(f"[ProjectX] BLOCKED off-watchlist order: {side} {qty}x "
+                      f"{symbol} — call stack:\n" + "".join(traceback.format_stack()))
+            raise RuntimeError(f"off-watchlist order blocked: {symbol}")
 
         cid = self.contract_id(symbol)
         if cid is None:
