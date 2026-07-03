@@ -129,9 +129,18 @@ def test_daily_loss_independent_of_state_utc_roll():
 
 
 # ── #3 ProjectX market order reports filled ──────────────────────────────────
-def test_projectx_mock_submit_reports_filled():
-    from projectx_executor import ProjectXBroker
-    b = ProjectXBroker()                     # no creds → mock mode, no network
+def test_projectx_mock_submit_reports_filled(monkeypatch):
+    # FORCE mock mode: with real creds in .env, ProjectXBroker() logs in live
+    # and this test placed REAL 1-lot ES market orders on the account every
+    # pytest run (discovered 2026-07-03 — the "unattributed foreign ES orders").
+    # CONFIG is frozen, so swap the module's reference for a credless copy.
+    import dataclasses
+    import projectx_executor as px
+    monkeypatch.setattr(
+        px, "CONFIG",
+        dataclasses.replace(px.CONFIG, projectx_username="", projectx_api_key=""))
+    b = px.ProjectXBroker()                  # no creds → mock mode, no network
+    assert b._mock_mode, "test must never talk to the live gateway"
     fill = b.submit("ES", 1, "BUY", 5000.0)
     assert fill.status == "filled"           # was "accepted" → positions never managed
 
