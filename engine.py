@@ -994,16 +994,46 @@ class Engine:
                    f"locally @ ~{exit_price:.2f} pnl=${pos.pnl_usd:.2f}")
             changed = True
 
-        # orphan: broker position with no local counterpart → adopt
+        # orphan: broker position with no local counterpart. In-watchlist →
+        # adopt and manage. OFF-watchlist → flatten immediately: this bot never
+        # opens such positions, so they come from another writer on the account
+        # (rogue process / stale cloud deploy / manual) and carrying them
+        # unmanaged with no stop is pure unpriced risk (seen live: repeated
+        # full-size ES 1-lots appearing on a MES/MNQ-only account).
         local_syms = {p.symbol.upper() for p in self.state.open_positions if not p.shadow}
+        watch = {w.upper() for w in CONFIG.watchlist}
         for sym, bp in bro.items():
             if sym in local_syms:
                 continue
             qty = float(bp.get("qty") or 0.0)
             if qty <= 0:
                 continue
-            entry = float(bp.get("avg_price") or 0.0) or (self._mark(sym) or 0.0)
             side = bp.get("side", "BUY")
+            if sym not in watch:
+                cid = bp.get("contract_id")
+                try:
+                    if cid:
+                        self.executor.broker._post(  # noqa: SLF001
+                            "/api/Position/closeContract",
+                            {"accountId": self.executor.broker.account_id,
+                             "contractId": cid})
+                    notify(f"🛑 reconcile: FOREIGN position {sym} {side} qty={qty} "
+                           f"(not in watchlist) — FLATTENED. Another process is "
+                           f"trading this account; rotate the ProjectX API key.")
+                except Exception as exc:  # noqa: BLE001
+                    notify(f"⚠ reconcile: failed to flatten foreign {sym}: {exc} "
+                           f"— adopting for EOD flatten instead")
+                    entry = float(bp.get("avg_price") or 0.0) or (self._mark(sym) or 0.0)
+                    self.state.add(Position(
+                        symbol=sym, asset="future", side=side, qty=qty,
+                        entry_price=entry, size_usd=entry * qty, stop=0.0, target=0.0,
+                        kind="adopted", thesis="foreign orphan (flatten failed)",
+                        opened_at=datetime.now(timezone.utc).isoformat(),
+                        mode=self.executor.mode, order_id="", filled=True,
+                    ))
+                changed = True
+                continue
+            entry = float(bp.get("avg_price") or 0.0) or (self._mark(sym) or 0.0)
             self.state.add(Position(
                 symbol=sym, asset="future", side=side, qty=qty,
                 entry_price=entry, size_usd=entry * qty, stop=0.0, target=0.0,
