@@ -156,6 +156,24 @@ class TopstepRiskManager:
             f"flatten_at={CONFIG.topstep_flatten_time} ET"
         )
 
+    def giveback_ok(self, equity: float) -> tuple[bool, str]:
+        """Profit give-back guard: entries-only soft halt while equity is more
+        than topstep_giveback_halt_usd below the cycle peak. Never flattens —
+        open positions keep managing; the halt lifts as equity recovers or the
+        cap is disabled (0). Only meaningful once peak is above the locked MLL
+        floor (i.e. there IS profit to protect)."""
+        cap = CONFIG.topstep_giveback_halt_usd
+        if cap <= 0:
+            return True, "ok"
+        if self.peak_equity <= self.account_size + self.mll_buffer:
+            return True, "ok"        # floor not locked yet — MLL still trails
+        drawdown = self.peak_equity - equity
+        if drawdown >= cap:
+            return False, (f"profit give-back halt: equity ${equity:,.2f} is "
+                           f"${drawdown:,.2f} below peak ${self.peak_equity:,.2f} "
+                           f"(cap ${cap:,.0f}) — new entries blocked until recovery")
+        return True, "ok"
+
     # ── Restart persistence ──────────────────────────────────────────────────
     # day_start_equity (DLL anchor), peak_equity (trailing-MLL high-water mark)
     # and the day-halt flag must survive a process restart: without this every
@@ -482,6 +500,13 @@ class TopstepRiskManager:
         dll_ok, dll_reason = self.daily_loss_ok(equity, state, unrealized)
         if not dll_ok:
             return False, dll_reason
+
+        # 4b. Profit give-back guard (ours): block NEW entries while equity sits
+        # too far below the cycle peak. Topstep's MLL locks at account_size, so
+        # accumulated profit above it has no house protection at all.
+        gb_ok, gb_reason = self.giveback_ok(equity)
+        if not gb_ok:
+            return False, gb_reason
 
         # 5. Account-wide contract cap
         contr_ok, contr_reason = self.contracts_ok(sig.symbol, state)

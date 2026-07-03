@@ -317,6 +317,13 @@ class Config:
     # Responsible Trading Advantage: adds a Daily Loss Limit. ON per the funded plan.
     topstep_responsible_trading: bool = _b("TOPSTEP_RESPONSIBLE_TRADING", True)
     topstep_daily_loss_limit: float = _f("TOPSTEP_DAILY_LOSS_LIMIT", 1_000.0)  # DLL ($) — deactivates the day
+    # Profit give-back guard (OURS, not a Topstep rule): once equity has run far
+    # above the locked $account_size MLL floor, Topstep offers no trailing
+    # protection at all — a funded account can give back its entire accumulated
+    # profit before the hard floor fires. Block NEW entries (never flattens)
+    # while equity sits more than this many dollars below the cycle peak.
+    # 0 = off.
+    topstep_giveback_halt_usd: float = _f("TOPSTEP_GIVEBACK_HALT_USD", 2_000.0)
     # Per-trade risk budget for ATR/risk-based futures position sizing. The dollar
     # risk at the stop (qty * stop_distance_pts * $/pt) is capped to the SMALLER of
     # (pct of account) and (fraction of the Daily Loss Limit). Default: min($500, $500).

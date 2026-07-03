@@ -13,6 +13,7 @@ confidence clears CONFIDENCE_THRESHOLD.
 """
 from __future__ import annotations
 
+import math
 import time
 from datetime import date, datetime, timezone
 import day_learner as _day_learner
@@ -401,12 +402,15 @@ class Engine:
 
             # (b) Per-regime minimum confidence (stricter than global threshold).
             # Overnight: cap the regime floor at the looser overnight gate so the
-            # regime playbook can't re-impose the strict RTH threshold at night.
+            # regime playbook can't re-impose the strict RTH threshold at night —
+            # EXCEPT in Crisis, whose 0.80 floor is a deliberate hard defense
+            # (collapsing it to 0.50 overnight is exactly backwards: crisis vol
+            # is worst in thin Globex hours).
             regime_min_conf = regime_params.get("min_conf", CONFIG.confidence_threshold)
             from zoneinfo import ZoneInfo as _ZIr
             _mr = datetime.now(_ZIr("America/New_York"))
             _minsr = _mr.hour * 60 + _mr.minute
-            if not (9 * 60 + 30 <= _minsr <= 16 * 60):
+            if not (9 * 60 + 30 <= _minsr <= 16 * 60) and str(rk).upper() != "CRISIS":
                 regime_min_conf = min(regime_min_conf, CONFIG.confidence_threshold_overnight)
             if sig.confidence < regime_min_conf:
                 notify(f"  skip (regime {rk} conf {sig.confidence:.2f} < {regime_min_conf:.2f}): "
@@ -505,6 +509,17 @@ class Engine:
                         notify(f"  skip (worst-case loss ${plan.risk_usd:,.0f} would breach "
                                f"trailing MLL floor ${self._topstep.mll_floor():,.0f}): {sig.symbol}")
                         continue
+                    # DLL analog: a full stop-out must also fit inside the
+                    # remaining Daily-Loss-Limit headroom — otherwise the trade
+                    # is allowed at day_pnl −$999, overshoots the $1k DLL, and
+                    # only the after-the-fact flatten path catches it.
+                    if CONFIG.topstep_responsible_trading:
+                        day_pnl = eq_chk - self._topstep.day_start_equity
+                        headroom = CONFIG.topstep_daily_loss_limit + day_pnl
+                        if plan.risk_usd >= headroom:
+                            notify(f"  skip (worst-case loss ${plan.risk_usd:,.0f} exceeds "
+                                   f"DLL headroom ${max(headroom, 0):,.0f}): {sig.symbol}")
+                            continue
 
             try:
                 pos = self.executor.open(sig, size, self.state, risk_mult=risk_mult)
@@ -1044,6 +1059,7 @@ class Engine:
             old_stop = pos.stop
             pos.stop = pos.entry_price
             st["be_done"] = True
+            self._amend_native_stop(pos, st)
             notify(f"  BE-RATCHET {pos.symbol}: stop {old_stop:.2f} → {pos.entry_price:.2f} "
                    f"(+{pnl_r:.1f}R breakeven locked)")
 
@@ -1070,6 +1086,8 @@ class Engine:
                     # close_partial cancels the original full-qty stop and the
                     # remainder must not run naked against the trailing MLL.
                     self.executor.replace_protective_stop(pos, pos.stop)
+                    if pos.protective_order_id:
+                        st["armed_stop"] = pos.stop
                     if self._topstep is not None and not pos.shadow:
                         from topstep_risk import hold_seconds
                         self._topstep.record_close(partial_pnl, hold_seconds(pos.opened_at))
@@ -1090,6 +1108,33 @@ class Engine:
                 trail_stop = st["trail_peak"] + trail_dist
                 if trail_stop < pos.stop:
                     pos.stop = trail_stop
+            # Push the trail to the exchange, throttled to ≥25% of the trail
+            # distance per amend so a trending tick stream doesn't spam
+            # cancel/replace every scan.
+            self._amend_native_stop(pos, st, min_move=0.25 * trail_dist)
+
+    def _amend_native_stop(self, pos: "Position", st: dict,
+                           min_move: float = 0.0) -> None:
+        """Move the exchange-resting protective stop up to the ratcheted
+        pos.stop. Client-side ratchets alone are worthless in a disconnect —
+        the broker keeps honoring the original wide stop. min_move throttles
+        chandelier-driven cancel/replace churn."""
+        if pos.shadow or not pos.stop or not math.isfinite(pos.stop):
+            return
+        armed = st.get("armed_stop")
+        if armed is not None and abs(pos.stop - armed) < max(min_move, 1e-9):
+            return
+        pid = getattr(pos, "protective_order_id", "")
+        cancel = getattr(self.executor.broker, "cancel_order", None)
+        if pid and callable(cancel):
+            try:
+                cancel(pid)
+            except Exception as exc:  # noqa: BLE001
+                notify(f"  ⚠ cancel stop {pid} for amend failed ({pos.symbol}): {exc}")
+            pos.protective_order_id = ""
+        self.executor.replace_protective_stop(pos, pos.stop)
+        if pos.protective_order_id:
+            st["armed_stop"] = pos.stop
 
     # ── manage exits ──────────────────────────────────────
     def _manage_open(self) -> None:

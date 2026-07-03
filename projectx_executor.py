@@ -344,17 +344,48 @@ class ProjectXBroker:
                 f"[ProjectX] order rejected: errorCode={d.get('errorCode')} {d.get('errorMessage')}"
             )
         order_id = str(d.get("orderId", ""))
-        # Market orders fill near-instantly. ProjectX returns only the orderId on
-        # placement (no avg fill price), so we mark the entry at ref_price and
-        # report status="filled" — NOT "accepted". With "accepted" the Position is
-        # created filled=False, get_fill returns no price so _reconcile_fills never
-        # promotes it, and _manage_open then skips it forever (no stop/target ever
-        # runs). Marking it filled lets exit management run immediately; avg-fill
-        # price reconciliation via /api/Trade/search is a future refinement.
+        # Market orders fill near-instantly. The place response carries no avg
+        # fill price, so poll /api/Trade/search briefly for the REAL fill —
+        # booking at ref_price hides slippage and drifts the internal ledger
+        # away from broker truth (the false-MLL-breach fuel). Status stays
+        # "filled" either way: with "accepted" the Position is created
+        # filled=False and exit management never runs.
+        price = ref_price
+        for _ in range(3):
+            time.sleep(0.4)
+            avg = self._avg_fill_price(order_id)
+            if avg is not None:
+                if abs(avg - ref_price) > 1e-9:
+                    log.info(f"[ProjectX] {symbol} actual fill {avg:.4f} vs ref "
+                             f"{ref_price:.4f} (slippage booked)")
+                price = avg
+                break
         return Fill(
-            symbol=symbol, qty=float(n_contracts), side=side, price=ref_price,
+            symbol=symbol, qty=float(n_contracts), side=side, price=price,
             order_id=order_id, status="filled",
         )
+
+    def _avg_fill_price(self, order_id: str) -> float | None:
+        """Size-weighted average fill price for an order via /api/Trade/search
+        (schema verified 2026-07-03: trades[{orderId, price, size, voided}]).
+        Returns None when no (non-voided) fills are visible yet or on error."""
+        if not order_id:
+            return None
+        try:
+            start = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+            d = self._post("/api/Trade/search",
+                           {"accountId": self.account_id, "startTimestamp": start})
+            fills = [t for t in d.get("trades", [])
+                     if str(t.get("orderId", "")) == str(order_id)
+                     and not t.get("voided")]
+            total = sum(float(t.get("size", 0)) for t in fills)
+            if total <= 0:
+                return None
+            return sum(float(t["price"]) * float(t.get("size", 0))
+                       for t in fills) / total
+        except Exception as exc:  # noqa: BLE001
+            log.debug(f"[ProjectX] trade search for order {order_id} failed: {exc}")
+            return None
 
     def place_stop_order(self, symbol: str, qty: int, side: str,
                          stop_price: float) -> str:
@@ -368,12 +399,11 @@ class ProjectXBroker:
         Returns the ProjectX orderId (so the caller can cancel it on a managed
         exit), or "" on failure / mock mode.
 
-        NOTE (live-sim verification required): the ProjectX stop order TYPE enum
-        (4) and the `stopPrice` field name are assumed from the gateway's order
-        schema. A true OCO/bracket that auto-cancels the sibling on fill is NOT
-        used here — the entry's take-profit stays client-side, and the engine
-        cancels this resting stop when it flattens. VERIFY against a live-sim
-        account before arming real money.
+        VERIFIED 2026-07-03 against the sim gateway (account 7904116): type=4 +
+        `stopPrice` accepted, orderId returned, cancel round-trip OK. A true
+        OCO/bracket that auto-cancels the sibling on fill is NOT used here —
+        the entry's take-profit stays client-side, and the engine cancels this
+        resting stop when it flattens.
         """
         n = max(1, int(qty))
         if self._mock_mode:
@@ -417,13 +447,12 @@ class ProjectXBroker:
         return oid
 
     def get_fill(self, order_id: str) -> tuple[str, float | None]:
-        """Poll fill status. ProjectX market orders fill immediately; the place
-        response carries no avg price, so we report filled at the provisional
-        (ref) price (None). Exact avg-fill reconciliation would query
-        /api/Trade/search by order — left as a future enhancement."""
+        """Poll fill status. Market orders fill near-instantly; report the real
+        size-weighted average price from /api/Trade/search when visible, else
+        filled-at-provisional (None) so callers keep their ref price."""
         if self._mock_mode:
             return "filled", None
-        return "filled", None
+        return "filled", self._avg_fill_price(order_id)
 
     def account(self) -> dict:
         """Fetch account balance/equity from ProjectX."""
