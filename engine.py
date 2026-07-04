@@ -400,10 +400,25 @@ class Engine:
             # For a futures symbol, size off the per-trade risk budget and reject
             # outright if (a) the stop is too wide for the budget (qty=0) or (b) the
             # full stop-out would breach the LIVE trailing-MLL floor.
+            qty_cap: int | None = None
             if is_futures_symbol(sig.symbol):
-                plan = futures_plan(sig, sig.price)
+                # Cap the new order to the remaining ACCOUNT-WIDE contract capacity
+                # so a single (esp. micro) trade can't size to the full limit and
+                # push the account total over TOPSTEP_MAX_CONTRACTS. Only enforced
+                # when the Topstep layer is active (the cap is a Topstep rule).
+                if self._topstep is not None:
+                    open_contracts = sum(int(p.qty) for p in self.state.open_positions
+                                         if not p.shadow)
+                    qty_cap = CONFIG.topstep_max_contracts - open_contracts
+                    if qty_cap < 1:
+                        notify(f"  skip (Topstep account-wide contract cap "
+                               f"{CONFIG.topstep_max_contracts} reached — "
+                               f"{open_contracts} open): {sig.symbol}")
+                        continue
+                plan = futures_plan(sig, sig.price, max_contracts=qty_cap)
                 if plan is None:
-                    notify(f"  skip (sizing: stop too wide / invalid ATR for risk budget): {sig.symbol}")
+                    notify(f"  skip (sizing: stop too wide / invalid ATR / no contract "
+                           f"capacity for risk budget): {sig.symbol}")
                     continue
                 if self._topstep is not None:
                     eq_chk, _u = self._account_equity()
@@ -413,7 +428,7 @@ class Engine:
                         continue
 
             try:
-                pos = self.executor.open(sig, size, self.state)
+                pos = self.executor.open(sig, size, self.state, max_contracts=qty_cap)
             except Exception as e:  # noqa: BLE001
                 notify(f"  ! execute failed {sig.symbol}: {e}")
                 continue
