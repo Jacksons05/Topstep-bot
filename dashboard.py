@@ -102,11 +102,16 @@ def _fetch_positions_from_db() -> dict:
     """Inner DB fetch — runs in a worker thread so we can enforce a wall-clock timeout."""
     from state import State
     from marketdata import MarketData
+    from futures_symbols import dollar_value_per_point, is_futures_symbol
 
     s = State.load()
     open_pos = s.open_positions
 
-    symbols = list({p.symbol for p in open_pos})
+    # Only quote NON-futures symbols against Alpaca's stock feed. Futures roots
+    # (ES/NQ/GC/…) collide with unrelated NYSE tickers (ES = Eversource), so
+    # quoting them here would show a bogus price + wildly wrong unrealized P&L.
+    # Futures marks require the engine's live ProjectX feed, unavailable here.
+    symbols = list({p.symbol for p in open_pos if not is_futures_symbol(p.symbol)})
     current_prices: dict[str, float] = {}
     if symbols:
         try:
@@ -123,7 +128,10 @@ def _fetch_positions_from_db() -> dict:
         curr = current_prices.get(p.symbol)
         if curr is not None:
             direction = 1.0 if p.side == "BUY" else -1.0
-            unrlzd = (curr - p.entry_price) * p.qty * direction
+            # Scale to DOLLARS by the contract multiplier ($/point), matching how
+            # state.close books realized P&L (1.0 for non-futures → unchanged).
+            mult = dollar_value_per_point(p.symbol)
+            unrlzd = (curr - p.entry_price) * p.qty * direction * mult
             total_unrealized += unrlzd
         else:
             unrlzd = None

@@ -136,6 +136,35 @@ def test_projectx_mock_submit_reports_filled():
     assert fill.status == "filled"           # was "accepted" → positions never managed
 
 
+# ── dashboard futures P&L: no bogus Alpaca stock quote for futures roots ─────
+def test_dashboard_skips_alpaca_quote_for_futures(monkeypatch):
+    # A futures root like "ES" collides with a real NYSE ticker (Eversource), so
+    # quoting it via Alpaca stocks would show a bogus price + wrong unrealized.
+    import dashboard
+    import marketdata as md_mod
+    import state as state_mod
+
+    st = State()
+    st.add(_pos("ES", "BUY", 2, 5000.0))
+    monkeypatch.setattr(state_mod.State, "load", classmethod(lambda cls: st))
+
+    class _MD:
+        def __init__(self, *a, **k):
+            pass
+
+        def quotes(self, syms):
+            raise AssertionError(f"futures must not be quoted via Alpaca stocks: {syms}")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(md_mod, "MarketData", _MD)
+
+    out = dashboard._fetch_positions_from_db()
+    assert out["open"][0]["current_price"] is None      # futures not mispriced
+    assert out["open"][0]["unrealized_pnl"] is None
+
+
 # ── #6 session date rolls at 18:00 ET ────────────────────────────────────────
 def test_session_date_rolls_at_18_et(monkeypatch):
     import engine as eng
