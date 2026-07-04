@@ -56,14 +56,19 @@ def _futures_risk_budget_usd() -> float:
     return min(caps) if caps else 0.0
 
 
-def futures_plan(sig: Signal, price: float | None = None) -> FuturesPlan | None:
+def futures_plan(sig: Signal, price: float | None = None,
+                 max_contracts: int | None = None) -> FuturesPlan | None:
     """Risk-based futures sizing + ATR bracket. Returns a plan, or None to REJECT
     the trade (invalid/zero ATR, unknown $/pt, or stop too wide for the budget).
 
     qty = floor(risk_budget / (stop_distance_pts × $/pt)), clamped to
-    [1 .. TOPSTEP_MAX_CONTRACTS]. A raw floor of 0 (stop too wide for the risk
-    budget) REJECTS the trade — we never silently round up to 1 contract, which
-    would risk more than the budget allows.
+    [1 .. cap]. The cap defaults to TOPSTEP_MAX_CONTRACTS but callers pass a
+    smaller value to respect the ACCOUNT-WIDE contract cap (remaining capacity =
+    TOPSTEP_MAX_CONTRACTS − contracts already open across all symbols) — otherwise
+    a single micro trade can size to the full cap and push the account total over
+    the Topstep limit. A raw floor of 0 (stop too wide for the risk budget), or a
+    cap of 0 (no capacity left), REJECTS the trade — we never silently round up to
+    1 contract, which would risk more than the budget / cap allows.
     """
     px = price if price is not None else sig.price
     pv = dollar_value_per_point(sig.symbol)
@@ -80,10 +85,13 @@ def futures_plan(sig: Signal, price: float | None = None) -> FuturesPlan | None:
     budget = _futures_risk_budget_usd()
     if per_contract_risk <= 0 or budget <= 0:
         return None
+    cap = CONFIG.topstep_max_contracts if max_contracts is None else int(max_contracts)
+    if cap < 1:
+        return None                              # no account-wide capacity left → reject
     raw = math.floor(budget / per_contract_risk)
     if raw < 1:
         return None                              # stop too wide for the budget → reject
-    qty = min(raw, CONFIG.topstep_max_contracts)
+    qty = min(raw, cap)
 
     if CONFIG.take_profit_pct > 0:
         tdist = CONFIG.take_profit_pct * px
@@ -113,16 +121,22 @@ class Executor:
     def get_fill(self, order_id: str) -> tuple[str, float | None]:
         return self.broker.get_fill(order_id)
 
-    def open(self, sig: Signal, size_usd: float, state: State) -> Position | None:
+    def open(self, sig: Signal, size_usd: float, state: State,
+             max_contracts: int | None = None) -> Position | None:
         """Size + submit an entry. Returns the Position, or None to REJECT (no
         broker order placed) when risk-based sizing yields 0 contracts or the
-        stop is non-finite."""
+        stop is non-finite.
+
+        `max_contracts` caps futures qty to the remaining ACCOUNT-WIDE capacity
+        (TOPSTEP_MAX_CONTRACTS − contracts already open) so a new order can never
+        push the total over the Topstep limit."""
         futures = is_futures_symbol(sig.symbol)
         if futures:
-            plan = futures_plan(sig, sig.price)
+            plan = futures_plan(sig, sig.price, max_contracts=max_contracts)
             if plan is None:
                 log.warning("[exec] reject %s — futures sizing failed "
-                            "(invalid ATR or stop too wide for risk budget)", sig.symbol)
+                            "(invalid ATR, stop too wide for risk budget, or no "
+                            "account-wide contract capacity left)", sig.symbol)
                 return None
             qty = plan.qty
         else:
@@ -139,7 +153,7 @@ class Executor:
 
         # Re-anchor the bracket to the ACTUAL fill price (distances are unchanged).
         if futures:
-            fp = futures_plan(sig, fill.price) or plan
+            fp = futures_plan(sig, fill.price, max_contracts=max_contracts) or plan
             stop, target = fp.stop_price, fp.target_price
         else:
             stop = self._stop(sig, fill.price)
