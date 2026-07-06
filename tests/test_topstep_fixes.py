@@ -174,6 +174,40 @@ def test_dashboard_skips_alpaca_quote_for_futures(monkeypatch):
     assert out["open"][0]["unrealized_pnl"] is None
 
 
+# ── Cramer shadow book mirror-closes with the real position ──────────────────
+def test_closing_real_position_mirror_closes_cramer_shadow():
+    # The inverse shadow has no stop/target, so should_exit never fires on it and
+    # no flatten path touches it. Closing the real leg must mirror-close its
+    # shadow so shadow_pnl_usd (dashboard + day_learner) actually reflects the
+    # "what if we inverted" book instead of being stuck at 0.
+    s = State()
+    real = _pos("ES", "BUY", 1, 5000.0)
+    real.stop, real.target = 4990.0, 5020.0
+    shadow = Position(
+        symbol="ES", asset="future", side="SELL", qty=1, entry_price=5000.0,
+        size_usd=5000.0, stop=0.0, target=0.0, kind="cramer", thesis="inverse shadow",
+        opened_at="2026-06-22T12:00:01+00:00", mode="paper", shadow=True,
+    )
+    s.add(real)
+    s.add(shadow)
+    s.close(real, 5002.0)                       # real long +2pts → +$100
+    assert not real.open and real.pnl_usd == pytest.approx(100.0)
+    assert not shadow.open                      # mirror-closed alongside the real leg
+    assert shadow.pnl_usd == pytest.approx(-100.0)   # inverse book takes the other side
+    assert s.shadow_pnl_usd == pytest.approx(-100.0)
+    assert s.open_shadow == []
+
+
+def test_closing_real_position_without_shadow_is_unaffected():
+    # No shadow present (CRAMER_MODE off) → close behaves exactly as before.
+    s = State()
+    real = _pos("MNQ", "BUY", 1, 18000.0)
+    s.add(real)
+    s.close(real, 18010.0)
+    assert not real.open and real.pnl_usd == pytest.approx(20.0)
+    assert s.shadow_pnl_usd == 0.0
+
+
 # ── #6 session date rolls at 18:00 ET ────────────────────────────────────────
 def test_session_date_rolls_at_18_et(monkeypatch):
     import engine as eng
