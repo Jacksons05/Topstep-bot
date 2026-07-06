@@ -190,9 +190,14 @@ def _config() -> dict:
 
 
 def status() -> dict:
+    # "exec" reflects THIS process's session counters — meaningful when the
+    # dashboard runs embedded in the engine process (the normal run.py mode);
+    # a standalone `python dashboard.py` shows an empty session.
+    from exec_telemetry import TELEM
     return {
         "now": datetime.now().astimezone().strftime("%H:%M:%S") + " ET",
         "config": _config(), "log": _parse_log(), "positions": _positions(),
+        "exec": TELEM.summary(),
     }
 
 

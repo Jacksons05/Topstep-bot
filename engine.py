@@ -1106,6 +1106,13 @@ class Engine:
             notify(f"♻ reconcile: phantom {pos.symbol} not at broker "
                    f"({'side mismatch' if bp is not None else 'flat'}) — closed "
                    f"locally @ ~{exit_price:.2f} pnl=${pos.pnl_usd:.2f}")
+            if getattr(pos, "protective_order_id", ""):
+                # Position vanished while a native stop was resting — the stop
+                # (or Topstep liquidation) presumably took it out. Count it:
+                # the stop-execution audit needs these visible, not folklore.
+                from exec_telemetry import TELEM
+                TELEM.record("stop_assumed_filled", symbol=pos.symbol,
+                             exit_price=exit_price, pnl_usd=round(pos.pnl_usd, 2))
             changed = True
 
         # orphan: broker position with no local counterpart. In-watchlist →

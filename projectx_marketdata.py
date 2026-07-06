@@ -282,6 +282,8 @@ class ProjectXOrderFlowFeed:
         self._sub_cids.clear()
         n = self.subscribe(roots)
         log.warning(f"[OrderFlow] self-heal re-subscribed {n}/{len(roots)} root(s)")
+        from exec_telemetry import TELEM
+        TELEM.record("feed_heal", silent_s=round(now - freshest, 1), resubscribed=n)
 
     def reset_session(self) -> None:
         """Zero every engine's CVD at the open."""
