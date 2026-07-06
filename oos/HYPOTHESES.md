@@ -583,3 +583,120 @@ account any better than they survived this file's own Round 2/10 tests —
 external evidence cross-validates, rather than reopens, those dead
 verdicts. No new hypothesis is registered from this survey; it exists so
 none of these three families gets re-proposed later without this context.
+
+---
+
+# Round 15 — regime-transition confluence, multi-bar hold (registered
+2026-07-06, before running)
+
+Mechanism: the same external survey (above) surfaced one MNQ-specific,
+walk-forward-validated falsification study (arXiv, 2605.04004, 947 RTH days
+of MNQ 5-min bars, 2021-2025) that tested 14 OHLCV single-bar signal
+families and found none clear a 2-point round-trip friction floor — this
+independently matches Round 2 (C2/C3) and Round 10's own dead single-bar
+verdicts, and is not re-litigated here. That paper reported exactly TWO
+positive-control signals that DID clear costs: an "RTH Confluence" signal
+(regime classification + regime-transition probability + volume Z-score
+confirmation, ATR-scaled pullback entry) and a session-based regime-
+transition signal, both sharing two structural features every dead signal
+in this file lacks: (a) they trade a detected REGIME TRANSITION rather than
+a fixed OHLCV pattern, and (b) they use a multi-bar hold, not next-bar-only
+exits. This is a mechanism difference worth one clean test, not a re-run of
+Round 10 (which was a fixed time-of-day return-predicts-return pattern with
+a single 25-minute hold) or Round 2 (fixed breakout/band patterns).
+
+**Disclosed up front:** we do not have the arXiv paper's source code, exact
+GMM specification, transition-probability estimation, or volume Z-score
+construction. What follows is an honest PROXY built only from primitives
+already present and unchanged in this repo (`regime.py`'s quantile-based
+vol/trend classifier, `oos/candidates.py` C3's 20-bar rolling-sigma
+convention, `backtest_fast.py`'s live 2×/3× ATR bracket, Round 8's
+passive-limit-fill convention) — not a replication of the paper's own
+result. A PASS here is evidence for THIS proxy; a FAIL does not refute the
+paper's own (unreplicated by us) result, and a PASS should not be trusted
+enough to size real capital before a cleaner replication attempt.
+
+**Frozen spec (Hypothesis A, judged, RTH only):**
+1. Causal regime label at bar i: reuse `regime.py`'s existing vol/trend
+   buckets (`vol = ATR14/price`, `ts = |SMA20-SMA50|/SMA50`) but compute the
+   90th/33rd/66th/33rd percentile thresholds from ONLY a trailing 500-bar
+   rolling window ending at bar i-1 (never the global/full-sample
+   quantiles `regime.py` uses for the live classifier — that would be
+   look-ahead in a backtest). Label buckets: Crisis (vol ≥ p90),
+   Trending (ts ≥ p66, not Crisis), Consolidation (vol ≤ p33 AND ts ≤ p33),
+   else Mean-Reversion. Bars before 500 causal history exist are
+   unlabeled/no-trade.
+2. Regime-transition event: bar i where causal_label(i) != causal_label(i-1)
+   AND causal_label(i) is "Trending" or "Crisis" (transition INTO a
+   directional/high-vol regime — matches the paper's own framing of
+   detecting the start of a regime, not steady-state).
+3. Volume confirmation: z_vol(i) = (volume[i] - mean(volume[i-20:i])) /
+   std(volume[i-20:i]) >= 1.0 (same 20-bar window convention as C3's
+   VWAP-sigma).
+4. Direction: sign of (SMA20(i) - SMA50(i)) at bar i — reuses the same
+   trend-sign convention as `backtest_fast._quant_arrays`, not a new rule.
+5. Entry: ATR-scaled pullback limit at close(i) - side*0.5*ATR14(i),
+   counted filled only if one of the next 6 bars (30 min) trades through
+   that price (Round 8's honest passive-fill convention — unfilled means
+   no trade, not a market order).
+6. Exit: stop = entry - side*2*ATR14, target = entry + side*3*ATR14 (the
+   bot's own live bracket, `atr_stop_mult`/`atr_target_mult` defaults,
+   2.0/3.0), max_hold = 24 bars (2h, same convention as `backtest_oos.py`).
+   Session: entries only 09:30-15:00 ET; hard-flatten any open position at
+   15:55 ET (Topstep-legal by construction, no overnight hold — this family
+   does not inherit the overnight-drift flatten problem).
+7. Costs: ES $4.00 RT + 1-tick slip both sides (judged instrument, full
+   2010-2026 history for statistical power, same precedent as Round 10);
+   MNQ $1.40 RT + 1-tick slip, 2019-2026 (exploratory / actual Topstep
+   target instrument).
+
+**Exploratory secondary cell (reported, not judged):** the same signal
+computed on the overnight/Globex window (18:00-09:30 ET, excluding the
+16:10-18:00 flatten window entirely) as a rough proxy for the paper's
+separate "session-based" transition signal — legal on Topstep per the
+existing Globex-overnight-is-fine rule, reported for completeness only,
+not part of the PASS/FAIL judgment below.
+
+**PASS bar (Hypothesis A, ES, standard convention):** n >= 200, PF >= 1.15,
+one-sided p < 0.05 (t AND 20k bootstrap), >= 60% of calendar years positive.
+FAIL -> proxy is dead, no parameter sweeps to rescue it, do not re-tune
+0.5xATR/1.0-z/500-bar-window after seeing the result.
+
+**Data:** already-local `oos/data/{ES,MNQ}_5min.csv` (Databento GLBX, same
+files as every prior round) — no new data pull required.
+
+**Result (2026-07-06): FAIL.** `oos/round15_regime_confluence.py`,
+`oos/round15_results.json`.
+
+| cell | n | total $ | PF | t | p (one-sided) | yrs+ |
+|---|---|---|---|---|---|---|
+| ES RTH_confluence (judged) | 2794 | -65,549 | 0.883 | -2.504 | 0.994 | 17.6% |
+| ES overnight (exploratory) | 1797 | -37,802 | 0.861 | -2.272 | 0.988 | 29.4% |
+| MNQ RTH_confluence (exploratory) | 1376 | +5,326 | 1.074 | 1.138 | 0.128 | 75.0% |
+| MNQ overnight (exploratory) | 744 | +1,906 | 1.071 | 0.754 | 0.225 | 62.5% |
+
+Judged cell (ES RTH) is decisively net-negative — not a marginal miss, a
+wrong-signed result (p near 1.0, like Round 10, not like Round 6/9's
+under-powered near-misses). PF < 1, most years losing. FAIL bar not met on
+any dimension (n, PF, p, years+).
+
+MNQ's own two cells are directionally positive (PF > 1, 62-75% years) but
+neither clears p < 0.05 — noise-consistent, not evidence, at n=1376/744.
+Since ES (2010-2026, the pre-registered judged instrument) fails outright,
+MNQ's weaker positive reading is not grounds to re-test or re-tune per this
+file's own no-rescue rule; it is reported for completeness, not treated as
+a lead.
+
+**Interpretation:** the regime-transition + volume-confluence + multi-bar-
+hold proxy built here does not clear costs, on either instrument, in either
+session. This does not refute arXiv 2605.04004's own reported result — our
+causal-rolling-quantile regime classifier and volume Z-score are a
+different, cruder construction than that paper's GMM + Markov transition
+probabilities, which we have no source code for. What this DOES show:
+simply adding "regime transition" + "multi-bar hold" on top of this
+codebase's existing indicators (rolling ATR/trend-strength buckets, SMA
+cross direction, the bot's 2x/3x ATR bracket) is not sufficient by itself
+to manufacture the paper's edge — the specific unsupervised
+classification/transition-probability machinery is likely load-bearing,
+not incidental. Proxy is dead; do not re-tune threshold/window constants
+(500-bar regime window, 1.0 z-vol, 0.5x ATR pullback) to rescue it.
