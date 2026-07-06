@@ -473,6 +473,16 @@ class State:
         else:
             self.realized_pnl_usd += pos.pnl_usd
             self._journal_outcome(pos)
+            # Mirror-close the paired Cramer inverse shadow at the same exit mark.
+            # Shadows carry no stop/target (should_exit never fires on them) and
+            # are excluded from every flatten/exit path, so without this they stay
+            # open forever and shadow_pnl_usd is stuck at 0 — starving the dashboard
+            # "Cramer shadow" figure and day_learner's cramer-edge signal of any
+            # real data. Recursion is bounded: the shadow branch above books P&L
+            # and never re-enters this mirror block.
+            for _sh in self.positions:
+                if _sh.open and _sh.shadow and _sh.symbol == pos.symbol:
+                    self.close(_sh, exit_price)
 
 
 def _now() -> str:
