@@ -39,8 +39,11 @@ Confirmed on two independent samples (MNQ 2019–26: PF 1.16, p=.017;
 unseen NQ 2010–19: PF 1.14, p=.022; 70–87% of years positive). BLOCKED on
 Topstep (violates flatten rule); the compliant 18:00-entry variant failed
 recent-sample confirmation (PF 1.09, p=.12) and must not ship. Runner exists:
-~/Topstep-bot/overnight_drift.py (disabled, OVERNIGHT_DRIFT_ENABLED=0).
-Legal only on a non-prop futures account.
+~/Topstep-bot/overnight_drift.py (disabled, OVERNIGHT_DRIFT_ENABLED=0) and is
+HARD-GUARDED: it unconditionally refuses the ProjectX/TopstepX gateway (no env
+override), defaults to dry-run, and gates entries on account-wide contract
+capacity. Legal only on a non-prop futures account — arming it there requires
+wiring a non-ProjectX broker adapter, which is by design.
 
 # MANDATORY METHODOLOGY (the harness)
 Before ANY test: append a new round to ~/Topstep-bot/oos/HYPOTHESES.md with
