@@ -400,3 +400,47 @@ part of this fork); the separate UW intraday GEX/gamma-flip capture
 (`com.jarvis.uwcapture`, started 2026-07-04 in Trading-Bot, not reachable
 from this repo) — CLAUDE.md already flags that as testable only after
 ~3 months of accumulation, independent of this round.
+
+---
+
+## Considered and REJECTED without a backtest (2026-07-06): FOMC reversal
+does NOT generalize to more frequent scheduled releases
+
+Motivation: Round 13's FOMC reversal only fires ~8x/year; wanted a
+higher-frequency variant of the same mechanism (CPI, weekly initial jobless
+claims, other 8:30 ET releases) to trade more consistently.
+
+**Verdict: rejected on existing peer-reviewed evidence, no new data pull
+needed.** Lucca & Moench (2015, the same paper that discovered the
+pre-FOMC drift this reversal fades) explicitly tested nine other major
+releases — weekly initial jobless claims, GDP, ISM, industrial production,
+housing starts, personal income, CPI/PPI-adjacent — for the same
+pre-announcement pattern and found NONE of them show a statistically
+significant effect ("we conclude that no other major macroeconomic
+announcement is associated with large and statistically significant
+pre-announcement returns"). They further note Treasury/money-market futures
+show no pre-FOMC effect either — it is specific to equities and specific to
+monetary-policy decisions, not a general "scheduled release" phenomenon.
+Mechanism read: FOMC uniquely resolves broad, economy-wide policy
+uncertainty that every asset in the index re-prices simultaneously; a
+weekly claims number is routine, narrower, and does not carry the same
+uncertainty-unwind dynamic. Running the Round 13 reversal rule on claims/
+CPI dates would be testing a mechanism the original researchers already
+falsified — that is exactly the kind of hypothesis the harness is meant to
+screen out before spending a data pull on it.
+
+**Where "more frequent, real edge" would have to come from instead** (for
+the next research pass, not registered yet): 0DTE options have gone from
+niche to ~40-60%+ of daily SPX options volume (Cboe research; multiple 2024
+SSRN papers), and dealer gamma sign now measurably shapes DAILY (not
+event-day) index behavior — positive dealer gamma inventory strengthens
+intraday reversal, negative strengthens momentum (Baltas et al. 2024, SSRN
+4692190). This is a genuinely current, high-frequency, literature-grounded
+mechanism. It is NOT registered as a round yet because it has the same
+shape as Round 6 (GEX-sign regime conditioning), which already failed using
+a static prior-day GEX snapshot — testing it properly needs the INTRADAY,
+0DTE-aware gamma read the UW capture (`com.jarvis.uwcapture`) is built to
+produce, which per CLAUDE.md is not usable until ~3 months of accumulation
+(~October 2026). Naively re-testing Round 6's mechanism now with a
+different label would likely just fail the same way. Revisit this
+specifically once that capture matures — do not force it sooner.
