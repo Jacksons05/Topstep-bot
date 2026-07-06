@@ -152,6 +152,9 @@ class Engine:
                     except Exception as e:  # noqa: BLE001
                         notify(f"⚠ Order-flow feed init failed ({e}) — gate disabled (fails open)")
                         self._oflow = None
+                # A restart may have orphaned the native protective stops the
+                # previous process placed — re-arm them deterministically.
+                self._revalidate_protective_stops()
             except Exception as e:  # noqa: BLE001
                 notify(
                     f"⚠ TOPSTEP MODE init failed ({e}) — "
@@ -209,6 +212,7 @@ class Engine:
         if not CONFIG.market_hours_only:
             return True
         from zoneinfo import ZoneInfo
+        import cme_calendar
         now = datetime.now(ZoneInfo("America/New_York"))
         wd = now.weekday()   # Mon=0 … Sun=6
         mins = now.hour * 60 + now.minute
@@ -218,6 +222,18 @@ class Engine:
         # Sunday: open only after 18:00 ET (Globex Sunday open)
         if wd == 6:
             return mins >= 18 * 60
+        # Friday: weekend starts at the 17:00 ET close (no 18:00 reopen)
+        if wd == 4 and mins >= 17 * 60:
+            return False
+        # Exchange holidays: full closures have no session at all; early-close
+        # days halt at cme_calendar's (conservative) time until the 18:00 reopen.
+        if cme_calendar.is_full_closure(now.date()):
+            return False
+        halt = cme_calendar.early_close_halt(now.date())
+        if halt is not None:
+            halt_mins = halt.hour * 60 + halt.minute
+            if halt_mins <= mins < 18 * 60:
+                return False
         # Mon–Fri: closed during 17:00–18:00 ET maintenance window
         return not (17 * 60 <= mins < 18 * 60)
 
@@ -266,6 +282,14 @@ class Engine:
                 except Exception as _e:  # noqa: BLE001
                     notify(f"⚠ day_learner failed: {_e}")
             return
+
+        # Market open: self-heal a silently-dead order-flow connection (dropped
+        # subscriptions after an automatic reconnect, or an expired hub token).
+        if self._oflow is not None:
+            try:
+                self._oflow.heal_if_stale()
+            except Exception as _e:  # noqa: BLE001
+                notify(f"⚠ order-flow self-heal failed: {_e}")
 
         # Kill switch (M14): a disk file / env flag instantly FLATTENS every open
         # position and halts management+entries for this cycle — not merely blocks
@@ -562,7 +586,12 @@ class Engine:
                 pos = self.executor.open(sig, size, self.state, risk_mult=risk_mult,
                                          max_contracts=qty_cap)
             except Exception as e:  # noqa: BLE001
-                notify(f"  ! execute failed {sig.symbol}: {e}")
+                if e.__class__.__name__ == "OrderStateUnknown":
+                    notify(f"  ⚠ {sig.symbol} order state UNKNOWN (transport error "
+                           f"after send) — NOT resubmitted; if it filled, next-cycle "
+                           f"reconcile adopts the broker position")
+                else:
+                    notify(f"  ! execute failed {sig.symbol}: {e}")
                 continue
             if pos is None:
                 notify(f"  skip (sizing rejected — no order placed): {sig.symbol}")
@@ -871,6 +900,50 @@ class Engine:
         """True only when executing against a real (non-mock) ProjectX account."""
         b = self.executor.broker
         return b.__class__.__name__ == "ProjectXBroker" and not getattr(b, "_mock_mode", True)
+
+    def _revalidate_protective_stops(self) -> None:
+        """Startup: re-arm the native protective stop on every open real futures
+        position. A persisted protective_order_id can be stale — filled or
+        cancelled while the bot was down — and the gateway offers no
+        order-status lookup to verify it, so cancel-and-replace
+        deterministically: cancel the old id (a no-op if it's already gone)
+        and place a fresh stop at the position's stop price. Without this, a
+        position that survives a restart is protected by nothing but the EOD
+        flatten."""
+        if not self._live_projectx():
+            return
+        broker = self.executor.broker
+        touched = False
+        for pos in self.state.open_positions:
+            if pos.shadow or not is_futures_symbol(pos.symbol):
+                continue
+            if not pos.stop or pos.stop <= 0:
+                notify(f"⚠ {pos.symbol} open with NO stop price — cannot re-arm a "
+                       f"native stop; only the EOD flatten protects it")
+                continue
+            old = getattr(pos, "protective_order_id", "")
+            if old:
+                try:
+                    broker.cancel_order(old)
+                except Exception:  # noqa: BLE001 — stale id already gone is the normal case
+                    pass
+            stop_side = "SELL" if pos.side == "BUY" else "BUY"
+            try:
+                oid = broker.place_stop_order(pos.symbol, int(pos.qty), stop_side, pos.stop)
+            except Exception as e:  # noqa: BLE001
+                oid = ""
+                notify(f"⚠ {pos.symbol} stop re-arm FAILED ({e}) — position has no "
+                       f"native stop; client-side management only")
+            if oid:
+                pos.protective_order_id = oid
+                touched = True
+                notify(f"🛡 re-armed native stop {pos.symbol} {stop_side} "
+                       f"{int(pos.qty)}x @ {pos.stop:.2f} (restart revalidation)")
+            elif old:
+                pos.protective_order_id = ""
+                touched = True
+        if touched:
+            self.state.save()
 
     def _account_equity(self) -> tuple[float, float]:
         """Best estimate of live account equity for the trailing-MLL / daily-loss

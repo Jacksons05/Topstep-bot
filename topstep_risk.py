@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime, time as dtime, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -378,12 +378,22 @@ class TopstepRiskManager:
         Note: The existing OPTION_TIME_STOP_ET (15:30 by default) handles
         options; this rule handles futures.
         """
+        import cme_calendar
+
         flatten_t = _parse_time(CONFIG.topstep_flatten_time)
         # Flatten window: flatten_time → 17:00 ET (CME maintenance close).
         # After 18:00 ET the overnight Globex session is open — new entries allowed.
         close_t = _parse_time("17:00")
         now = _now_et()
         current_t = now.time()
+        # Early-close day: the day session halts hours before the normal close,
+        # so the default 16:08 flatten would fire AFTER the exchange has already
+        # halted — pull the window forward to (halt − safety margin).
+        halt = cme_calendar.early_close_halt(now.date())
+        if halt is not None:
+            early = (datetime.combine(now.date(), halt)
+                     - timedelta(minutes=cme_calendar.EARLY_CLOSE_FLATTEN_MARGIN_MIN)).time()
+            flatten_t = min(flatten_t, early)
         result = flatten_t <= current_t < close_t
         if result:
             log.debug(

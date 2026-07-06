@@ -54,6 +54,12 @@ from futures_symbols import spec_for
 
 log = logging.getLogger(__name__)
 
+
+class OrderStateUnknown(RuntimeError):
+    """A non-idempotent request (order placement) failed AFTER it may have
+    reached the gateway. The order may or may not exist — the caller must NOT
+    resubmit; the ambiguity resolves through position reconciliation."""
+
 # ── ProjectX enum constants ───────────────────────────────────────────────────
 _ORDER_TYPE_LIMIT = 1
 _ORDER_TYPE_MARKET = 2
@@ -87,9 +93,12 @@ class ProjectXBroker:
         self.account_id: int = 0
         self._account_name: str = ""
 
-        # symbol root <-> ProjectX contractId caches
+        # symbol root <-> ProjectX contractId caches. Resolution is re-checked
+        # once per UTC day so a quarterly roll (activeContract flips to the next
+        # month) is picked up instead of trading the expiring contract forever.
         self._root_to_cid: dict[str, str] = {}
         self._cid_to_root: dict[str, str] = {}
+        self._cid_resolved_on: dict[str, "date"] = {}  # root -> date last resolved
 
         self._http: httpx.Client | None = None
 
@@ -160,21 +169,46 @@ class ProjectXBroker:
     _TRANSPORT_RETRIES = 3
     _TRANSPORT_RETRY_BACKOFF_S = 0.4  # doubles each attempt: 0.4, 0.8, 1.6
 
-    def _post(self, path: str, body: dict) -> dict:
+    def _post(self, path: str, body: dict, *, mutating: bool = False) -> dict:
         """POST helper: refreshes token, retries once on 401, returns parsed JSON.
 
         Also retries on a transport-level failure (dropped keep-alive connection,
         SSL reset, etc.) — these are transient and common on long-lived connection
         pools, especially right after startup while the network path settles.
         A short exponential backoff between attempts avoids hammering a link
-        that's still down; a fresh connection from the pool clears it otherwise."""
+        that's still down; a fresh connection from the pool clears it otherwise.
+
+        mutating=True marks a non-idempotent request (order placement). For
+        those, only CONNECT-phase failures are retried — the request never left
+        this machine, so a re-POST cannot double anything. Any error after the
+        request may have been sent (read timeout, reset mid-response) raises
+        OrderStateUnknown instead of re-POSTing: the gateway may have processed
+        the first copy, and a blind retry is how duplicate fills happen. The
+        caller resolves the ambiguity through position reconciliation.
+
+        A 401 response is safe to re-POST even when mutating: the gateway
+        received and REJECTED the request, so nothing was placed."""
         self._ensure_token()
         r = None
         for attempt in range(self._TRANSPORT_RETRIES):
             try:
                 r = self._http.post(path, json=body)
                 break
+            except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                # Connect phase failed — request never sent, always safe to retry.
+                if attempt == self._TRANSPORT_RETRIES - 1:
+                    raise
+                backoff = self._TRANSPORT_RETRY_BACKOFF_S * (2 ** attempt)
+                log.warning(f"[ProjectX] connect error on POST {path} ({exc}); "
+                            f"retry {attempt + 1}/{self._TRANSPORT_RETRIES - 1} in {backoff:.1f}s")
+                time.sleep(backoff)
             except httpx.TransportError as exc:
+                # Sent (or partially sent) but no clean response.
+                if mutating:
+                    raise OrderStateUnknown(
+                        f"POST {path} may have reached the gateway ({exc.__class__.__name__}: "
+                        f"{exc}) — NOT retried; reconcile against broker positions"
+                    ) from exc
                 if attempt == self._TRANSPORT_RETRIES - 1:
                     raise
                 backoff = self._TRANSPORT_RETRY_BACKOFF_S * (2 ** attempt)
@@ -213,8 +247,10 @@ class ProjectXBroker:
         only once per session.
         """
         sym = symbol.upper()
-        if sym in self._root_to_cid:
-            return self._root_to_cid[sym]
+        today = datetime.now(timezone.utc).date()
+        cached = self._root_to_cid.get(sym)
+        if cached is not None and self._cid_resolved_on.get(sym) == today:
+            return cached
         if self._mock_mode:
             return None
         try:
@@ -225,15 +261,25 @@ class ProjectXBroker:
             chosen = active or (contracts[0] if contracts else None)
             if not chosen:
                 log.warning(f"[ProjectX] no contract found for {sym}")
-                return None
+                return cached  # stale beats nothing mid-session
             cid = str(chosen["id"])
+            if cached is not None and cid != cached:
+                # Quarterly roll: the active front month changed while we were
+                # holding a cache entry (and possibly a POSITION in the old
+                # month). New orders/marks use the new contract; any open
+                # position in the expiring month must be rolled manually.
+                log.error(f"[ProjectX] CONTRACT ROLL {sym}: active contract changed "
+                          f"{cached} -> {cid} — check for open positions in the "
+                          f"expiring month; they will NOT roll automatically")
             self._root_to_cid[sym] = cid
             self._cid_to_root[cid] = sym
-            log.info(f"[ProjectX] resolved {sym} -> {cid} ({chosen.get('description', '')})")
+            self._cid_resolved_on[sym] = today
+            if cid != cached:
+                log.info(f"[ProjectX] resolved {sym} -> {cid} ({chosen.get('description', '')})")
             return cid
         except Exception as exc:  # noqa: BLE001
             log.warning(f"[ProjectX] contract_id({sym}) failed: {exc}")
-            return None
+            return cached  # keep trading on yesterday's resolution rather than halt
 
     # Alpaca-style "5Min" / "1Hour" / "1Day" -> ProjectX History unit enum.
     # ProjectX units: 1=Second, 2=Minute, 3=Hour, 4=Day, 5=Week, 6=Month.
@@ -349,7 +395,7 @@ class ProjectXBroker:
             "size": n_contracts,
             "customTag": f"jarvis_{symbol}_{uuid.uuid4().hex[:8]}",
         }
-        d = self._post("/api/Order/place", body)
+        d = self._post("/api/Order/place", body, mutating=True)
         if not d.get("success"):
             raise RuntimeError(
                 f"[ProjectX] order rejected: errorCode={d.get('errorCode')} {d.get('errorMessage')}"
@@ -444,7 +490,14 @@ class ProjectXBroker:
             "customTag": f"jarvis_stop_{symbol}_{uuid.uuid4().hex[:8]}",
         }
         try:
-            d = self._post("/api/Order/place", body)
+            d = self._post("/api/Order/place", body, mutating=True)
+        except OrderStateUnknown as exc:
+            # The stop MAY be resting untracked at the exchange. Surface loudly:
+            # an untracked stop that later fills opens an unmanaged position.
+            log.error(f"[ProjectX] protective STOP for {symbol} in UNKNOWN state "
+                      f"({exc}) — check working orders on the account and cancel "
+                      f"any duplicate jarvis_stop_{symbol}_* order manually")
+            return ""
         except Exception as exc:  # noqa: BLE001
             log.error(f"[ProjectX] protective STOP submit failed for {symbol}: {exc}")
             return ""
