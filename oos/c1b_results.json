@@ -1,0 +1,26 @@
+{
+ "NQ": {
+  "verdict": "PASS",
+  "n": 1822,
+  "win_pct": 54.9,
+  "total_usd": 56497.0,
+  "avg_usd": 31.01,
+  "pf": 1.217,
+  "t": 2.783,
+  "p_one_sided": 0.00269,
+  "p_bootstrap": 0.002,
+  "pct_years_positive": 90.0
+ },
+ "MNQ": {
+  "verdict": "FAIL",
+  "n": 1465,
+  "win_pct": 53.1,
+  "total_usd": 10908.5,
+  "avg_usd": 7.45,
+  "pf": 1.091,
+  "t": 1.168,
+  "p_one_sided": 0.12144,
+  "p_bootstrap": 0.11995,
+  "pct_years_positive": 75.0
+ }
+}

@@ -15,7 +15,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 
@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS positions (
     order_id    TEXT    NOT NULL DEFAULT '',
     filled      BOOLEAN NOT NULL DEFAULT TRUE,
     contract    TEXT    NOT NULL DEFAULT '',
+    protective_order_id TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (symbol, opened_at, shadow)
 )
 """
@@ -50,7 +51,25 @@ _DDL_MIGRATE = [
     "ALTER TABLE positions ADD COLUMN IF NOT EXISTS order_id TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE positions ADD COLUMN IF NOT EXISTS filled BOOLEAN NOT NULL DEFAULT TRUE",
     "ALTER TABLE positions ADD COLUMN IF NOT EXISTS contract TEXT NOT NULL DEFAULT ''",
+    # Native resting-stop id: without persistence, a restart orphans the
+    # exchange stop — the engine can't cancel it on close and a later fill
+    # opens an unwanted opposite position.
+    "ALTER TABLE positions ADD COLUMN IF NOT EXISTS protective_order_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE state_meta ADD COLUMN IF NOT EXISTS trading_days TEXT NOT NULL DEFAULT ''",
 ]
+
+_DDL_DECISIONS = """
+CREATE TABLE IF NOT EXISTS decisions (
+    symbol      TEXT    NOT NULL,
+    opened_at   TEXT    NOT NULL,
+    regime      TEXT    NOT NULL DEFAULT '',
+    quant_lean  REAL    NOT NULL DEFAULT 0,
+    qual_lean   REAL    NOT NULL DEFAULT 0,
+    confidence  REAL    NOT NULL DEFAULT 0,
+    went_up     INTEGER,
+    PRIMARY KEY (symbol, opened_at)
+)
+"""
 
 _DDL_META = """
 CREATE TABLE IF NOT EXISTS state_meta (
@@ -59,6 +78,7 @@ CREATE TABLE IF NOT EXISTS state_meta (
     shadow_pnl    REAL    NOT NULL DEFAULT 0,
     day           TEXT    NOT NULL DEFAULT '',
     day_start_pnl REAL    NOT NULL DEFAULT 0,
+    trading_days  TEXT    NOT NULL DEFAULT '',
     CONSTRAINT single_row CHECK (id = 1)
 )
 """
@@ -154,6 +174,7 @@ def _ensure_schema() -> None:
                 # Serialize against any concurrent writer before touching locks.
                 cur.execute("SELECT pg_advisory_xact_lock(%s)", (_WRITE_LOCK_KEY,))
                 cur.execute(_DDL_POSITIONS)
+                cur.execute(_DDL_DECISIONS)
                 cur.execute(_DDL_META)
                 for stmt in _DDL_MIGRATE:
                     cur.execute(stmt)
@@ -200,6 +221,7 @@ class State:
     shadow_pnl_usd: float = 0.0
     day: str = ""
     day_start_pnl: float = 0.0
+    trading_days: set[str] = field(default_factory=set)
 
     @classmethod
     def load(cls) -> "State":
@@ -211,18 +233,20 @@ class State:
         _ensure_schema()
         with _db() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT realized_pnl, shadow_pnl, day, day_start_pnl "
+                cur.execute("SELECT realized_pnl, shadow_pnl, day, day_start_pnl, trading_days "
                             "FROM state_meta WHERE id = 1")
                 row = cur.fetchone()
                 realized = float(row[0]) if row else 0.0
                 shadow = float(row[1]) if row else 0.0
                 day = str(row[2]) if row else _today()
                 day_start = float(row[3]) if row else 0.0
+                trading_days = set(row[4].split(",")) if row and row[4] else set()
 
                 cur.execute(
                     "SELECT symbol, asset, side, qty, entry_price, size_usd, stop, "
                     "target, kind, thesis, opened_at, mode, shadow, open, "
-                    "exit_price, closed_at, pnl_usd, order_id, filled, contract FROM positions"
+                    "exit_price, closed_at, pnl_usd, order_id, filled, contract, "
+                    "protective_order_id FROM positions"
                 )
                 positions = [
                     Position(
@@ -233,12 +257,13 @@ class State:
                         exit_price=float(r[14]) if r[14] is not None else None,
                         closed_at=r[15], pnl_usd=float(r[16]),
                         order_id=r[17] or "", filled=bool(r[18]), contract=r[19] or "",
+                        protective_order_id=r[20] or "",
                     )
                     for r in cur.fetchall()
                 ]
 
         s = cls(positions=positions, realized_pnl_usd=realized, shadow_pnl_usd=shadow,
-                day=day, day_start_pnl=day_start)
+                day=day, day_start_pnl=day_start, trading_days=trading_days)
         s._roll_day()
         return s
 
@@ -292,14 +317,16 @@ class State:
 
                 # ── state_meta (single-row upsert — no ordering needed) ──────
                 cur.execute(
-                    """INSERT INTO state_meta (id, realized_pnl, shadow_pnl, day, day_start_pnl)
-                       VALUES (1, %s, %s, %s, %s)
+                    """INSERT INTO state_meta (id, realized_pnl, shadow_pnl, day, day_start_pnl, trading_days)
+                       VALUES (1, %s, %s, %s, %s, %s)
                        ON CONFLICT (id) DO UPDATE
                          SET realized_pnl=EXCLUDED.realized_pnl,
                              shadow_pnl=EXCLUDED.shadow_pnl,
                              day=EXCLUDED.day,
-                             day_start_pnl=EXCLUDED.day_start_pnl""",
-                    (self.realized_pnl_usd, self.shadow_pnl_usd, self.day, self.day_start_pnl),
+                             day_start_pnl=EXCLUDED.day_start_pnl,
+                             trading_days=EXCLUDED.trading_days""",
+                    (self.realized_pnl_usd, self.shadow_pnl_usd, self.day, self.day_start_pnl,
+                     ",".join(sorted(self.trading_days))),
                 )
 
                 # ── positions: sort → lock existing rows → upsert ────────────
@@ -330,19 +357,55 @@ class State:
                         """INSERT INTO positions (
                                symbol, asset, side, qty, entry_price, size_usd, stop,
                                target, kind, thesis, opened_at, mode, shadow,
-                               open, exit_price, closed_at, pnl_usd, order_id, filled, contract
-                           ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                               open, exit_price, closed_at, pnl_usd, order_id, filled, contract,
+                               protective_order_id
+                           ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                            ON CONFLICT (symbol, opened_at, shadow) DO UPDATE
                              SET open=EXCLUDED.open, exit_price=EXCLUDED.exit_price,
                                  closed_at=EXCLUDED.closed_at, pnl_usd=EXCLUDED.pnl_usd,
                                  stop=EXCLUDED.stop, target=EXCLUDED.target,
                                  entry_price=EXCLUDED.entry_price, size_usd=EXCLUDED.size_usd,
-                                 filled=EXCLUDED.filled""",
+                                 filled=EXCLUDED.filled, qty=EXCLUDED.qty,
+                                 protective_order_id=EXCLUDED.protective_order_id""",
                         (p.symbol, p.asset, p.side, p.qty, p.entry_price, p.size_usd,
                          p.stop, p.target, p.kind, p.thesis, p.opened_at, p.mode,
                          p.shadow, p.open, p.exit_price, p.closed_at, p.pnl_usd,
-                         p.order_id, p.filled, p.contract),
+                         p.order_id, p.filled, p.contract,
+                         getattr(p, "protective_order_id", "")),
                     )
+
+    def journal_decision(self, sym: str, opened_at: str,
+                         regime: str, quant_lean: float,
+                         qual_lean: float, confidence: float) -> None:
+        """Insert a decisions row at entry time (outcome = NULL, filled later)."""
+        if not DATABASE_URL:
+            return
+        try:
+            with _db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO decisions (symbol, opened_at, regime, quant_lean, qual_lean, confidence)
+                           VALUES (%s, %s, %s, %s, %s, %s)
+                           ON CONFLICT (symbol, opened_at) DO NOTHING""",
+                        (sym, opened_at, regime, quant_lean, qual_lean, confidence),
+                    )
+        except Exception:  # noqa: BLE001
+            pass  # non-critical: learning degrades gracefully without this row
+
+    def _journal_outcome(self, pos: Position) -> None:
+        """Update decisions row with direction outcome after a position closes."""
+        if not DATABASE_URL or pos.shadow:
+            return
+        try:
+            went_up = 1 if (pos.pnl_usd or 0) > 0 else 0
+            with _db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE decisions SET went_up = %s WHERE symbol = %s AND opened_at = %s",
+                        (went_up, pos.symbol, pos.opened_at),
+                    )
+        except Exception:  # noqa: BLE001
+            pass
 
     def _roll_day(self) -> None:
         today = _today()
@@ -386,6 +449,8 @@ class State:
 
     def add(self, pos: Position) -> None:
         self.positions.append(pos)
+        if not pos.shadow:
+            self.trading_days.add(_topstep_session_date())
 
     def close(self, pos: Position, exit_price: float, pnl_override: float | None = None) -> None:
         pos.open = False
@@ -407,6 +472,7 @@ class State:
             self.shadow_pnl_usd += pos.pnl_usd
         else:
             self.realized_pnl_usd += pos.pnl_usd
+            self._journal_outcome(pos)
 
 
 def _now() -> str:
@@ -415,3 +481,15 @@ def _now() -> str:
 
 def _today() -> str:
     return datetime.now(timezone.utc).date().isoformat()
+
+
+def _topstep_session_date() -> str:
+    """Date of the current CME/Topstep trading session (rolls 18:00 ET),
+    matching Engine._topstep_session_date — used to count distinct active
+    trading days toward the Combine's minimum-days requirement."""
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("America/New_York"))
+    d = now.date()
+    if now.hour >= 18:
+        d += timedelta(days=1)
+    return d.isoformat()

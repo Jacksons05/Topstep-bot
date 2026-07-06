@@ -1,0 +1,14 @@
+processed 20,000,000 records
+processed 40,000,000 records
+processed 60,000,000 records
+processed 80,000,000 records
+processed 100,000,000 records
+processed 120,000,000 records
+processed 140,000,000 records
+processed 160,000,000 records
+processed 180,000,000 records
+processed 200,000,000 records
+processed 220,000,000 records
+processed 240,000,000 records
+processed 240,881,419 records
+done: 240,881,419 records -> 1,833,972 seconds -> /Users/jacksonsheehan/Topstep-bot/oos/data/ES_of_1s.npz

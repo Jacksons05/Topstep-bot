@@ -285,6 +285,7 @@ def _bare_engine(mark_px: float):
     e = eng.Engine.__new__(eng.Engine)
     e._topstep = None
     e._oflow = None
+    e._be_state = {}                     # BE/trail ratchet state (set in __init__)
     e.state = State()
     e.state.save = lambda: None          # no DB side effects in tests
     e.executor = _FakeExec()

@@ -475,6 +475,9 @@ class Handler(BaseHTTPRequestHandler):
         pw = os.environ.get("DASH_PASS", "")
         if not (user and pw):
             return True
+        return self._basic_auth_matches(user, pw)
+
+    def _basic_auth_matches(self, user: str, pw: str) -> bool:
         hdr = self.headers.get("Authorization", "")
         if not hdr.startswith("Basic "):
             return False
@@ -489,6 +492,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("WWW-Authenticate", 'Basic realm="JARVIS"')
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    def _control_ok(self) -> bool:
+        """Control endpoints (stop/restart) require auth to be CONFIGURED, not
+        just satisfied: with no DASH_USER/DASH_PASS set they are always denied,
+        so an open read-only dashboard never doubles as a remote kill switch."""
+        user = os.environ.get("DASH_USER", "")
+        pw = os.environ.get("DASH_PASS", "")
+        return bool(user and pw) and self._basic_auth_matches(user, pw)
 
     def do_GET(self) -> None:  # noqa: N802
         # Unauthenticated health endpoint — Railway healthcheck hits this, not "/".
@@ -509,6 +520,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send(200, body, "application/json")
         elif self.path.startswith("/api/restart"):
+            if not self._control_ok():
+                self._send(403, b'{"error": "control endpoints require DASH_USER/DASH_PASS"}',
+                           "application/json")
+                return
             ks_path = ROOT / os.environ.get("KILL_SWITCH_FILE", getattr(CONFIG, "kill_switch_file", "KILL_SWITCH"))
             if ks_path.exists():
                 try:
@@ -523,6 +538,10 @@ class Handler(BaseHTTPRequestHandler):
 
             threading.Timer(0.5, _do_restart).start()
         elif self.path.startswith("/api/stop"):
+            if not self._control_ok():
+                self._send(403, b'{"error": "control endpoints require DASH_USER/DASH_PASS"}',
+                           "application/json")
+                return
             ks_path = ROOT / os.environ.get("KILL_SWITCH_FILE", getattr(CONFIG, "kill_switch_file", "KILL_SWITCH"))
             try:
                 ks_path.touch()
@@ -544,18 +563,20 @@ def start_background(port: int | None = None) -> None:
     import threading
 
     p = port or int(os.environ.get("PORT", 8787))
-    srv = ThreadingHTTPServer(("0.0.0.0", p), Handler)
+    bind = os.environ.get("DASH_BIND", "127.0.0.1")
+    srv = ThreadingHTTPServer((bind, p), Handler)
     t = threading.Thread(target=srv.serve_forever, daemon=True, name="jarvis-dashboard")
     t.start()
-    print(f"JARVIS dashboard started → http://0.0.0.0:{p}")
+    print(f"JARVIS dashboard started → http://{bind}:{p}")
 
 
 def main() -> int:
     port = int(os.environ.get("PORT", 8787))
     if "--port" in sys.argv:
         port = int(sys.argv[sys.argv.index("--port") + 1])
-    srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    print(f"JARVIS dashboard → http://0.0.0.0:{port}  (Ctrl-C to stop)")
+    bind = os.environ.get("DASH_BIND", "127.0.0.1")
+    srv = ThreadingHTTPServer((bind, port), Handler)
+    print(f"JARVIS dashboard → http://{bind}:{port}  (Ctrl-C to stop)")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

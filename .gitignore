@@ -21,5 +21,16 @@ bot.out
 bot.err
 dash.out
 dash.err
+topstep-stdout.log
+topstep-stderr.log
 .pids
 .DS_Store
+
+# Runtime risk state (bot-written; do not track)
+topstep_day_state.json
+day_adapt.json
+overnight-drift.log
+
+# Research data (large; refetch via oos/fetch_databento.py)
+oos/data/
+oos/__pycache__/

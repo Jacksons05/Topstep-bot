@@ -47,8 +47,10 @@ Usage in engine.py:
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date, datetime, time as dtime, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from config import CONFIG
@@ -140,6 +142,8 @@ class TopstepRiskManager:
         # winning trades, and the slice of it earned on trades held ≤Ns.
         self._win_profit_total: float = 0.0
         self._win_profit_scalp: float = 0.0
+        self._min_days_warned: bool = False
+        self._mll_breach_warned: bool = False
         log.info(
             f"[Topstep] initialized | account=${self.account_size:,.0f} | "
             f"start_equity=${start:,.2f} | trailing_MLL=${self.mll_buffer:,.0f} "
@@ -152,6 +156,72 @@ class TopstepRiskManager:
             f"flatten_at={CONFIG.topstep_flatten_time} ET"
         )
 
+    def giveback_ok(self, equity: float) -> tuple[bool, str]:
+        """Profit give-back guard: entries-only soft halt while equity is more
+        than topstep_giveback_halt_usd below the cycle peak. Never flattens —
+        open positions keep managing; the halt lifts as equity recovers or the
+        cap is disabled (0). Only meaningful once peak is above the locked MLL
+        floor (i.e. there IS profit to protect)."""
+        cap = CONFIG.topstep_giveback_halt_usd
+        if cap <= 0:
+            return True, "ok"
+        if self.peak_equity <= self.account_size + self.mll_buffer:
+            return True, "ok"        # floor not locked yet — MLL still trails
+        drawdown = self.peak_equity - equity
+        if drawdown >= cap:
+            return False, (f"profit give-back halt: equity ${equity:,.2f} is "
+                           f"${drawdown:,.2f} below peak ${self.peak_equity:,.2f} "
+                           f"(cap ${cap:,.0f}) — new entries blocked until recovery")
+        return True, "ok"
+
+    # ── Restart persistence ──────────────────────────────────────────────────
+    # day_start_equity (DLL anchor), peak_equity (trailing-MLL high-water mark)
+    # and the day-halt flag must survive a process restart: without this every
+    # restart re-arms a fresh Daily Loss Limit allowance and reseeds the MLL
+    # peak from the current balance, so repeated restarts turn the $1k/day
+    # limit into an unbounded daily loss.
+    _DAY_STATE_FILE = Path(__file__).with_name("topstep_day_state.json")
+
+    def save_day_state(self, session_date: str, day_halt: bool) -> None:
+        """Persist the session anchors. Call on day reset and whenever the
+        engine sets/clears its day-halt flag."""
+        try:
+            self._DAY_STATE_FILE.write_text(json.dumps({
+                "session_date": session_date,
+                "day_start_equity": self.day_start_equity,
+                "peak_equity": self.peak_equity,
+                "day_halt": day_halt,
+            }))
+        except OSError as exc:
+            log.warning(f"[Topstep] day-state save failed: {exc}")
+
+    def load_day_state(self, session_date: str) -> tuple[bool, bool]:
+        """Restore persisted anchors at startup. peak_equity is restored
+        unconditionally (the trailing MLL spans the whole account cycle);
+        day_start_equity and the halt flag apply only when the saved session
+        matches the current one. Returns (session_restored, day_halt)."""
+        try:
+            d = json.loads(self._DAY_STATE_FILE.read_text())
+        except (OSError, ValueError):
+            return False, False
+        try:
+            pk = float(d.get("peak_equity") or 0.0)
+        except (TypeError, ValueError):
+            pk = 0.0
+        if pk > self.peak_equity:
+            self.peak_equity = pk
+        if str(d.get("session_date")) != session_date:
+            return False, False
+        try:
+            dse = float(d.get("day_start_equity") or 0.0)
+        except (TypeError, ValueError):
+            dse = 0.0
+        if dse > 0:
+            self.day_start_equity = dse
+        log.info(f"[Topstep] restored session state | day_base=${self.day_start_equity:,.2f} "
+                 f"| peak=${self.peak_equity:,.2f} | halt={bool(d.get('day_halt'))}")
+        return True, bool(d.get("day_halt"))
+
     def reset_day(self, current_equity: float) -> None:
         """Call at the start of each new trading day to anchor the Daily Loss
         Limit. Does NOT reset peak_equity — the trailing MLL spans the cycle."""
@@ -159,6 +229,7 @@ class TopstepRiskManager:
         self.peak_equity = max(self.peak_equity, current_equity)
         self._win_profit_total = 0.0
         self._win_profit_scalp = 0.0
+        self._mll_breach_warned = False
         log.info(f"[Topstep] day reset | day_base=${current_equity:,.2f} | "
                  f"peak=${self.peak_equity:,.2f} | floor=${self.mll_floor():,.2f}")
 
@@ -184,8 +255,11 @@ class TopstepRiskManager:
                 f"<= floor=${floor:,.2f} (peak=${self.peak_equity:,.2f}, "
                 f"buffer=${self.mll_buffer:,.0f})"
             )
-            log.warning(f"[Topstep] LIQUIDATE: {reason}")
+            if not self._mll_breach_warned:
+                log.warning(f"[Topstep] LIQUIDATE: {reason}")
+                self._mll_breach_warned = True
             return False, reason
+        self._mll_breach_warned = False
         return True, "ok"
 
     # ── Microscalping guard (Topstep: >50% of profit from ≤5s holds is banned) ──
@@ -305,9 +379,12 @@ class TopstepRiskManager:
         options; this rule handles futures.
         """
         flatten_t = _parse_time(CONFIG.topstep_flatten_time)
+        # Flatten window: flatten_time → 17:00 ET (CME maintenance close).
+        # After 18:00 ET the overnight Globex session is open — new entries allowed.
+        close_t = _parse_time("17:00")
         now = _now_et()
         current_t = now.time()
-        result = current_t >= flatten_t
+        result = flatten_t <= current_t < close_t
         if result:
             log.debug(
                 f"[TopstepRisk] flatten window active: "
@@ -366,6 +443,22 @@ class TopstepRiskManager:
             return True, dll_reason
         return False, "ok"
 
+    def check_combine_progress(self, state: State) -> None:
+        """Warn once if the profit target is hit before the Combine's minimum
+        active-trading-days requirement is satisfied — the P&L number alone
+        can look like a pass when it isn't yet."""
+        if self._min_days_warned:
+            return
+        days = len(state.trading_days)
+        if (state.realized_pnl_usd >= CONFIG.topstep_profit_target
+                and days < CONFIG.topstep_min_trading_days):
+            self._min_days_warned = True
+            log.warning(
+                f"[Topstep] profit target (${CONFIG.topstep_profit_target:,.0f}) hit "
+                f"but only {days}/{CONFIG.topstep_min_trading_days} active trading days "
+                "logged — Combine not yet passable on the min-days rule."
+            )
+
     # ── Combined pre-trade gate ─────────────────────────────────────────────
 
     def pre_trade_ok(self, sig: Signal, state: State, equity: float | None = None,
@@ -407,6 +500,13 @@ class TopstepRiskManager:
         dll_ok, dll_reason = self.daily_loss_ok(equity, state, unrealized)
         if not dll_ok:
             return False, dll_reason
+
+        # 4b. Profit give-back guard (ours): block NEW entries while equity sits
+        # too far below the cycle peak. Topstep's MLL locks at account_size, so
+        # accumulated profit above it has no house protection at all.
+        gb_ok, gb_reason = self.giveback_ok(equity)
+        if not gb_ok:
+            return False, gb_reason
 
         # 5. Account-wide contract cap
         contr_ok, contr_reason = self.contracts_ok(sig.symbol, state)

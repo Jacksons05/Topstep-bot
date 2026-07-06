@@ -57,18 +57,25 @@ def _futures_risk_budget_usd() -> float:
 
 
 def futures_plan(sig: Signal, price: float | None = None,
+                 risk_mult: float = 1.0,
                  max_contracts: int | None = None) -> FuturesPlan | None:
     """Risk-based futures sizing + ATR bracket. Returns a plan, or None to REJECT
     the trade (invalid/zero ATR, unknown $/pt, or stop too wide for the budget).
 
-    qty = floor(risk_budget / (stop_distance_pts × $/pt)), clamped to
-    [1 .. cap]. The cap defaults to TOPSTEP_MAX_CONTRACTS but callers pass a
-    smaller value to respect the ACCOUNT-WIDE contract cap (remaining capacity =
+    qty = floor(risk_mult × risk_budget / (stop_distance_pts × $/pt)), clamped to
+    [1 .. cap]. A raw floor of 0 (stop too wide for the risk budget), or a cap of
+    0 (no capacity left), REJECTS the trade — we never silently round up to
+    1 contract, which would risk more than the budget / cap allows.
+
+    risk_mult carries the engine's defensive multipliers (circuit breaker,
+    regime, day-adapt) into the contract count. It is capped at 1.0 — the
+    multipliers may only shrink the risk budget, never grow it.
+
+    The cap defaults to TOPSTEP_MAX_CONTRACTS but callers pass a smaller value
+    to respect the ACCOUNT-WIDE contract cap (remaining capacity =
     TOPSTEP_MAX_CONTRACTS − contracts already open across all symbols) — otherwise
     a single micro trade can size to the full cap and push the account total over
-    the Topstep limit. A raw floor of 0 (stop too wide for the risk budget), or a
-    cap of 0 (no capacity left), REJECTS the trade — we never silently round up to
-    1 contract, which would risk more than the budget / cap allows.
+    the Topstep limit.
     """
     px = price if price is not None else sig.price
     pv = dollar_value_per_point(sig.symbol)
@@ -82,7 +89,10 @@ def futures_plan(sig: Signal, price: float | None = None,
     if not (math.isfinite(dist) and dist > 0):
         return None
     per_contract_risk = dist * pv
-    budget = _futures_risk_budget_usd()
+    mult = min(1.0, risk_mult)
+    if not (math.isfinite(mult) and mult > 0):
+        return None
+    budget = _futures_risk_budget_usd() * mult
     if per_contract_risk <= 0 or budget <= 0:
         return None
     cap = CONFIG.topstep_max_contracts if max_contracts is None else int(max_contracts)
@@ -122,17 +132,20 @@ class Executor:
         return self.broker.get_fill(order_id)
 
     def open(self, sig: Signal, size_usd: float, state: State,
+             risk_mult: float = 1.0,
              max_contracts: int | None = None) -> Position | None:
         """Size + submit an entry. Returns the Position, or None to REJECT (no
         broker order placed) when risk-based sizing yields 0 contracts or the
-        stop is non-finite.
+        stop is non-finite. risk_mult shrinks the futures risk budget (circuit
+        breaker / regime / day-adapt) — capped at 1.0 inside futures_plan.
 
         `max_contracts` caps futures qty to the remaining ACCOUNT-WIDE capacity
         (TOPSTEP_MAX_CONTRACTS − contracts already open) so a new order can never
         push the total over the Topstep limit."""
         futures = is_futures_symbol(sig.symbol)
         if futures:
-            plan = futures_plan(sig, sig.price, max_contracts=max_contracts)
+            plan = futures_plan(sig, sig.price, risk_mult=risk_mult,
+                                max_contracts=max_contracts)
             if plan is None:
                 log.warning("[exec] reject %s — futures sizing failed "
                             "(invalid ATR, stop too wide for risk budget, or no "
@@ -153,7 +166,8 @@ class Executor:
 
         # Re-anchor the bracket to the ACTUAL fill price (distances are unchanged).
         if futures:
-            fp = futures_plan(sig, fill.price, max_contracts=max_contracts) or plan
+            fp = futures_plan(sig, fill.price, risk_mult=risk_mult,
+                              max_contracts=max_contracts) or plan
             stop, target = fp.stop_price, fp.target_price
         else:
             stop = self._stop(sig, fill.price)
@@ -201,6 +215,53 @@ class Executor:
                 opened_at=_now(), mode=self.mode, shadow=True,
             ))
         return pos
+
+    def close_partial(self, pos: Position, close_qty: int, exit_price: float) -> bool:
+        """Close a partial qty of a futures position without fully closing it.
+
+        Cancels the resting protective stop first (it will be re-placed at the
+        new BE stop price by the caller), then submits the reduction order.
+        Returns True on success. Caller is responsible for updating pos.qty and pos.stop.
+        Shadow positions are bookkeeping-only — no broker order is placed.
+        """
+        if pos.shadow or close_qty <= 0:
+            return False
+        pid = getattr(pos, "protective_order_id", "")
+        if pid:
+            cancel = getattr(self.broker, "cancel_order", None)
+            if callable(cancel):
+                try:
+                    cancel(pid)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("[exec] cancel protective stop %s for partial: %s", pid, exc)
+            pos.protective_order_id = ""
+        try:
+            self.broker.submit(pos.symbol, close_qty, _flip(pos.side), exit_price)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.error("[exec] partial close %s qty=%d failed: %s", pos.symbol, close_qty, exc)
+            return False
+
+    def replace_protective_stop(self, pos: Position, stop_price: float) -> None:
+        """Re-arm the native resting stop for the remaining qty. Must be called
+        after close_partial(), which cancels the original full-qty stop — the
+        remainder would otherwise run naked against the trailing MLL."""
+        if pos.shadow or pos.qty < 1 or not stop_price or not math.isfinite(stop_price):
+            return
+        place = getattr(self.broker, "place_stop_order", None)
+        if not callable(place):
+            return
+        try:
+            oid = place(pos.symbol, pos.qty, _flip(pos.side), stop_price)
+            pos.protective_order_id = oid or ""
+            if pos.protective_order_id:
+                log.info("[exec] %s protective STOP re-armed @ %.2f (order %s)",
+                         pos.symbol, stop_price, pos.protective_order_id)
+            else:
+                log.warning("[exec] %s protective stop re-arm returned no order id",
+                            pos.symbol)
+        except Exception as exc:  # noqa: BLE001
+            log.error("[exec] %s protective stop re-arm failed: %s", pos.symbol, exc)
 
     def close(self, pos: Position, exit_price: float, state: State) -> None:
         if not pos.shadow:  # shadow book is paper-only bookkeeping

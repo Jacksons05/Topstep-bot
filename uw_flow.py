@@ -33,7 +33,7 @@ _DEFAULT_PROXY: dict[str, str] = {
 }
 
 _UW_BASE = "https://api.unusualwhales.com"
-_FLOW_PATH = "/api/option-contract/flow"
+_FLOW_PATH = "/api/stock/{ticker}/flow-alerts"
 _TIDE_PATH = "/api/market/market-tide"
 
 # UW API response field names — adjust here if the API changes shape.
@@ -138,8 +138,8 @@ class UWFlowFeed:
     def _fetch(self, proxy_ticker: str) -> UWFlowRead | None:
         try:
             resp = self._http.get(
-                f"{_UW_BASE}{_FLOW_PATH}",
-                params={"ticker": proxy_ticker, "limit": CONFIG.uw_flow_limit},
+                f"{_UW_BASE}{_FLOW_PATH.format(ticker=proxy_ticker)}",
+                params={"limit": CONFIG.uw_flow_limit},
             )
             resp.raise_for_status()
             items = resp.json().get(_F_DATA, [])

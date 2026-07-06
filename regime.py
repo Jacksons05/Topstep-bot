@@ -96,3 +96,37 @@ def classify_last(closes, highs, lows) -> str:
     """Regime of the most recent bar — the live engine's per-symbol read."""
     labels = regime_labels(closes, highs, lows)
     return str(labels[-1]) if len(labels) else "Mean-Reversion"
+
+
+def classify_atr_percentile(
+    closes, highs, lows, period: int = 14, lookback: int = 100
+) -> str:
+    """ATR-percentile volatility regime: LOW / NORMAL / HIGH / EXTREME.
+
+    More robust than SMA/trend regime for 24h Globex overnight sessions where
+    directional signals are weak (arXiv 2605.04004). Ranks the most recent
+    ATR(period) value against a rolling `lookback`-bar history.
+
+    Quartile thresholds:
+        < 25th pct → LOW      (widen targets, tighter size)
+        25-50th    → NORMAL
+        50-75th    → HIGH
+        ≥ 75th     → EXTREME  (reduce size or pause)
+    """
+    c = np.asarray(closes, dtype=np.float64)
+    h = np.asarray(highs, dtype=np.float64)
+    lo = np.asarray(lows, dtype=np.float64)
+    atr_arr = _atr(h, lo, c, period)
+    valid = atr_arr[np.isfinite(atr_arr)]
+    if len(valid) < max(period, lookback // 2):
+        return "NORMAL"
+    window = valid[-lookback:] if len(valid) >= lookback else valid
+    current = valid[-1]
+    p25, p50, p75 = float(np.percentile(window, 25)), float(np.percentile(window, 50)), float(np.percentile(window, 75))
+    if current < p25:
+        return "LOW"
+    if current < p50:
+        return "NORMAL"
+    if current < p75:
+        return "HIGH"
+    return "EXTREME"

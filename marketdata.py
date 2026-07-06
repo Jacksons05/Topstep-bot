@@ -106,7 +106,13 @@ class MarketData:
 
         Returns None on a DATA OUTAGE or insufficient history (caller must fail
         CLOSED — halt new entries), distinct from a genuine 0.0% move (flat tape).
+
+        Alpaca first; if no Alpaca key is configured, falls back to Unusual
+        Whales' stock-state endpoint (close vs prev_close) — avoids requiring a
+        second market-data provider just for the regime/circuit-breaker symbol.
         """
+        if not CONFIG.alpaca_api_key:
+            return self._intraday_change_pct_uw(symbol)
         try:
             b = self._fetch_bars(symbol, "1Day", 2)
         except Exception:  # noqa: BLE001
@@ -115,3 +121,22 @@ class MarketData:
         if len(closes) < 2 or closes[-2] == 0:
             return None  # not enough data to determine a move
         return (closes[-1] - closes[-2]) / closes[-2] * 100.0
+
+    def _intraday_change_pct_uw(self, symbol: str) -> float | None:
+        """Unusual Whales fallback for intraday_change_pct — see there for contract."""
+        if not CONFIG.uw_api_key:
+            return None
+        try:
+            r = httpx.get(
+                f"https://api.unusualwhales.com/api/stock/{symbol}/stock-state",
+                headers={"Authorization": f"Bearer {CONFIG.uw_api_key}"},
+                timeout=10.0,
+            )
+            r.raise_for_status()
+            d = r.json().get("data") or {}
+            close, prev_close = float(d["close"]), float(d["prev_close"])
+        except Exception:  # noqa: BLE001
+            return None  # transport/HTTP/parse failure → unknown, caller fails closed
+        if prev_close == 0:
+            return None
+        return (close - prev_close) / prev_close * 100.0

@@ -24,16 +24,17 @@ def main() -> int:
     _start_dashboard()
 
     once = "--once" in sys.argv
-    mode = "LIVE (real money)" if CONFIG.is_live else "paper"
+    engine = Engine()
+    real_money = CONFIG.is_live or engine._live_projectx()
+    mode = "LIVE (real money)" if real_money else "paper"
     notify(f"=== JARVIS engine starting | mode={mode} | broker={CONFIG.broker} | "
            f"watchlist={len(CONFIG.watchlist)} | "
            f"llm={'on' if CONFIG.llm_ready else 'off'} | "
            f"options={CONFIG.options_source} ===")
-    if CONFIG.is_live:
+    if real_money:
         notify("!!! LIVE MODE: real orders will be placed. Ctrl-C now to abort. !!!")
         time.sleep(5)
 
-    engine = Engine()
     try:
         while True:
             try:

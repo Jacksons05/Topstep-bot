@@ -1,0 +1,16 @@
+/Users/jacksonsheehan/Topstep-bot/oos/fetch_databento.py:72: BentoWarning: The streaming request contained one or more days which have reduced quality: 2014-06-11 (degraded), 2014-06-12 (degraded), 2014-06-13 (degraded)... See: https://databento.com/docs/api-reference-historical/metadata/metadata-get-dataset-condition
+  data = client.timeseries.get_range(
+/Users/jacksonsheehan/Topstep-bot/oos/fetch_databento.py:72: BentoWarning: The streaming request contained one or more days which have reduced quality: 2020-02-27 (degraded), 2020-02-28 (degraded), 2020-06-30 (degraded)... See: https://databento.com/docs/api-reference-historical/metadata/metadata-get-dataset-condition
+  data = client.timeseries.get_range(
+/Users/jacksonsheehan/Topstep-bot/oos/fetch_databento.py:72: BentoWarning: The streaming request contained one or more days which have reduced quality: 2020-02-27 (degraded), 2020-02-28 (degraded), 2020-06-30 (degraded)... See: https://databento.com/docs/api-reference-historical/metadata/metadata-get-dataset-condition
+  data = client.timeseries.get_range(
+ES (ES.v.0) 2010-06-06..2026-06-06: $20.41
+MNQ (MNQ.v.0) 2019-05-06..2026-06-06: $9.12
+MES (MES.v.0) 2019-05-06..2026-06-06: $9.11
+TOTAL estimated cost: $38.64
+downloading ES ...
+ES: 5590288 1-min -> 1124640 5-min bars 2010-06-07 00:00:00+00:00 .. 2026-06-05 20:55:00+00:00 -> /Users/jacksonsheehan/Topstep-bot/oos/data/ES_5min.csv
+downloading MNQ ...
+MNQ: 2497185 1-min -> 500419 5-min bars 2019-05-06 00:00:00+00:00 .. 2026-06-05 20:55:00+00:00 -> /Users/jacksonsheehan/Topstep-bot/oos/data/MNQ_5min.csv
+downloading MES ...
+MES: 2495557 1-min -> 500505 5-min bars 2019-05-06 00:00:00+00:00 .. 2026-06-05 20:55:00+00:00 -> /Users/jacksonsheehan/Topstep-bot/oos/data/MES_5min.csv

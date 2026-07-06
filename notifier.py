@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+_ET = ZoneInfo("America/New_York")
 
 import httpx
 
@@ -10,7 +13,7 @@ from signals import Signal
 
 
 def _stamp() -> str:
-    return datetime.now(timezone.utc).strftime("%H:%M:%S")
+    return datetime.now(_ET).strftime("%I:%M:%S %p ET")
 
 
 def log(msg: str) -> None:

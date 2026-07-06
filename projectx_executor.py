@@ -43,6 +43,7 @@ import logging
 import math
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -100,7 +101,14 @@ class ProjectXBroker:
             )
             return
 
-        self._http = httpx.Client(base_url=self._base, timeout=15.0)
+        # Shorter keepalive_expiry than a typical server idle-drop window forces
+        # httpx to open fresh connections proactively instead of handing back a
+        # pooled one the server may have already killed — the main source of the
+        # "SSL: BAD_LENGTH" / "EOF violation" resets seen on this connection pool.
+        self._http = httpx.Client(
+            base_url=self._base, timeout=8.0,
+            limits=httpx.Limits(max_keepalive_connections=5, keepalive_expiry=20.0),
+        )
         try:
             self._authenticate()
             self._load_account()
@@ -149,10 +157,30 @@ class ProjectXBroker:
             log.warning(f"[ProjectX] token validate failed ({exc}); re-logging in")
         self._authenticate()  # fall back to a fresh login
 
+    _TRANSPORT_RETRIES = 3
+    _TRANSPORT_RETRY_BACKOFF_S = 0.4  # doubles each attempt: 0.4, 0.8, 1.6
+
     def _post(self, path: str, body: dict) -> dict:
-        """POST helper: refreshes token, retries once on 401, returns parsed JSON."""
+        """POST helper: refreshes token, retries once on 401, returns parsed JSON.
+
+        Also retries on a transport-level failure (dropped keep-alive connection,
+        SSL reset, etc.) — these are transient and common on long-lived connection
+        pools, especially right after startup while the network path settles.
+        A short exponential backoff between attempts avoids hammering a link
+        that's still down; a fresh connection from the pool clears it otherwise."""
         self._ensure_token()
-        r = self._http.post(path, json=body)
+        r = None
+        for attempt in range(self._TRANSPORT_RETRIES):
+            try:
+                r = self._http.post(path, json=body)
+                break
+            except httpx.TransportError as exc:
+                if attempt == self._TRANSPORT_RETRIES - 1:
+                    raise
+                backoff = self._TRANSPORT_RETRY_BACKOFF_S * (2 ** attempt)
+                log.warning(f"[ProjectX] transport error on POST {path} ({exc}); "
+                            f"retry {attempt + 1}/{self._TRANSPORT_RETRIES - 1} in {backoff:.1f}s")
+                time.sleep(backoff)
         if r.status_code == 401:
             self._authenticate()
             r = self._http.post(path, json=body)
@@ -207,6 +235,61 @@ class ProjectXBroker:
             log.warning(f"[ProjectX] contract_id({sym}) failed: {exc}")
             return None
 
+    # Alpaca-style "5Min" / "1Hour" / "1Day" -> ProjectX History unit enum.
+    # ProjectX units: 1=Second, 2=Minute, 3=Hour, 4=Day, 5=Week, 6=Month.
+    _TIMEFRAME_UNIT = {"Min": 2, "Hour": 3, "Day": 4, "Week": 5, "Month": 6}
+
+    @classmethod
+    def _parse_timeframe(cls, timeframe: str) -> tuple[int, int]:
+        for suffix, unit in cls._TIMEFRAME_UNIT.items():
+            if timeframe.endswith(suffix):
+                n = timeframe[: -len(suffix)]
+                return unit, int(n) if n else 1
+        return 2, 5  # default: 5-minute bars
+
+    def historical_bars(self, symbol: str, timeframe: str = "5Min",
+                         limit: int = 200, days_back: int = 5) -> dict:
+        """Recent OHLCV bars for a futures root via ProjectX's own history feed.
+
+        Alpaca's /v2/stocks endpoint has no futures data at all — MNQ/ES/etc.
+        always return empty there. This is the real bar source for this bot's
+        watchlist. Returns the canonical {"close":[...],...} shape, oldest->newest,
+        same as MarketData.bars(); empty dict on any failure (fail-open, matching
+        MarketData.bars()'s contract so callers don't need to special-case source).
+        """
+        if self._mock_mode:
+            return {}
+        cid = self.contract_id(symbol)
+        if not cid:
+            return {}
+        unit, unit_number = self._parse_timeframe(timeframe)
+        now = datetime.now(timezone.utc)
+        try:
+            d = self._post("/api/History/retrieveBars", {
+                "contractId": cid,
+                "live": self._live,
+                "startTime": (now - timedelta(days=days_back)).isoformat(),
+                "endTime": now.isoformat(),
+                "unit": unit,
+                "unitNumber": unit_number,
+                "limit": limit,
+                "includePartialBar": True,
+            })
+            bars = d.get("bars") or []
+            if not bars:
+                return {}
+            bars = list(reversed(bars))  # API returns newest-first; we want oldest->newest
+            return {
+                "open": [float(b["o"]) for b in bars],
+                "high": [float(b["h"]) for b in bars],
+                "low": [float(b["l"]) for b in bars],
+                "close": [float(b["c"]) for b in bars],
+                "volume": [float(b["v"]) for b in bars],
+            }
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"[ProjectX] historical_bars({symbol}) failed: {exc}")
+            return {}
+
     def root_for_contract(self, contract_id: str) -> str:
         """Reverse a contractId to its root symbol (best-effort, for positions)."""
         if contract_id in self._cid_to_root:
@@ -242,6 +325,17 @@ class ProjectXBroker:
                 symbol=symbol, qty=float(n_contracts), side=side, price=ref_price,
                 order_id=f"projectx-mock-{uuid.uuid4().hex[:8]}", status="filled",
             )
+        # Choke-point guard (real orders only): this bot must never order
+        # outside its watchlist. Unattributed full-size ES orders kept
+        # appearing on the account with our customTag; if any code path in
+        # THIS process tries that, refuse and dump the stack so the culprit
+        # is identified.
+        watch = {w.upper() for w in CONFIG.watchlist}
+        if symbol.upper() not in watch:
+            import traceback
+            log.error(f"[ProjectX] BLOCKED off-watchlist order: {side} {qty}x "
+                      f"{symbol} — call stack:\n" + "".join(traceback.format_stack()))
+            raise RuntimeError(f"off-watchlist order blocked: {symbol}")
 
         cid = self.contract_id(symbol)
         if cid is None:
@@ -261,17 +355,48 @@ class ProjectXBroker:
                 f"[ProjectX] order rejected: errorCode={d.get('errorCode')} {d.get('errorMessage')}"
             )
         order_id = str(d.get("orderId", ""))
-        # Market orders fill near-instantly. ProjectX returns only the orderId on
-        # placement (no avg fill price), so we mark the entry at ref_price and
-        # report status="filled" — NOT "accepted". With "accepted" the Position is
-        # created filled=False, get_fill returns no price so _reconcile_fills never
-        # promotes it, and _manage_open then skips it forever (no stop/target ever
-        # runs). Marking it filled lets exit management run immediately; avg-fill
-        # price reconciliation via /api/Trade/search is a future refinement.
+        # Market orders fill near-instantly. The place response carries no avg
+        # fill price, so poll /api/Trade/search briefly for the REAL fill —
+        # booking at ref_price hides slippage and drifts the internal ledger
+        # away from broker truth (the false-MLL-breach fuel). Status stays
+        # "filled" either way: with "accepted" the Position is created
+        # filled=False and exit management never runs.
+        price = ref_price
+        for _ in range(3):
+            time.sleep(0.4)
+            avg = self._avg_fill_price(order_id)
+            if avg is not None:
+                if abs(avg - ref_price) > 1e-9:
+                    log.info(f"[ProjectX] {symbol} actual fill {avg:.4f} vs ref "
+                             f"{ref_price:.4f} (slippage booked)")
+                price = avg
+                break
         return Fill(
-            symbol=symbol, qty=float(n_contracts), side=side, price=ref_price,
+            symbol=symbol, qty=float(n_contracts), side=side, price=price,
             order_id=order_id, status="filled",
         )
+
+    def _avg_fill_price(self, order_id: str) -> float | None:
+        """Size-weighted average fill price for an order via /api/Trade/search
+        (schema verified 2026-07-03: trades[{orderId, price, size, voided}]).
+        Returns None when no (non-voided) fills are visible yet or on error."""
+        if not order_id:
+            return None
+        try:
+            start = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+            d = self._post("/api/Trade/search",
+                           {"accountId": self.account_id, "startTimestamp": start})
+            fills = [t for t in d.get("trades", [])
+                     if str(t.get("orderId", "")) == str(order_id)
+                     and not t.get("voided")]
+            total = sum(float(t.get("size", 0)) for t in fills)
+            if total <= 0:
+                return None
+            return sum(float(t["price"]) * float(t.get("size", 0))
+                       for t in fills) / total
+        except Exception as exc:  # noqa: BLE001
+            log.debug(f"[ProjectX] trade search for order {order_id} failed: {exc}")
+            return None
 
     def place_stop_order(self, symbol: str, qty: int, side: str,
                          stop_price: float) -> str:
@@ -285,12 +410,11 @@ class ProjectXBroker:
         Returns the ProjectX orderId (so the caller can cancel it on a managed
         exit), or "" on failure / mock mode.
 
-        NOTE (live-sim verification required): the ProjectX stop order TYPE enum
-        (4) and the `stopPrice` field name are assumed from the gateway's order
-        schema. A true OCO/bracket that auto-cancels the sibling on fill is NOT
-        used here — the entry's take-profit stays client-side, and the engine
-        cancels this resting stop when it flattens. VERIFY against a live-sim
-        account before arming real money.
+        VERIFIED 2026-07-03 against the sim gateway (account 7904116): type=4 +
+        `stopPrice` accepted, orderId returned, cancel round-trip OK. A true
+        OCO/bracket that auto-cancels the sibling on fill is NOT used here —
+        the entry's take-profit stays client-side, and the engine cancels this
+        resting stop when it flattens.
         """
         n = max(1, int(qty))
         if self._mock_mode:
@@ -334,13 +458,12 @@ class ProjectXBroker:
         return oid
 
     def get_fill(self, order_id: str) -> tuple[str, float | None]:
-        """Poll fill status. ProjectX market orders fill immediately; the place
-        response carries no avg price, so we report filled at the provisional
-        (ref) price (None). Exact avg-fill reconciliation would query
-        /api/Trade/search by order — left as a future enhancement."""
+        """Poll fill status. Market orders fill near-instantly; report the real
+        size-weighted average price from /api/Trade/search when visible, else
+        filled-at-provisional (None) so callers keep their ref price."""
         if self._mock_mode:
             return "filled", None
-        return "filled", None
+        return "filled", self._avg_fill_price(order_id)
 
     def account(self) -> dict:
         """Fetch account balance/equity from ProjectX."""
@@ -398,7 +521,8 @@ class ProjectXBroker:
 
     def get_positions(self) -> list[dict]:
         """Fetch open futures positions from ProjectX."""
-        log.info(f"[ProjectX] get_positions() | mock={self._mock_mode}")
+        # debug: called every reconcile (~5s) — INFO here floods the log
+        log.debug(f"[ProjectX] get_positions() | mock={self._mock_mode}")
         if self._mock_mode:
             return []
         try:
@@ -419,8 +543,11 @@ class ProjectXBroker:
                 })
             return positions
         except Exception as exc:  # noqa: BLE001
+            # Re-raise: returning [] here is indistinguishable from "flat at
+            # broker" and makes the reconciler phantom-close the entire local
+            # book (and flatten_all() a no-op) on a transient API error.
             log.warning(f"[ProjectX] get_positions() failed: {exc}")
-            return []
+            raise
 
     def get_account(self) -> dict:
         """Alias for account() — kept for compatibility."""

@@ -49,7 +49,23 @@ class Config:
     closed_interval_sec: int = _i("CLOSED_INTERVAL_SEC", 900)
     watchlist: tuple[str, ...] = _csv("WATCHLIST", "ES,NQ,MES,MNQ")
     # Universe index used for regime / circuit-breaker reads.
-    regime_symbol: str = _s("REGIME_SYMBOL", "SPY")
+    # QQQ tracks Nasdaq-100 (same underlying as NQ/MNQ) and is available on Alpaca.
+    regime_symbol: str = _s("REGIME_SYMBOL", "QQQ")
+
+    # Session-phase confidence multipliers (applied to quant strength/lean in
+    # _prescreen). Open/close momentum windows get full weight; midday + overnight
+    # are discounted for lower predictability (Gao et al. JFE 2018). Overnight is
+    # tunable: raise toward 1.0 to open night trading, lower to suppress it.
+    phase_mult_open: float = _f("PHASE_MULT_OPEN", 1.00)
+    phase_mult_close: float = _f("PHASE_MULT_CLOSE", 0.85)
+    phase_mult_midday: float = _f("PHASE_MULT_MIDDAY", 0.70)
+    phase_mult_overnight: float = _f("PHASE_MULT_OVERNIGHT", 0.75)
+    # Overnight confluence blend: quant strength is thin overnight, so trust the
+    # qualitative (LLM) stream more. qual_weight is the LLM share of the blended
+    # confidence; RTH uses a fixed 50/50. Overnight also gets its own (looser)
+    # confidence gate so RTH stays strict.
+    qual_weight_overnight: float = _f("QUAL_WEIGHT_OVERNIGHT", 0.65)
+    confidence_threshold_overnight: float = _f("CONFIDENCE_THRESHOLD_OVERNIGHT", 0.58)
 
     # ── asset classes enabled ─────────────────────────────
     trade_equities: bool = _b("TRADE_EQUITIES", False)  # futures-only fork; flip True to re-enable equity scanning
@@ -94,7 +110,7 @@ class Config:
 
     # ── event-risk blackout (Finnhub calendars) ───────────
     event_blackout_enabled: bool = _b("EVENT_BLACKOUT_ENABLED", True)
-    event_blackout_hours: float = _f("EVENT_BLACKOUT_HOURS", 12.0)  # no new entries within N h of a high-impact event / earnings
+    event_blackout_hours: float = _f("EVENT_BLACKOUT_HOURS", 2.0)  # no new entries within N h of a high-impact event / earnings (FOMC/CPI use per-event windows in events.py)
     event_countries: tuple[str, ...] = _csv("EVENT_COUNTRIES", "US")  # only blackout on these countries' macro prints
 
     # quant indicators
@@ -241,6 +257,9 @@ class Config:
     # Cramer mode: run an inverse shadow book; if it beats the real one the
     # primary signals are systematically flawed.
     cramer_mode: bool = _b("CRAMER_MODE", True)
+    # Cramer flip: set True by day_learner when shadow crushes real (signals inverted).
+    cramer_flip_enabled: bool = _b("CRAMER_FLIP_ENABLED", False)
+    cramer_flip_threshold_usd: float = _f("CRAMER_FLIP_THRESHOLD_USD", 1000.0)
 
     # ── broker creds ──────────────────────────────────────
     # Futures-only fork: the live execution path is ProjectX/TopstepX (selected by
@@ -298,11 +317,19 @@ class Config:
     topstep_account_size: float = _f("TOPSTEP_ACCOUNT_SIZE", 50_000.0)        # starting balance
     topstep_trailing_mll: float = _f("TOPSTEP_TRAILING_MLL", 2_000.0)         # trailing Max Loss Limit ($) — HARD fail rule
     topstep_profit_target: float = _f("TOPSTEP_PROFIT_TARGET", 3_000.0)       # Combine profit objective
+    topstep_min_trading_days: int = _i("TOPSTEP_MIN_TRADING_DAYS", 3)         # Combine min separate active-trading days
     topstep_max_contracts: int = _i("TOPSTEP_MAX_CONTRACTS", 5)               # max ACCOUNT-WIDE open minis (50 micros @ 10:1)
     topstep_micro_ratio: int = _i("TOPSTEP_MICRO_RATIO", 10)                  # micros per 1 mini toward the limit (TopstepX)
     # Responsible Trading Advantage: adds a Daily Loss Limit. ON per the funded plan.
     topstep_responsible_trading: bool = _b("TOPSTEP_RESPONSIBLE_TRADING", True)
     topstep_daily_loss_limit: float = _f("TOPSTEP_DAILY_LOSS_LIMIT", 1_000.0)  # DLL ($) — deactivates the day
+    # Profit give-back guard (OURS, not a Topstep rule): once equity has run far
+    # above the locked $account_size MLL floor, Topstep offers no trailing
+    # protection at all — a funded account can give back its entire accumulated
+    # profit before the hard floor fires. Block NEW entries (never flattens)
+    # while equity sits more than this many dollars below the cycle peak.
+    # 0 = off.
+    topstep_giveback_halt_usd: float = _f("TOPSTEP_GIVEBACK_HALT_USD", 2_000.0)
     # Per-trade risk budget for ATR/risk-based futures position sizing. The dollar
     # risk at the stop (qty * stop_distance_pts * $/pt) is capped to the SMALLER of
     # (pct of account) and (fraction of the Daily Loss Limit). Default: min($500, $500).

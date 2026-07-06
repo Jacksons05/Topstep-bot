@@ -1,0 +1,76 @@
+{
+ "R10_intraday_momentum": {
+  "ES": {
+   "n": 3905,
+   "total_usd": -151507.5,
+   "avg_usd": -38.8,
+   "pf": 0.733,
+   "t": -5.554,
+   "p_one_sided": 1.0,
+   "p_bootstrap": 1.0,
+   "win_pct": 42.7,
+   "pct_years_positive": 0.0
+  },
+  "NQ": {
+   "n": 2198,
+   "total_usd": -28117.0,
+   "avg_usd": -12.79,
+   "pf": 0.812,
+   "t": -2.919,
+   "p_one_sided": 0.99824,
+   "p_bootstrap": 0.9988,
+   "win_pct": 46.5,
+   "pct_years_positive": 0.0
+  },
+  "MNQ": {
+   "n": 1763,
+   "total_usd": -6375.7,
+   "avg_usd": -3.62,
+   "pf": 0.888,
+   "t": -1.652,
+   "p_one_sided": 0.95075,
+   "p_bootstrap": 0.95075,
+   "win_pct": 46.6,
+   "pct_years_positive": 12.5
+  }
+ },
+ "R11_gap_fade": {
+  "ES": {
+   "n": 1451,
+   "total_usd": -89004.0,
+   "avg_usd": -61.34,
+   "pf": 0.841,
+   "t": -2.167,
+   "p_one_sided": 0.9849,
+   "p_bootstrap": 0.98465,
+   "win_pct": 45.8,
+   "pct_years_positive": 29.4
+  },
+  "NQ": {
+   "n": 848,
+   "total_usd": -32022.0,
+   "avg_usd": -37.76,
+   "pf": 0.834,
+   "t": -1.888,
+   "p_one_sided": 0.97052,
+   "p_bootstrap": 0.97245,
+   "win_pct": 47.1,
+   "pct_years_positive": 10.0
+  },
+  "MNQ": {
+   "n": 859,
+   "total_usd": -7375.1,
+   "avg_usd": -8.59,
+   "pf": 0.913,
+   "t": -0.991,
+   "p_one_sided": 0.83926,
+   "p_bootstrap": 0.8378,
+   "win_pct": 47.4,
+   "pct_years_positive": 12.5
+  }
+ },
+ "verdicts": {
+  "R10_ES": "FAIL",
+  "R11_ES": "FAIL"
+ }
+}

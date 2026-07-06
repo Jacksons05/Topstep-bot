@@ -1,0 +1,3 @@
+NQ 2010-2019 cost: $10.64
+<stdin>:9: BentoWarning: The streaming request contained one or more days which have reduced quality: 2014-06-11 (degraded), 2014-06-12 (degraded), 2014-06-13 (degraded)... See: https://databento.com/docs/api-reference-historical/metadata/metadata-get-dataset-condition
+NQ: 2914550 1-min -> 622175 5-min bars 2010-06-07 00:00:00+00:00 .. 2019-05-03 20:55:00+00:00
