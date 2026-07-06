@@ -227,3 +227,35 @@ tick $4.00 comm. PASS per instrument: n ≥ 1000, PF ≥ 1.10, one-sided p < 0.0
 (t AND 20k bootstrap), ≥ 60% years positive. Note: GC "16:00/09:30" windows
 are equity-session anchors applied to a metals contract — mechanism may not
 transfer; that is the test.
+
+## Round 12 — results (2026-07-06)
+
+C1 (taker, 16:00→09:30 hold — NOT Topstep-legal): RTY **PASS** (n=2218,
+PF 1.115, p=0.0402 t / 0.0407 bootstrap, 80% years positive) — but 2025
+($152) and 2026 (−$1,629) are flat-to-negative, i.e. the edge is weakest in
+the two most recent years, the pattern you'd expect from a marginal
+family-wise false positive rather than a strengthening real effect. GC
+**FAIL** (p=0.060, wildly regime-dependent yearly P&L — 2012/2013/2021/2022
+deeply negative, 2020/2025 hugely positive — not a stable edge).
+
+C1b (passive limit, 18:00 entry — the ONLY Topstep-legal variant): RTY
+**FAIL** (n=1753, PF 1.059, p=0.199 t / 0.198 bootstrap, 2025 alone lost
+$10,299). GC **FAIL** (PF 1.003, p=0.481, 47% years positive — no edge at
+all).
+
+**Portfolio-level finding (not itself a new hypothesis — a synthesis of
+Rounds 4, 8, and 12):** every Topstep-legal (18:00-entry, C1b) variant of
+the overnight-drift family tested to date has FAILED — NQ (Round 4, PF 1.091
+p=0.12), MNQ (Round 8), and now RTY (this round). GC's C1b also failed. That
+is 4/4. Only the non-compliant taker/C1 variant (16:00 entry, holds through
+Topstep's mandatory 16:10–18:00 flatten window) has ever passed, and only on
+Nasdaq-linked instruments (NQ, MNQ) plus one marginal, decaying RTY result.
+
+**Implication for CL/YM (deferred pending funding):** given a 0/4 base rate
+for the Topstep-legal variant across four instruments spanning three asset
+classes (Nasdaq, small-cap, metals), the prior that CL or YM's C1b clears
+the bar is now low. Recommend NOT spending the $39.83 in Databento credits
+on Round 12's CL/YM leg — expected information value is poor. The overnight-
+drift family should be considered EXHAUSTED for Topstep-compliant trading;
+further capital/time should go to a genuinely different mechanism (see
+CURRENT PRIORITIES in CLAUDE.md) rather than more instruments on this one.
