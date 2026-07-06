@@ -24,6 +24,7 @@ order-flow gate fails open.
 from __future__ import annotations
 
 import logging
+import time
 
 from config import CONFIG
 from futures_symbols import spec_for
@@ -57,6 +58,7 @@ class ProjectXOrderFlowFeed:
         self._sub_cids: list[str] = []                   # contractIds to re-subscribe on reconnect
         self._conn = None
         self.depth_available = _SIGNALR_AVAILABLE and not getattr(broker, "_mock_mode", True)
+        self._last_heal_ts = 0.0
 
     def get(self, symbol: str) -> OrderFlowEngine:
         """Return (creating if needed) the engine for a futures root."""
@@ -145,6 +147,13 @@ class ProjectXOrderFlowFeed:
             # → the order-flow gate fails CLOSED (no blind entries on a dead feed).
             if hasattr(self._conn, "on_reconnect"):
                 self._conn.on_reconnect(self._on_reconnect)
+            else:
+                # Without the hook an automatic reconnect comes back subscribed
+                # to nothing — the feed looks connected but is silent. The
+                # staleness self-heal (heal_if_stale) is the only recovery.
+                log.warning("[OrderFlow] this signalrcore version has no "
+                            "on_reconnect hook — relying on staleness self-heal "
+                            "to recover dropped subscriptions")
             self._conn.start()
             log.info("[OrderFlow] SignalR market hub connected")
             return True
@@ -234,6 +243,45 @@ class ProjectXOrderFlowFeed:
     def _engine_for(self, contract_id) -> OrderFlowEngine | None:
         sym = self._cid_to_sym.get(str(contract_id))
         return self._engines.get(sym) if sym else None
+
+    # Rebuild the hub after this much feed silence (engine gates entries at
+    # 15s staleness already — this is the deeper "connection is dead" repair).
+    _HEAL_AFTER_S = 120
+    _HEAL_COOLDOWN_S = 60  # min spacing between rebuild attempts
+
+    def heal_if_stale(self) -> None:
+        """Self-heal a silently-dead connection: if every engine has been
+        quote-silent for _HEAL_AFTER_S, tear the hub down and rebuild it with a
+        freshly-validated token, then re-subscribe everything.
+
+        Covers the two failure modes automatic reconnect cannot: (a) a
+        signalrcore build without the on_reconnect hook (reconnects subscribed
+        to nothing), and (b) token expiry — the reconnect URL carries the
+        ORIGINAL access token, which the gateway rejects after rotation.
+        Callers must only invoke this while the market is open; outside trading
+        hours silence is normal."""
+        if self._mock or self._conn is None or not self._subscribed:
+            return
+        freshest = max((getattr(e, "last_quote_ts", 0.0) or 0.0)
+                       for e in self._engines.values())
+        now = time.time()
+        if freshest <= 0 or now - freshest < self._HEAL_AFTER_S:
+            return
+        if now - self._last_heal_ts < self._HEAL_COOLDOWN_S:
+            return
+        self._last_heal_ts = now
+        log.warning(f"[OrderFlow] feed silent {now - freshest:.0f}s with market open — "
+                    "rebuilding SignalR connection with a fresh token")
+        try:
+            self._broker._ensure_token()   # refresh/re-login before rebuilding the URL
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"[OrderFlow] token refresh before heal failed: {exc}")
+        roots = sorted(self._subscribed)
+        self.close()
+        self._subscribed.clear()
+        self._sub_cids.clear()
+        n = self.subscribe(roots)
+        log.warning(f"[OrderFlow] self-heal re-subscribed {n}/{len(roots)} root(s)")
 
     def reset_session(self) -> None:
         """Zero every engine's CVD at the open."""

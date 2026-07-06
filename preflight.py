@@ -206,6 +206,22 @@ def check_session(rep: Report) -> None:
     now = datetime.now(_ET)
     line = f"now={now:%Y-%m-%d %H:%M:%S} ET | weekday={now:%A}"
 
+    import cme_calendar
+    if not cme_calendar.year_covered(now.year):
+        rep.add(WARN, "CME holiday calendar",
+                f"cme_calendar.py has NO entries for {now.year} — update it from "
+                "the official CME holiday calendar or holiday sessions will be "
+                "treated as normal trading days")
+    if cme_calendar.is_full_closure(now.date()):
+        rep.add(WARN, "Session timing",
+                f"CME full holiday closure today — no futures session. {line}")
+        return
+    halt = cme_calendar.early_close_halt(now.date())
+    if halt is not None:
+        rep.add(WARN, "Session timing",
+                f"CME EARLY CLOSE today — equity-index session halts ~{halt:%H:%M} ET; "
+                f"flatten pulls forward accordingly. {line}")
+
     if now.weekday() >= 5:  # Sat/Sun
         rep.add(WARN, "Session timing",
                 "weekend — the futures market is closed for most of the session. " + line)
