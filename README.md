@@ -82,6 +82,19 @@ python run.py               # continuous loop, cadence adapts to volatility
 ```
 JARVIS dashboard → http://127.0.0.1:8787
 
+## Daily readiness (run this first every morning)
+```bash
+python preflight.py          # human-readable readiness report
+python preflight.py --json   # machine-readable (cron / dashboards)
+```
+A **read-only** preflight (never touches an order) that answers "is the bot
+ready to trade today?" It checks config validity, dependencies, the kill
+switch, ProjectX/broker connectivity + account equity, Topstep risk headroom
+(trailing MLL floor, Daily Loss Limit, contract cap), the EOD-flatten / econ
+blackout windows, and persisted state. Exit code `0` = ready (may include
+non-fatal warnings), `2` = **NOT READY** (a hard blocker — resolve before
+arming `run.py`).
+
 ## Tests
 ```bash
 pip install -r requirements-dev.txt

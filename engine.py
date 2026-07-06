@@ -178,6 +178,20 @@ class Engine:
                 notify(f"⚠ UW flow feed init failed ({e}) — disabled")
                 self._uw = None
 
+        # UW signal-quality logger (optional) — records uw_lean vs forward return
+        # so the blend's edge can be measured offline. Behavior-neutral.
+        self._uw_log = None
+        if CONFIG.uw_flow_log:
+            try:
+                from uw_logger import UWFlowLogger
+                self._uw_log = UWFlowLogger(CONFIG.uw_flow_log)
+                if self._uw_log.enabled:
+                    notify(f"📊 UW signal logger → {CONFIG.uw_flow_log} "
+                           "(analyze: python uw_logger.py)")
+            except Exception as e:  # noqa: BLE001
+                notify(f"⚠ UW logger init failed ({e}) — disabled")
+                self._uw_log = None
+
         # Startup reconciliation (H6): adopt/drop positions against the live broker
         # so a restart after a Topstep auto-liquidation never manages ghosts.
         try:
@@ -229,6 +243,8 @@ class Engine:
         self.state.save()
         if self._uw is not None:
             self._uw.close()
+        if self._uw_log is not None:
+            self._uw_log.close()
 
     # ── adaptive cadence: poll faster when the breaker trips, idle when closed ──
     def next_interval(self) -> int:
@@ -503,10 +519,26 @@ class Engine:
             # For a futures symbol, size off the per-trade risk budget and reject
             # outright if (a) the stop is too wide for the budget (qty=0) or (b) the
             # full stop-out would breach the LIVE trailing-MLL floor.
+            qty_cap: int | None = None
             if is_futures_symbol(sig.symbol):
-                plan = futures_plan(sig, sig.price, risk_mult=risk_mult)
+                # Cap the new order to the remaining ACCOUNT-WIDE contract capacity
+                # so a single (esp. micro) trade can't size to the full limit and
+                # push the account total over TOPSTEP_MAX_CONTRACTS. Only enforced
+                # when the Topstep layer is active (the cap is a Topstep rule).
+                if self._topstep is not None:
+                    open_contracts = sum(int(p.qty) for p in self.state.open_positions
+                                         if not p.shadow)
+                    qty_cap = CONFIG.topstep_max_contracts - open_contracts
+                    if qty_cap < 1:
+                        notify(f"  skip (Topstep account-wide contract cap "
+                               f"{CONFIG.topstep_max_contracts} reached — "
+                               f"{open_contracts} open): {sig.symbol}")
+                        continue
+                plan = futures_plan(sig, sig.price, risk_mult=risk_mult,
+                                    max_contracts=qty_cap)
                 if plan is None:
-                    notify(f"  skip (sizing: stop too wide / invalid ATR for risk budget): {sig.symbol}")
+                    notify(f"  skip (sizing: stop too wide / invalid ATR / no contract "
+                           f"capacity for risk budget): {sig.symbol}")
                     continue
                 if self._topstep is not None:
                     eq_chk, _u = self._account_equity()
@@ -527,7 +559,8 @@ class Engine:
                             continue
 
             try:
-                pos = self.executor.open(sig, size, self.state, risk_mult=risk_mult)
+                pos = self.executor.open(sig, size, self.state, risk_mult=risk_mult,
+                                         max_contracts=qty_cap)
             except Exception as e:  # noqa: BLE001
                 notify(f"  ! execute failed {sig.symbol}: {e}")
                 continue
@@ -608,6 +641,7 @@ class Engine:
         if self._uw is not None:
             uw = self._uw.get(sym)
             if uw is not None:
+                raw_quant_lean = quant.lean  # pre-blend, for the signal logger
                 aligned = (uw.lean >= 0) == (quant.lean >= 0)
                 if uw.whale and aligned:
                     w = min(0.60, CONFIG.uw_flow_lean_weight * 2.0)
@@ -626,6 +660,8 @@ class Engine:
                     atr=quant.atr,
                     detail=quant.detail + f" · UW={uw.lean:+.2f}{whale_tag}{align_tag}",
                 )
+                if self._uw_log is not None:
+                    self._uw_log.log(sym, spot, uw.lean, raw_quant_lean)
 
         if quant.direction == "FLAT":
             return None

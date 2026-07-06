@@ -49,13 +49,36 @@ _F_VOLUME = "volume"
 
 @dataclass
 class UWFlowRead:
-    lean: float               # -1..+1  (positive = net call premium dominant = bullish)
+    lean: float               # -1..+1  (positive = net BULLISH-intent premium = bullish)
     strength: float           # abs(lean)
     whale: bool               # any single flow ticket ≥ UW_WHALE_PREMIUM_USD
-    call_prem: float          # gross call premium in window ($)
-    put_prem: float           # gross put premium in window ($)
+    call_prem: float          # gross call premium in window ($) — display only
+    put_prem: float           # gross put premium in window ($) — display only
+    bull_prem: float = 0.0    # premium with bullish intent (calls bought + puts sold)
+    bear_prem: float = 0.0    # premium with bearish intent (calls sold + puts bought)
     headlines: list[str] = field(default_factory=list)  # for news analyst
     ts: float = 0.0
+
+
+def _is_bullish(kind: str, side: str) -> bool | None:
+    """Classify a flow ticket's directional intent from option type + aggressor.
+
+    Aggressor side: "ASK" = the order lifted the offer (bought), "BID" = hit the
+    bid (sold to the market maker). Directional meaning:
+        call BOUGHT  → bullish        put BOUGHT → bearish
+        call SOLD    → bearish        put SOLD   → bullish
+    Returns True (bullish) / False (bearish), or None when the side is missing/
+    ambiguous (no ASK/BID) so the caller can fall back to the type-only guess.
+    """
+    s = side.upper()
+    if s not in ("ASK", "BID"):
+        return None
+    bought = s == "ASK"
+    if kind == "CALL":
+        return bought
+    if kind == "PUT":
+        return not bought
+    return None
 
 
 def _proxy_map() -> dict[str, str]:
@@ -127,30 +150,44 @@ class UWFlowFeed:
             return None
 
     def _parse(self, items: list[dict], proxy_ticker: str) -> UWFlowRead | None:
-        call_prem = 0.0
+        call_prem = 0.0   # gross, by option type (display only)
         put_prem = 0.0
+        bull_prem = 0.0   # by directional INTENT (type + aggressor side)
+        bear_prem = 0.0
         whale = False
         top_tickets: list[dict] = []
 
         for item in items:
             prem = float(item.get(_F_PREM, 0) or 0)
             kind = str(item.get(_F_TYPE, "")).upper()
+            if kind not in ("CALL", "PUT"):
+                continue
             if kind == "CALL":
                 call_prem += prem
-            elif kind == "PUT":
-                put_prem += prem
             else:
-                continue
+                put_prem += prem
+            # Directional intent from the aggressor side. When the side is
+            # missing/ambiguous, fall back to the type-only assumption
+            # (call→bullish, put→bearish) rather than dropping the ticket.
+            bullish = _is_bullish(kind, str(item.get(_F_SIDE, "")))
+            if bullish is None:
+                bullish = kind == "CALL"
+            if bullish:
+                bull_prem += prem
+            else:
+                bear_prem += prem
             if prem >= CONFIG.uw_whale_premium_usd:
                 whale = True
             # collect the top tickets by premium for headlines
             top_tickets.append(item)
 
-        total = call_prem + put_prem
+        total = bull_prem + bear_prem
         if total == 0:
             return None
 
-        lean = (call_prem - put_prem) / total  # -1..+1
+        # Lean is signed by directional INTENT, not a raw call-vs-put count: a
+        # block of calls SOLD (bearish) no longer reads as bullish.
+        lean = (bull_prem - bear_prem) / total  # -1..+1
         top_tickets.sort(key=lambda x: float(x.get(_F_PREM, 0) or 0), reverse=True)
         headlines = _build_headlines(top_tickets[:5], proxy_ticker)
 
@@ -160,6 +197,8 @@ class UWFlowFeed:
             whale=whale,
             call_prem=call_prem,
             put_prem=put_prem,
+            bull_prem=bull_prem,
+            bear_prem=bear_prem,
             headlines=headlines,
             ts=time.time(),
         )

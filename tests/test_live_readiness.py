@@ -72,6 +72,30 @@ def test_futures_plan_clamps_to_max_contracts():
     assert p is not None and p.qty == CONFIG.topstep_max_contracts
 
 
+# ── account-wide contract cap: a new order can't exceed remaining capacity ────
+def test_futures_plan_respects_remaining_contract_cap():
+    # budget would size 2 ES lots, but only 1 contract of account-wide capacity
+    # remains → qty clamped to 1 so the account total can't exceed the limit.
+    p = futures_plan(_sig("ES", "BUY", 5000.0, atr=2.0), max_contracts=1)
+    assert p is not None and p.qty == 1
+    assert p.risk_usd == pytest.approx(200.0)     # 1 * 4pts * $50
+
+
+def test_futures_plan_rejects_when_no_capacity_left():
+    # zero remaining capacity → reject outright (never round up to 1 contract)
+    assert futures_plan(_sig("MES", "BUY", 5000.0, atr=1.0), max_contracts=0) is None
+
+
+def test_open_caps_qty_to_remaining_capacity():
+    # MES sizes to the full cap on the budget alone; with only 1 slot left the
+    # order (and the native protective stop) must be for exactly 1 contract.
+    e = _exec_with(_FakeBroker())
+    pos = e.open(_sig("MES", "BUY", 9_999.0, atr=1.0), 9_999.0, State(), max_contracts=1)
+    assert pos is not None and pos.qty == 1
+    sym, qty, side, stop = e.broker.stops[0]
+    assert qty == 1
+
+
 # ── C1 native protective stop wiring (mock broker) ───────────────────────────
 class _FakeBroker:
     def __init__(self) -> None:
