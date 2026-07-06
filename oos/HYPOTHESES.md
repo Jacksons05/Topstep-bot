@@ -227,3 +227,359 @@ tick $4.00 comm. PASS per instrument: n ≥ 1000, PF ≥ 1.10, one-sided p < 0.0
 (t AND 20k bootstrap), ≥ 60% years positive. Note: GC "16:00/09:30" windows
 are equity-session anchors applied to a metals contract — mechanism may not
 transfer; that is the test.
+
+## Round 12 — results (2026-07-06)
+
+C1 (taker, 16:00→09:30 hold — NOT Topstep-legal): RTY **PASS** (n=2218,
+PF 1.115, p=0.0402 t / 0.0407 bootstrap, 80% years positive) — but 2025
+($152) and 2026 (−$1,629) are flat-to-negative, i.e. the edge is weakest in
+the two most recent years, the pattern you'd expect from a marginal
+family-wise false positive rather than a strengthening real effect. GC
+**FAIL** (p=0.060, wildly regime-dependent yearly P&L — 2012/2013/2021/2022
+deeply negative, 2020/2025 hugely positive — not a stable edge).
+
+C1b (passive limit, 18:00 entry — the ONLY Topstep-legal variant): RTY
+**FAIL** (n=1753, PF 1.059, p=0.199 t / 0.198 bootstrap, 2025 alone lost
+$10,299). GC **FAIL** (PF 1.003, p=0.481, 47% years positive — no edge at
+all).
+
+**Portfolio-level finding (not itself a new hypothesis — a synthesis of
+Rounds 4, 8, and 12):** every Topstep-legal (18:00-entry, C1b) variant of
+the overnight-drift family tested to date has FAILED — NQ (Round 4, PF 1.091
+p=0.12), MNQ (Round 8), and now RTY (this round). GC's C1b also failed. That
+is 4/4. Only the non-compliant taker/C1 variant (16:00 entry, holds through
+Topstep's mandatory 16:10–18:00 flatten window) has ever passed, and only on
+Nasdaq-linked instruments (NQ, MNQ) plus one marginal, decaying RTY result.
+
+**Implication for CL/YM (deferred pending funding):** given a 0/4 base rate
+for the Topstep-legal variant across four instruments spanning three asset
+classes (Nasdaq, small-cap, metals), the prior that CL or YM's C1b clears
+the bar is now low. Recommend NOT spending the $39.83 in Databento credits
+on Round 12's CL/YM leg — expected information value is poor. The overnight-
+drift family should be considered EXHAUSTED for Topstep-compliant trading;
+further capital/time should go to a genuinely different mechanism (see
+CURRENT PRIORITIES in CLAUDE.md) rather than more instruments on this one.
+
+---
+
+# Round 13 — FOMC announcement reversal (registered 2026-07-06, before pull)
+
+Mechanism: Baglioni & Ribeiro, "The FOMC Announcement Reversal" (2022) —
+using intraday ES prices across 180 scheduled FOMC announcements
+(Oct 1997 – Jan 2020), pre-FOMC drift (Lucca & Moench 2015 — already dead in
+our own In-sample/CLAUDE.md history) has been replaced post-2011 by its
+OPPOSITE: a reversal of the trailing 24h pre-announcement return, entered at
+13:50 ET (10 min before the 14:00 statement) and closed at the RTH close same
+day. Reported Sharpe > 2.5x the old drift strategy, and INCREASING (not
+decaying) in the 2011-2020 subperiod — the opposite decay direction from
+every other strategy in this file, consistent with a genuine
+uncertainty-resolution risk premium rather than a slow-money inefficiency.
+Distinguishing feature: mechanical (fades the pre-existing trend), does not
+require predicting the FOMC outcome, so it does not inherit the
+regime-fragility that killed GEX-sign conditioning (Round 6) or that makes
+raw NFP-direction bets regime-fragile (2022 hiking cycle inverted the
+"good news" sign). Naturally Topstep-legal by construction — entry 13:50 ET,
+exit ~16:00 ET, entirely inside the RTH day session, nowhere near the
+16:10–18:00 flatten window; no compliant-variant redesign needed (unlike
+every entry in the overnight-drift family).
+
+**Frozen spec:** at 13:50 ET on each scheduled FOMC decision day (dates from
+the Federal Reserve's official historical meeting calendars,
+federalreserve.gov/monetarypolicy/fomchistorical{YEAR}.htm — verified
+2010, 2015, 2021-2027 directly during registration; full 2010-2026 table to
+be completed via the same source or FRED's release-calendar API before any
+data pull, not from memory), compute r24 = close(13:50 ET today) −
+close(13:50 ET prior session). If r24 > 0 → SELL ES at 13:50 close. If
+r24 < 0 → BUY. Flat if r24 == 0. Exit at the RTH 16:00 ET close same day (no
+overnight hold). Costs: $4.00 RT (ES-scale) + 1-tick slippage both sides,
+same convention as every other round.
+
+**Pooling (frozen, not chosen post-hoc):** given only ~8 events/year
+(~128-140 over 2010-2026), ES alone will not reach this repo's usual
+n≥200-500 bar. Pool ES + NQ + MES + MNQ on the same event-days, each trade's
+net USD divided by its point value (Round 7's normalization method), to
+raise n toward pooled adequacy. This pooling rule is written down now,
+before any data is touched, specifically so it cannot be adopted or dropped
+after seeing which choice looks better.
+
+**PASS bar:** pooled n ≥ 400, PF ≥ 1.10, one-sided p < 0.05 (t AND 20k
+bootstrap), ≥ 60% of calendar years with net-positive pooled P&L.
+
+**Before running:** (1) verify Baglioni & Ribeiro's citation record (SSRN/
+journal version, any published failure-to-replicate) — a single working
+paper is not the same evidentiary weight as a well-cited, replicated result;
+(2) complete and sanity-check the full FOMC date table against the
+official Fed calendar year-by-year (no fabricated/remembered dates); (3) NFP
+and CPI reversal claims found alongside this (vendor-blog sourced, not
+peer-reviewed) are explicitly EXCLUDED from this round — weaker evidence
+should not ride along with a stronger hypothesis in the same test.
+
+**Implementation status (2026-07-06):** FOMC date table completed and
+verified directly against federalreserve.gov's year-by-year historical
+archive (131 scheduled announcements, 2010 through the last completed 2026
+meeting; exclusions documented in `oos/round13_fomc_reversal.py`'s module
+docstring). Runner written: `oos/round13_fomc_reversal.py`. Not yet
+executed — needs `oos/data/{ES,NQ,MES,MNQ}_5min.csv` locally.
+
+**Known data-coverage caveat (disclosed before running, not after):** per
+`CLAUDE.md`'s own infrastructure map, NQ history stops at 2019 and MES/MNQ
+start at 2019 — so the pooled sample will realistically land near ES's full
+131 + NQ's ~80 (2010-2019) + MES's ~51 + MNQ's ~51 (2019-2026) ≈ 310-330,
+short of the n≥400 bar registered above, unless additional NQ 2019-2026
+history is fetched. This is flagged now, before any P&L is computed, as an
+implementation note (not a bar change) — if the pooled n comes in under 400
+when run, treat that shortfall honestly (report it, do not lower the bar
+post-hoc to make an under-powered result look sufficient).
+
+---
+
+# Round 14 — UW market-tide daily options positioning → next-session ES/NQ
+(registered 2026-07-06, diagnostic-first, before any P&L computed)
+
+Mechanism: Unusual Whales' `/api/market/market-tide` endpoint reports
+market-wide (not single-name) net call/put options premium flow at intraday
+granularity and accepts a historical `date` parameter. This is a DIFFERENT
+data source and mechanism from Round 9 (which used the single-name SPY
+flow-alerts endpoint and its `day_flow_score` formula, and FAILED to even
+reach n=100 before the sample ran out) — so a fresh test here is a new
+hypothesis, not a rescue of Round 9. Hypothesis: a market-wide, one-sided
+options-premium day is followed by continued directional pressure in
+SPX/NDX-linked index futures (ES/NQ) the next RTH session, via the dealer
+hedging-flow channel (dealers who sold the skewed side must hedge, pushing
+price further in that direction until the position unwinds).
+
+**Known constraint, stated up front:** unlike Databento futures data (16
+years, cheap), UW's usable historical depth for `market-tide` under our
+current API plan is UNKNOWN and must be measured empirically before any
+PASS bar is chosen — Round 9's SPY flow-alerts pull ran out after only ~55
+usable days, which may reflect that endpoint specifically, the account's
+subscription tier, or both. Full historical option-trade data is available
+for separate purchase from UW at $250/month (10% off >1yr) if a deeper
+backfill is wanted — a real cost decision, not something to assume.
+
+**Step 1 — diagnostic (data availability, not a result; run first, always):**
+probe `market-tide?date=D` at regular intervals going back from today and
+record the first date at which the response is empty/404/quota-blocked.
+This determines which PASS-bar tier below applies. This step must run
+before any P&L is computed and its output must be recorded regardless of
+what it shows (a short history is itself a usable, honestly-reported
+finding, not a reason to keep pulling until it looks better).
+
+**Step 2 — frozen signal (decided from data STRUCTURE, not outcomes):**
+day_score(D) = last available intraday tick's (net_call_premium −
+net_put_premium) for trading day D, i.e. the end-of-day reading. [If the
+diagnostic pull shows this field is a per-tick/per-interval value rather
+than a running cumulative — check via the raw shape of a few sample days
+before freezing — switch to day_score(D) = sum of (net_call_premium −
+net_put_premium) across all of day D's ticks instead. This choice must be
+made by inspecting the data's shape only, written down, and never revisited
+after computing a single dollar of P&L.]
+
+**Step 3 — frozen trade rule (Topstep-legal by construction, no overnight
+hold — the overnight-drift family's failure mode does not apply here):**
+threshold ε = the trailing-60-trading-day rolling tercile split of
+day_score (never a full-sample/look-ahead split). If day_score(D) is in the
+top tercile → BUY ES at the D+1 09:30 ET open, exit at the D+1 16:00 ET
+close. Bottom tercile → SELL. Middle tercile → no trade. Costs: $4.00 RT +
+1-tick slippage both sides.
+
+**PASS bar (tiered on Step 1's outcome — written now, before Step 1 runs):**
+- ≥ 1 year of usable daily history → n ≥ 200 (pooled ES+NQ+MES+MNQ,
+  point-normalized per Round 7's method), PF ≥ 1.10, one-sided p < 0.05
+  (t AND bootstrap), ≥ 60% of available years/half-years net-positive.
+- 3-12 months → exploratory only; report descriptive stats but do NOT treat
+  any PASS as actionable. Only legitimate next step is forward/live logging
+  (extend `uw_logger.py`'s existing CSV+analyzer to a next-session horizon,
+  e.g. `python uw_logger.py path.csv 86400`) until a real OOS sample exists.
+- < 3 months → stop; rely on forward logging only, same conclusion Round 9
+  already reached for the single-name endpoint.
+
+**Explicitly not in scope for this round:** GEX/dealer-gamma wall levels
+(that stack, `options.py`, lives in the sister Trading-Bot repo and is not
+part of this fork); the separate UW intraday GEX/gamma-flip capture
+(`com.jarvis.uwcapture`, started 2026-07-04 in Trading-Bot, not reachable
+from this repo) — CLAUDE.md already flags that as testable only after
+~3 months of accumulation, independent of this round.
+
+---
+
+## Considered and REJECTED without a backtest (2026-07-06): FOMC reversal
+does NOT generalize to more frequent scheduled releases
+
+Motivation: Round 13's FOMC reversal only fires ~8x/year; wanted a
+higher-frequency variant of the same mechanism (CPI, weekly initial jobless
+claims, other 8:30 ET releases) to trade more consistently.
+
+**Verdict: rejected on existing peer-reviewed evidence, no new data pull
+needed.** Lucca & Moench (2015, the same paper that discovered the
+pre-FOMC drift this reversal fades) explicitly tested nine other major
+releases — weekly initial jobless claims, GDP, ISM, industrial production,
+housing starts, personal income, CPI/PPI-adjacent — for the same
+pre-announcement pattern and found NONE of them show a statistically
+significant effect ("we conclude that no other major macroeconomic
+announcement is associated with large and statistically significant
+pre-announcement returns"). They further note Treasury/money-market futures
+show no pre-FOMC effect either — it is specific to equities and specific to
+monetary-policy decisions, not a general "scheduled release" phenomenon.
+Mechanism read: FOMC uniquely resolves broad, economy-wide policy
+uncertainty that every asset in the index re-prices simultaneously; a
+weekly claims number is routine, narrower, and does not carry the same
+uncertainty-unwind dynamic. Running the Round 13 reversal rule on claims/
+CPI dates would be testing a mechanism the original researchers already
+falsified — that is exactly the kind of hypothesis the harness is meant to
+screen out before spending a data pull on it.
+
+**Where "more frequent, real edge" would have to come from instead** (for
+the next research pass, not registered yet): 0DTE options have gone from
+niche to ~40-60%+ of daily SPX options volume (Cboe research; multiple 2024
+SSRN papers), and dealer gamma sign now measurably shapes DAILY (not
+event-day) index behavior — positive dealer gamma inventory strengthens
+intraday reversal, negative strengthens momentum (Baltas et al. 2024, SSRN
+4692190). This is a genuinely current, high-frequency, literature-grounded
+mechanism. It is NOT registered as a round yet because it has the same
+shape as Round 6 (GEX-sign regime conditioning), which already failed using
+a static prior-day GEX snapshot — testing it properly needs the INTRADAY,
+0DTE-aware gamma read the UW capture (`com.jarvis.uwcapture`) is built to
+produce, which per CLAUDE.md is not usable until ~3 months of accumulation
+(~October 2026). Naively re-testing Round 6's mechanism now with a
+different label would likely just fail the same way. Revisit this
+specifically once that capture matures — do not force it sooner.
+
+---
+
+## External literature cross-validation (2026-07-06): ORB, VWAP mean-reversion,
+intraday momentum/trend — independent confirmation of this file's own
+Round 2/10 dead verdicts, plus the sizing-theory basis for the Topstep
+risk layer
+
+Requested: a survey of credible (non-marketing) published evidence for
+ORB, VWAP/mean-reversion, and trend/momentum on MES/MNQ, post-2015 decay,
+realistic micro costs, and how Topstep's trailing MLL + DLL should change
+sizing/strategy choice. No new backtest — this cross-checks already-dead
+internal verdicts against outside evidence and adds citations, discounting
+prop-firm/course-seller marketing content per instruction.
+
+**ORB.** The one heavily-cited "academic" ORB result (Zarattini & Aziz,
+SSRN 2023, "Can Day Trading Really Be Profitable?" — a working paper, not a
+peer-reviewed journal article) reports a 33% annualized alpha on QQQ
+2016-2023, but the headline number is driven almost entirely by leverage
+(TQQQ) rather than the raw signal, and an independent stress-test
+replication extending the same logic to 2004-2024 found: (a) the edge was
+already thin within the paper's own window ($0.04/share before costs), (b)
+predictive power "completely flattened" post-2021, and (c) adding realistic
+slippage (2¢ entry / 4¢ exit) and institutional commissions made the
+strategy net-negative. This independently corroborates our own Round 2
+C2_orb result (ES: PF 0.981, p=0.66; MES: PF 1.031, p=0.32, 37.5% years
+positive; MNQ: PF 1.074, p=0.13, 62.5% years positive) — directionally
+flat-to-mildly-positive, never statistically distinguishable from noise,
+consistent with an overfit, decaying, leverage-dependent effect rather than
+a real one.
+
+**VWAP mean-reversion.** No credible peer-reviewed literature treats VWAP
+deviation as a standalone alpha source — the academic VWAP literature
+(execution-tracking papers, e.g. the UTS QFR working paper on optimal VWAP
+strategies) is about *minimizing execution cost relative to VWAP*, not
+about VWAP bands predicting price. The widely-repeated "63%/61% win rate at
+the 2-SD band" claim traces back to unaudited vendor/course-seller blog
+content (no visible methodology, sample, or cost accounting) — exactly the
+kind of source this survey was asked to discount. This absence of credible
+support matches our own Round 2 C3_vwap_reversion result, which is not
+merely insignificant but catastrophic: PF 0.72-0.85 and **0% of years
+positive on all three of ES, MES, and MNQ** — the worst result in this
+entire file.
+
+**Intraday momentum/trend.** This is the most nuanced case: real,
+top-journal evidence exists (Baltussen, Da, Lammers & Martens, *Journal of
+Financial Economics* 2021 — last-30-min return predicted by the rest of
+the day's return, gamma-hedging mechanism, 60+ futures 1974-2020) and is
+broader/more rigorous than Gao et al. (2018), which Round 10 already tested
+and killed. But three things reconcile broad academic significance with
+our own dead verdict: (1) a 2024 Aalto University thesis extending this
+exact literature to a modern futures panel through Oct 2024 concludes
+"most intraday momentum and reversal trading strategies may not be
+feasible after transaction costs, especially in bond and currency
+futures" — net-of-cost infeasibility is the literature's own current
+conclusion, not just our result; (2) a 2026 arXiv paper ("Is Trend Still
+Your Friend? A Microstructural Account of the Demise of Short-Term
+Trend-Following") documents a *structural, mechanistic* post-2015 decay:
+market makers now withdraw liquidity in the face of directional flow on
+thin small-tick books, forcing trend-followers to "walk the book" at
+prohibitive cost — explicitly "no post-2018 recovery," ruling out a
+temporary crowding cycle; (3) a factor-decay model ("Not All Factors Crowd
+Equally," 2025) quantifies momentum-family crowding as *accelerating*
+specifically post-2015, correlated with factor-product AUM growth. All of
+this matches our Round 10 result exactly (ES PF 0.733 p≈1.0; MNQ PF 0.888,
+12.5% years positive) — the aggregate 46-year, 60-instrument academic
+effect is real, but a single retail-cost account trading MNQ/MES today is
+trading into the specific segment (short-horizon, thin-book, small-tick)
+this literature says has already been arbitraged away.
+
+**General decay framework.** McLean & Pontiff (*Journal of Finance*, 2016)
+remains the best-cited general reference for *why* to expect this: across
+97 published return predictors, returns are 26% lower out-of-sample
+(statistical-bias upper bound) and 58% lower post-publication (≈32%
+attributable to publication-informed trading) — anomalies decay, they
+rarely disappear to exactly zero, but the decay is large and real. This is
+the base rate this file's own track record (2 passes out of ~15 registered
+hypotheses) is consistent with.
+
+**Realistic MES/MNQ costs.** Corroborates CLAUDE.md's existing cost
+assumptions rather than changing them: RTH bid-ask on both MES and MNQ is
+consistently reported at 1 tick (equal to their full-size counterparts);
+overnight/Globex widens to 2-3 ticks on the micros specifically (while
+E-mini spreads stay closer to 1 tick), and the pre-RTH/afterhours window
+around mega-cap earnings can widen further still (reported up to 4-6 ticks
+on MNQ). Commission is consistently reported at ~$1.40-1.50 round-trip on
+both micros, matching `oos/candidates.py`'s existing `comm_rt=1.40`
+assumption. One directly relevant, methodologically rigorous outside check:
+a 2026 arXiv systematic-falsification study built specifically on MNQ
+(walk-forward validated, testing OHLCV-based intraday signals including a
+gap-fill/continuation test structurally similar to our own Round 11) uses a
+conservative fixed 2-point (~$4, i.e. 8-tick) round-trip friction assumption
+and concludes tested signals hit a "friction ceiling" — directional content
+exists but is too small to survive realistic costs. This is independent,
+recent, MNQ-specific confirmation of this file's own cost-realism
+conclusions, not a new finding for us to act on.
+
+**How Topstep's trailing MLL + DLL should change sizing and strategy
+choice.** This has a rigorous theoretical basis, not just intuition.
+Grossman & Zhou (*Mathematical Finance*, 1993) solve the growth-optimal
+strategy for an investor under a hard drawdown/trailing-stop constraint via
+HJB/martingale methods: far above the floor, the optimal strategy converges
+to full (unconstrained) Kelly; but *as wealth approaches the stop level, the
+optimal exposure must converge to zero* — this is a rigorous proof of
+"size down as you approach the floor," not a risk-management heuristic.
+Busseti, Ryu & Boyd (*Journal of Investing*, 2016) give a practical convex
+relaxation (risk-constrained Kelly) that provably beats plain
+fractional-Kelly at the same drawdown-risk level. Two concrete implications
+for this bot specifically:
+1. **The trailing MLL (permanent, account-level) behaves like Grossman-Zhou's
+   stop level** — `topstep_risk.giveback_ok()`'s equity-peak give-back
+   halt is already structurally the right shape (shrink toward zero as
+   equity nears the floor), not an ad hoc add-on; it is filling exactly the
+   gap Grossman-Zhou identify (Topstep's own MLL locks at the starting
+   balance and offers zero protection for profit accumulated above it).
+2. **The Daily Loss Limit is a SEPARATE, tighter, resetting ruin barrier**,
+   not a smaller version of the same constraint — it is effectively a fresh
+   one-day gambler's-ruin problem every session, independent of how much
+   MLL headroom exists. This structurally favors strategies with frequent,
+   small, well-bounded-variance outcomes over few-large-trade strategies
+   (classic trend-following, wide-stop breakouts): a single adverse
+   trending day can consume an entire day's DLL budget in one trade,
+   while a strategy generating many small, independent bets is far less
+   likely to blow the daily budget in any single session even at the same
+   aggregate expectancy. This is consistent with (and gives a theoretical
+   reason for) `topstep_per_trade_risk_dll_frac` already capping per-trade
+   risk at ≤50% of the DLL in `config.py`, and is a reason to weight
+   research effort toward higher-frequency, smaller-edge-per-trade
+   mechanisms (event-driven, mean-reversion-of-a-bounded-quantity) over
+   large-swing trend/breakout ideas specifically **because of the account
+   structure**, independent of whether trend-following would otherwise be
+   profitable pre-cost.
+
+**Bottom line:** none of ORB, VWAP mean-reversion, or intraday trend/momentum
+survive independent literature scrutiny for a realistic-cost MES/MNQ
+account any better than they survived this file's own Round 2/10 tests —
+external evidence cross-validates, rather than reopens, those dead
+verdicts. No new hypothesis is registered from this survey; it exists so
+none of these three families gets re-proposed later without this context.
