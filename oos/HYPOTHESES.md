@@ -259,3 +259,144 @@ on Round 12's CL/YM leg — expected information value is poor. The overnight-
 drift family should be considered EXHAUSTED for Topstep-compliant trading;
 further capital/time should go to a genuinely different mechanism (see
 CURRENT PRIORITIES in CLAUDE.md) rather than more instruments on this one.
+
+---
+
+# Round 13 — FOMC announcement reversal (registered 2026-07-06, before pull)
+
+Mechanism: Baglioni & Ribeiro, "The FOMC Announcement Reversal" (2022) —
+using intraday ES prices across 180 scheduled FOMC announcements
+(Oct 1997 – Jan 2020), pre-FOMC drift (Lucca & Moench 2015 — already dead in
+our own In-sample/CLAUDE.md history) has been replaced post-2011 by its
+OPPOSITE: a reversal of the trailing 24h pre-announcement return, entered at
+13:50 ET (10 min before the 14:00 statement) and closed at the RTH close same
+day. Reported Sharpe > 2.5x the old drift strategy, and INCREASING (not
+decaying) in the 2011-2020 subperiod — the opposite decay direction from
+every other strategy in this file, consistent with a genuine
+uncertainty-resolution risk premium rather than a slow-money inefficiency.
+Distinguishing feature: mechanical (fades the pre-existing trend), does not
+require predicting the FOMC outcome, so it does not inherit the
+regime-fragility that killed GEX-sign conditioning (Round 6) or that makes
+raw NFP-direction bets regime-fragile (2022 hiking cycle inverted the
+"good news" sign). Naturally Topstep-legal by construction — entry 13:50 ET,
+exit ~16:00 ET, entirely inside the RTH day session, nowhere near the
+16:10–18:00 flatten window; no compliant-variant redesign needed (unlike
+every entry in the overnight-drift family).
+
+**Frozen spec:** at 13:50 ET on each scheduled FOMC decision day (dates from
+the Federal Reserve's official historical meeting calendars,
+federalreserve.gov/monetarypolicy/fomchistorical{YEAR}.htm — verified
+2010, 2015, 2021-2027 directly during registration; full 2010-2026 table to
+be completed via the same source or FRED's release-calendar API before any
+data pull, not from memory), compute r24 = close(13:50 ET today) −
+close(13:50 ET prior session). If r24 > 0 → SELL ES at 13:50 close. If
+r24 < 0 → BUY. Flat if r24 == 0. Exit at the RTH 16:00 ET close same day (no
+overnight hold). Costs: $4.00 RT (ES-scale) + 1-tick slippage both sides,
+same convention as every other round.
+
+**Pooling (frozen, not chosen post-hoc):** given only ~8 events/year
+(~128-140 over 2010-2026), ES alone will not reach this repo's usual
+n≥200-500 bar. Pool ES + NQ + MES + MNQ on the same event-days, each trade's
+net USD divided by its point value (Round 7's normalization method), to
+raise n toward pooled adequacy. This pooling rule is written down now,
+before any data is touched, specifically so it cannot be adopted or dropped
+after seeing which choice looks better.
+
+**PASS bar:** pooled n ≥ 400, PF ≥ 1.10, one-sided p < 0.05 (t AND 20k
+bootstrap), ≥ 60% of calendar years with net-positive pooled P&L.
+
+**Before running:** (1) verify Baglioni & Ribeiro's citation record (SSRN/
+journal version, any published failure-to-replicate) — a single working
+paper is not the same evidentiary weight as a well-cited, replicated result;
+(2) complete and sanity-check the full FOMC date table against the
+official Fed calendar year-by-year (no fabricated/remembered dates); (3) NFP
+and CPI reversal claims found alongside this (vendor-blog sourced, not
+peer-reviewed) are explicitly EXCLUDED from this round — weaker evidence
+should not ride along with a stronger hypothesis in the same test.
+
+**Implementation status (2026-07-06):** FOMC date table completed and
+verified directly against federalreserve.gov's year-by-year historical
+archive (131 scheduled announcements, 2010 through the last completed 2026
+meeting; exclusions documented in `oos/round13_fomc_reversal.py`'s module
+docstring). Runner written: `oos/round13_fomc_reversal.py`. Not yet
+executed — needs `oos/data/{ES,NQ,MES,MNQ}_5min.csv` locally.
+
+**Known data-coverage caveat (disclosed before running, not after):** per
+`CLAUDE.md`'s own infrastructure map, NQ history stops at 2019 and MES/MNQ
+start at 2019 — so the pooled sample will realistically land near ES's full
+131 + NQ's ~80 (2010-2019) + MES's ~51 + MNQ's ~51 (2019-2026) ≈ 310-330,
+short of the n≥400 bar registered above, unless additional NQ 2019-2026
+history is fetched. This is flagged now, before any P&L is computed, as an
+implementation note (not a bar change) — if the pooled n comes in under 400
+when run, treat that shortfall honestly (report it, do not lower the bar
+post-hoc to make an under-powered result look sufficient).
+
+---
+
+# Round 14 — UW market-tide daily options positioning → next-session ES/NQ
+(registered 2026-07-06, diagnostic-first, before any P&L computed)
+
+Mechanism: Unusual Whales' `/api/market/market-tide` endpoint reports
+market-wide (not single-name) net call/put options premium flow at intraday
+granularity and accepts a historical `date` parameter. This is a DIFFERENT
+data source and mechanism from Round 9 (which used the single-name SPY
+flow-alerts endpoint and its `day_flow_score` formula, and FAILED to even
+reach n=100 before the sample ran out) — so a fresh test here is a new
+hypothesis, not a rescue of Round 9. Hypothesis: a market-wide, one-sided
+options-premium day is followed by continued directional pressure in
+SPX/NDX-linked index futures (ES/NQ) the next RTH session, via the dealer
+hedging-flow channel (dealers who sold the skewed side must hedge, pushing
+price further in that direction until the position unwinds).
+
+**Known constraint, stated up front:** unlike Databento futures data (16
+years, cheap), UW's usable historical depth for `market-tide` under our
+current API plan is UNKNOWN and must be measured empirically before any
+PASS bar is chosen — Round 9's SPY flow-alerts pull ran out after only ~55
+usable days, which may reflect that endpoint specifically, the account's
+subscription tier, or both. Full historical option-trade data is available
+for separate purchase from UW at $250/month (10% off >1yr) if a deeper
+backfill is wanted — a real cost decision, not something to assume.
+
+**Step 1 — diagnostic (data availability, not a result; run first, always):**
+probe `market-tide?date=D` at regular intervals going back from today and
+record the first date at which the response is empty/404/quota-blocked.
+This determines which PASS-bar tier below applies. This step must run
+before any P&L is computed and its output must be recorded regardless of
+what it shows (a short history is itself a usable, honestly-reported
+finding, not a reason to keep pulling until it looks better).
+
+**Step 2 — frozen signal (decided from data STRUCTURE, not outcomes):**
+day_score(D) = last available intraday tick's (net_call_premium −
+net_put_premium) for trading day D, i.e. the end-of-day reading. [If the
+diagnostic pull shows this field is a per-tick/per-interval value rather
+than a running cumulative — check via the raw shape of a few sample days
+before freezing — switch to day_score(D) = sum of (net_call_premium −
+net_put_premium) across all of day D's ticks instead. This choice must be
+made by inspecting the data's shape only, written down, and never revisited
+after computing a single dollar of P&L.]
+
+**Step 3 — frozen trade rule (Topstep-legal by construction, no overnight
+hold — the overnight-drift family's failure mode does not apply here):**
+threshold ε = the trailing-60-trading-day rolling tercile split of
+day_score (never a full-sample/look-ahead split). If day_score(D) is in the
+top tercile → BUY ES at the D+1 09:30 ET open, exit at the D+1 16:00 ET
+close. Bottom tercile → SELL. Middle tercile → no trade. Costs: $4.00 RT +
+1-tick slippage both sides.
+
+**PASS bar (tiered on Step 1's outcome — written now, before Step 1 runs):**
+- ≥ 1 year of usable daily history → n ≥ 200 (pooled ES+NQ+MES+MNQ,
+  point-normalized per Round 7's method), PF ≥ 1.10, one-sided p < 0.05
+  (t AND bootstrap), ≥ 60% of available years/half-years net-positive.
+- 3-12 months → exploratory only; report descriptive stats but do NOT treat
+  any PASS as actionable. Only legitimate next step is forward/live logging
+  (extend `uw_logger.py`'s existing CSV+analyzer to a next-session horizon,
+  e.g. `python uw_logger.py path.csv 86400`) until a real OOS sample exists.
+- < 3 months → stop; rely on forward logging only, same conclusion Round 9
+  already reached for the single-name endpoint.
+
+**Explicitly not in scope for this round:** GEX/dealer-gamma wall levels
+(that stack, `options.py`, lives in the sister Trading-Bot repo and is not
+part of this fork); the separate UW intraday GEX/gamma-flip capture
+(`com.jarvis.uwcapture`, started 2026-07-04 in Trading-Bot, not reachable
+from this repo) — CLAUDE.md already flags that as testable only after
+~3 months of accumulation, independent of this round.
