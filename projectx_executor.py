@@ -49,6 +49,7 @@ from typing import Any
 import httpx
 
 from broker import Fill
+from exec_telemetry import TELEM, signed_slippage
 from config import CONFIG
 from futures_symbols import spec_for
 
@@ -395,12 +396,22 @@ class ProjectXBroker:
             "size": n_contracts,
             "customTag": f"jarvis_{symbol}_{uuid.uuid4().hex[:8]}",
         }
-        d = self._post("/api/Order/place", body, mutating=True)
+        t0 = time.monotonic()
+        try:
+            d = self._post("/api/Order/place", body, mutating=True)
+        except OrderStateUnknown:
+            TELEM.record("order_ambiguous", symbol=symbol, side=side, qty=n_contracts)
+            raise
+        latency_ms = round((time.monotonic() - t0) * 1000, 1)
         if not d.get("success"):
+            TELEM.record("order_rejected", symbol=symbol, side=side, qty=n_contracts,
+                         error_code=d.get("errorCode"), error_message=d.get("errorMessage"))
             raise RuntimeError(
                 f"[ProjectX] order rejected: errorCode={d.get('errorCode')} {d.get('errorMessage')}"
             )
         order_id = str(d.get("orderId", ""))
+        TELEM.record("order_submitted", symbol=symbol, side=side, qty=n_contracts,
+                     ref_price=ref_price, latency_ms=latency_ms)
         # Market orders fill near-instantly. The place response carries no avg
         # fill price, so poll /api/Trade/search briefly for the REAL fill —
         # booking at ref_price hides slippage and drifts the internal ledger
@@ -408,15 +419,28 @@ class ProjectXBroker:
         # "filled" either way: with "accepted" the Position is created
         # filled=False and exit management never runs.
         price = ref_price
+        confirm_ms = None
+        t1 = time.monotonic()
         for _ in range(3):
             time.sleep(0.4)
             avg = self._avg_fill_price(order_id)
             if avg is not None:
+                confirm_ms = round((time.monotonic() - t1) * 1000, 1)
                 if abs(avg - ref_price) > 1e-9:
                     log.info(f"[ProjectX] {symbol} actual fill {avg:.4f} vs ref "
                              f"{ref_price:.4f} (slippage booked)")
                 price = avg
                 break
+        spec = spec_for(symbol)
+        slip_ticks, slip_usd = (None, None)
+        if spec and confirm_ms is not None:
+            slip_ticks, slip_usd = signed_slippage(side, ref_price, price,
+                                                   spec.tick_size, spec.tick_value)
+            slip_usd = round(slip_usd * n_contracts, 2)
+        TELEM.record("order_filled", symbol=symbol, side=side, qty=n_contracts,
+                     ref_price=ref_price, fill_price=price,
+                     slippage_ticks=slip_ticks, slippage_usd=slip_usd,
+                     confirm_ms=confirm_ms)
         return Fill(
             symbol=symbol, qty=float(n_contracts), side=side, price=price,
             order_id=order_id, status="filled",
@@ -497,17 +521,23 @@ class ProjectXBroker:
             log.error(f"[ProjectX] protective STOP for {symbol} in UNKNOWN state "
                       f"({exc}) — check working orders on the account and cancel "
                       f"any duplicate jarvis_stop_{symbol}_* order manually")
+            TELEM.record("stop_reject", symbol=symbol, reason="ambiguous")
             return ""
         except Exception as exc:  # noqa: BLE001
             log.error(f"[ProjectX] protective STOP submit failed for {symbol}: {exc}")
+            TELEM.record("stop_reject", symbol=symbol, reason=str(exc))
             return ""
         if not d.get("success"):
             log.error(f"[ProjectX] protective STOP rejected: errorCode="
                       f"{d.get('errorCode')} {d.get('errorMessage')}")
+            TELEM.record("stop_reject", symbol=symbol,
+                         reason=f"errorCode={d.get('errorCode')}")
             return ""
         oid = str(d.get("orderId", ""))
         log.info(f"[ProjectX] protective STOP resting | {side} {n}x {symbol} "
                  f"@ {stop_price:.2f} (order {oid})")
+        TELEM.record("stop_placed", symbol=symbol, side=side, qty=n,
+                     stop_price=stop_px, order_id=oid)
         return oid
 
     def get_fill(self, order_id: str) -> tuple[str, float | None]:
@@ -567,9 +597,12 @@ class ProjectXBroker:
             d = self._post("/api/Order/cancel", {
                 "accountId": self.account_id, "orderId": int(order_id),
             })
-            return bool(d.get("success"))
+            ok = bool(d.get("success"))
+            TELEM.record("order_cancelled", order_id=order_id, ok=ok)
+            return ok
         except Exception as exc:  # noqa: BLE001
             log.warning(f"[ProjectX] cancel_order({order_id}) failed: {exc}")
+            TELEM.record("order_cancelled", order_id=order_id, ok=False)
             return False
 
     def get_positions(self) -> list[dict]:
