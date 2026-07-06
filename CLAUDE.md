@@ -76,3 +76,6 @@ FAIL → the idea is dead; no parameter sweeps to rescue it.
 Any new idea from any source: run it through the harness first. A verdict
 costs an hour and a few dollars of data; a live bleed costs weeks and real
 drawdown.
+
+# REVIEW ROLE
+When reviewing or improving this system, follow @.claude/review-role.md (Principal Quant Engineer role, priorities, and review output format).

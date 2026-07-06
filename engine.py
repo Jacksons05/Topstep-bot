@@ -304,7 +304,12 @@ class Engine:
                 self._equity_blocked = False
                 # Ratchet the trailing-MLL peak off the aggressive live estimate;
                 # check the breach off the conservative equity.
+                prev_peak = self._topstep.peak_equity
                 self._topstep.update_equity(self._peak_equity_est)
+                if self._topstep.peak_equity > prev_peak:
+                    # Persist every new high: a restart must never restore a
+                    # lower peak (= looser MLL floor) than Topstep has locked.
+                    self._topstep.save_day_state(str(today), self._topstep_day_halt)
                 breached, why = self._topstep.risk_breach(equity, self.state, unrealized)
                 if breached and not self._topstep_day_halt:
                     notify(f"🛑 TOPSTEP BREACH — {why} | flattening all & halting new entries")
@@ -1060,6 +1065,17 @@ class Engine:
         notify(f"[Topstep] flatten ({reason}) — {len(open_futures)} position(s) "
                f"via ProjectX")
         try:
+            # Cancel resting protective stops BEFORE closing: a stop left
+            # working after the flatten would fill on the next trade-through
+            # and open a brand-new naked position on a halted account.
+            for pos in open_futures:
+                pid = getattr(pos, "protective_order_id", "")
+                if pid:
+                    try:
+                        self.executor.broker.cancel_order(pid)
+                        pos.protective_order_id = ""
+                    except Exception as e:  # noqa: BLE001
+                        notify(f"  ! stop cancel failed {pos.symbol} ({pid}): {e}")
             self.executor.broker.flatten_all()
             for pos in open_futures:
                 mark = self._mark(pos.symbol)

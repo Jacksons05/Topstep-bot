@@ -44,6 +44,8 @@ MAX_SIZE_HAIRCUT  = 0.50   # minimum size multiplier from learning (never below 
 MIN_TRADES_REGIME = 3      # minimum trades before a regime weight is adjusted
 MIN_TRADES_HOUR   = 2      # minimum trades in an hour before blocking it
 CONSEC_LOSS_BLOCK = 3      # consecutive losses to trigger symbol cooldown
+CRAMER_FLIP_MIN_TRADES = 30  # minimum closed trades in a day before a flip can qualify
+CRAMER_FLIP_MIN_DAYS   = 3   # consecutive qualifying days before the flip arms
 
 
 @dataclass
@@ -75,7 +77,17 @@ class DayAdapt:
     hour_block: list = field(default_factory=list)  # ["09"]  → skip 9:xx ET
     symbol_cooldown: list = field(default_factory=list)
     cramer_flip_enabled: bool = False
+    cramer_flip_streak: int = 0   # consecutive sessions the flip condition qualified
     reasoning: list = field(default_factory=list)   # human-readable explanation lines
+
+
+def _prior_flip_streak() -> int:
+    """Streak from the previous saved adaptation. Any non-qualifying session
+    writes streak=0, so a gap or a good day naturally resets the count."""
+    try:
+        return int(json.loads(ADAPT_PATH.read_text()).get("cramer_flip_streak", 0))
+    except Exception:  # noqa: BLE001 — missing/corrupt file = no streak
+        return 0
 
 
 # ── SQLite reader (JARVIS) ────────────────────────────────────────────────
@@ -308,14 +320,30 @@ def _build_adapt(stats: DayStats, prev_adapt: DayAdapt | None, cfg) -> DayAdapt:
             reasons.append(f"{sym}: {streak} consecutive losses today → 1-day cooldown")
 
     # ── 6. Cramer flip ───────────────────────────────────────────────────
-    # Shadow book beat real by > $500 AND real was negative → consider enabling flip
+    # Inverting every signal is the most drastic adaptation this module can
+    # make, so it gets the strictest bar: full threshold (not half), a real
+    # sample (n ≥ CRAMER_FLIP_MIN_TRADES), and the same qualifying result on
+    # CRAMER_FLIP_MIN_DAYS consecutive sessions before it arms. One bad
+    # low-n day mirroring a genuine edge would convert it into its anti-edge.
     base_flip_thresh = getattr(cfg, "cramer_flip_threshold_usd", 1000.0)
-    if cramer_edge > base_flip_thresh * 0.5 and stats.total_pnl < 0:
-        adapt.cramer_flip_enabled = True
-        reasons.append(f"shadow beat real by ${cramer_edge:.0f} with negative day "
-                       f"→ CRAMER_FLIP_ENABLED tomorrow (mirror signals)")
+    qualifies = (cramer_edge > base_flip_thresh
+                 and stats.total_pnl < 0
+                 and stats.n_trades >= CRAMER_FLIP_MIN_TRADES)
+    if qualifies:
+        streak = _prior_flip_streak() + 1
+        adapt.cramer_flip_streak = streak
+        if streak >= CRAMER_FLIP_MIN_DAYS:
+            adapt.cramer_flip_enabled = True
+            reasons.append(f"shadow beat real by ${cramer_edge:.0f} on "
+                           f"{stats.n_trades} trades, {streak} qualifying days in a row "
+                           f"→ CRAMER_FLIP_ENABLED tomorrow (mirror signals)")
+        else:
+            adapt.cramer_flip_enabled = False
+            reasons.append(f"cramer flip qualifying day {streak}/{CRAMER_FLIP_MIN_DAYS} "
+                           f"(edge=${cramer_edge:.0f}, n={stats.n_trades}) — not armed yet")
     else:
         adapt.cramer_flip_enabled = False
+        adapt.cramer_flip_streak = 0
 
     adapt.reasoning = reasons
     return adapt
@@ -416,10 +444,16 @@ def apply_to_config(cfg, adapt: DayAdapt | None, notify_fn=None) -> None:
     # 1. Confidence threshold
     if adapt.confidence_threshold_adj != 0:
         old = cfg.confidence_threshold
-        new_thresh = round(max(0.55, min(0.90, old + adapt.confidence_threshold_adj)), 3)
-        _setcfg("confidence_threshold", new_thresh)
-        note(f"conf_threshold {old:.3f} → {new_thresh:.3f} "
-             f"(adj={adapt.confidence_threshold_adj:+.3f})")
+        if old >= 1.0:
+            # A threshold >= 1.0 is an operator entry-halt (confidence can never
+            # reach it). Clamping it into the tradeable range would silently
+            # re-enable entries, so the learner must never touch it.
+            note(f"conf_threshold {old:.3f} >= 1.0 is an operator halt — adjustment skipped")
+        else:
+            new_thresh = round(max(0.55, min(0.90, old + adapt.confidence_threshold_adj)), 3)
+            _setcfg("confidence_threshold", new_thresh)
+            note(f"conf_threshold {old:.3f} → {new_thresh:.3f} "
+                 f"(adj={adapt.confidence_threshold_adj:+.3f})")
 
     # 2. Side multipliers — stored on cfg for the engine to check at sizing time
     if adapt.side_size:
