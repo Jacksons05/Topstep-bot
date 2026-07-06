@@ -444,3 +444,142 @@ produce, which per CLAUDE.md is not usable until ~3 months of accumulation
 (~October 2026). Naively re-testing Round 6's mechanism now with a
 different label would likely just fail the same way. Revisit this
 specifically once that capture matures — do not force it sooner.
+
+---
+
+## External literature cross-validation (2026-07-06): ORB, VWAP mean-reversion,
+intraday momentum/trend — independent confirmation of this file's own
+Round 2/10 dead verdicts, plus the sizing-theory basis for the Topstep
+risk layer
+
+Requested: a survey of credible (non-marketing) published evidence for
+ORB, VWAP/mean-reversion, and trend/momentum on MES/MNQ, post-2015 decay,
+realistic micro costs, and how Topstep's trailing MLL + DLL should change
+sizing/strategy choice. No new backtest — this cross-checks already-dead
+internal verdicts against outside evidence and adds citations, discounting
+prop-firm/course-seller marketing content per instruction.
+
+**ORB.** The one heavily-cited "academic" ORB result (Zarattini & Aziz,
+SSRN 2023, "Can Day Trading Really Be Profitable?" — a working paper, not a
+peer-reviewed journal article) reports a 33% annualized alpha on QQQ
+2016-2023, but the headline number is driven almost entirely by leverage
+(TQQQ) rather than the raw signal, and an independent stress-test
+replication extending the same logic to 2004-2024 found: (a) the edge was
+already thin within the paper's own window ($0.04/share before costs), (b)
+predictive power "completely flattened" post-2021, and (c) adding realistic
+slippage (2¢ entry / 4¢ exit) and institutional commissions made the
+strategy net-negative. This independently corroborates our own Round 2
+C2_orb result (ES: PF 0.981, p=0.66; MES: PF 1.031, p=0.32, 37.5% years
+positive; MNQ: PF 1.074, p=0.13, 62.5% years positive) — directionally
+flat-to-mildly-positive, never statistically distinguishable from noise,
+consistent with an overfit, decaying, leverage-dependent effect rather than
+a real one.
+
+**VWAP mean-reversion.** No credible peer-reviewed literature treats VWAP
+deviation as a standalone alpha source — the academic VWAP literature
+(execution-tracking papers, e.g. the UTS QFR working paper on optimal VWAP
+strategies) is about *minimizing execution cost relative to VWAP*, not
+about VWAP bands predicting price. The widely-repeated "63%/61% win rate at
+the 2-SD band" claim traces back to unaudited vendor/course-seller blog
+content (no visible methodology, sample, or cost accounting) — exactly the
+kind of source this survey was asked to discount. This absence of credible
+support matches our own Round 2 C3_vwap_reversion result, which is not
+merely insignificant but catastrophic: PF 0.72-0.85 and **0% of years
+positive on all three of ES, MES, and MNQ** — the worst result in this
+entire file.
+
+**Intraday momentum/trend.** This is the most nuanced case: real,
+top-journal evidence exists (Baltussen, Da, Lammers & Martens, *Journal of
+Financial Economics* 2021 — last-30-min return predicted by the rest of
+the day's return, gamma-hedging mechanism, 60+ futures 1974-2020) and is
+broader/more rigorous than Gao et al. (2018), which Round 10 already tested
+and killed. But three things reconcile broad academic significance with
+our own dead verdict: (1) a 2024 Aalto University thesis extending this
+exact literature to a modern futures panel through Oct 2024 concludes
+"most intraday momentum and reversal trading strategies may not be
+feasible after transaction costs, especially in bond and currency
+futures" — net-of-cost infeasibility is the literature's own current
+conclusion, not just our result; (2) a 2026 arXiv paper ("Is Trend Still
+Your Friend? A Microstructural Account of the Demise of Short-Term
+Trend-Following") documents a *structural, mechanistic* post-2015 decay:
+market makers now withdraw liquidity in the face of directional flow on
+thin small-tick books, forcing trend-followers to "walk the book" at
+prohibitive cost — explicitly "no post-2018 recovery," ruling out a
+temporary crowding cycle; (3) a factor-decay model ("Not All Factors Crowd
+Equally," 2025) quantifies momentum-family crowding as *accelerating*
+specifically post-2015, correlated with factor-product AUM growth. All of
+this matches our Round 10 result exactly (ES PF 0.733 p≈1.0; MNQ PF 0.888,
+12.5% years positive) — the aggregate 46-year, 60-instrument academic
+effect is real, but a single retail-cost account trading MNQ/MES today is
+trading into the specific segment (short-horizon, thin-book, small-tick)
+this literature says has already been arbitraged away.
+
+**General decay framework.** McLean & Pontiff (*Journal of Finance*, 2016)
+remains the best-cited general reference for *why* to expect this: across
+97 published return predictors, returns are 26% lower out-of-sample
+(statistical-bias upper bound) and 58% lower post-publication (≈32%
+attributable to publication-informed trading) — anomalies decay, they
+rarely disappear to exactly zero, but the decay is large and real. This is
+the base rate this file's own track record (2 passes out of ~15 registered
+hypotheses) is consistent with.
+
+**Realistic MES/MNQ costs.** Corroborates CLAUDE.md's existing cost
+assumptions rather than changing them: RTH bid-ask on both MES and MNQ is
+consistently reported at 1 tick (equal to their full-size counterparts);
+overnight/Globex widens to 2-3 ticks on the micros specifically (while
+E-mini spreads stay closer to 1 tick), and the pre-RTH/afterhours window
+around mega-cap earnings can widen further still (reported up to 4-6 ticks
+on MNQ). Commission is consistently reported at ~$1.40-1.50 round-trip on
+both micros, matching `oos/candidates.py`'s existing `comm_rt=1.40`
+assumption. One directly relevant, methodologically rigorous outside check:
+a 2026 arXiv systematic-falsification study built specifically on MNQ
+(walk-forward validated, testing OHLCV-based intraday signals including a
+gap-fill/continuation test structurally similar to our own Round 11) uses a
+conservative fixed 2-point (~$4, i.e. 8-tick) round-trip friction assumption
+and concludes tested signals hit a "friction ceiling" — directional content
+exists but is too small to survive realistic costs. This is independent,
+recent, MNQ-specific confirmation of this file's own cost-realism
+conclusions, not a new finding for us to act on.
+
+**How Topstep's trailing MLL + DLL should change sizing and strategy
+choice.** This has a rigorous theoretical basis, not just intuition.
+Grossman & Zhou (*Mathematical Finance*, 1993) solve the growth-optimal
+strategy for an investor under a hard drawdown/trailing-stop constraint via
+HJB/martingale methods: far above the floor, the optimal strategy converges
+to full (unconstrained) Kelly; but *as wealth approaches the stop level, the
+optimal exposure must converge to zero* — this is a rigorous proof of
+"size down as you approach the floor," not a risk-management heuristic.
+Busseti, Ryu & Boyd (*Journal of Investing*, 2016) give a practical convex
+relaxation (risk-constrained Kelly) that provably beats plain
+fractional-Kelly at the same drawdown-risk level. Two concrete implications
+for this bot specifically:
+1. **The trailing MLL (permanent, account-level) behaves like Grossman-Zhou's
+   stop level** — `topstep_risk.giveback_ok()`'s equity-peak give-back
+   halt is already structurally the right shape (shrink toward zero as
+   equity nears the floor), not an ad hoc add-on; it is filling exactly the
+   gap Grossman-Zhou identify (Topstep's own MLL locks at the starting
+   balance and offers zero protection for profit accumulated above it).
+2. **The Daily Loss Limit is a SEPARATE, tighter, resetting ruin barrier**,
+   not a smaller version of the same constraint — it is effectively a fresh
+   one-day gambler's-ruin problem every session, independent of how much
+   MLL headroom exists. This structurally favors strategies with frequent,
+   small, well-bounded-variance outcomes over few-large-trade strategies
+   (classic trend-following, wide-stop breakouts): a single adverse
+   trending day can consume an entire day's DLL budget in one trade,
+   while a strategy generating many small, independent bets is far less
+   likely to blow the daily budget in any single session even at the same
+   aggregate expectancy. This is consistent with (and gives a theoretical
+   reason for) `topstep_per_trade_risk_dll_frac` already capping per-trade
+   risk at ≤50% of the DLL in `config.py`, and is a reason to weight
+   research effort toward higher-frequency, smaller-edge-per-trade
+   mechanisms (event-driven, mean-reversion-of-a-bounded-quantity) over
+   large-swing trend/breakout ideas specifically **because of the account
+   structure**, independent of whether trend-following would otherwise be
+   profitable pre-cost.
+
+**Bottom line:** none of ORB, VWAP mean-reversion, or intraday trend/momentum
+survive independent literature scrutiny for a realistic-cost MES/MNQ
+account any better than they survived this file's own Round 2/10 tests —
+external evidence cross-validates, rather than reopens, those dead
+verdicts. No new hypothesis is registered from this survey; it exists so
+none of these three families gets re-proposed later without this context.
