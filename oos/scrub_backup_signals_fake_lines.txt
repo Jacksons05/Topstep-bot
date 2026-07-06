@@ -1,0 +1,7 @@
+[12:44:28 AM ET] CLOSE stop-loss ES @ 4990.00 pnl=$-500.00
+[10:49:08 AM ET] CLOSE stop-loss ES @ 4990.00 pnl=$-500.00
+[10:57:42 AM ET] CLOSE stop-loss ES @ 4990.00 pnl=$-500.00
+[11:04:36 AM ET] CLOSE stop-loss ES @ 4990.00 pnl=$-500.00
+[11:04:44 AM ET] CLOSE stop-loss ES @ 4990.00 pnl=$-500.00
+[11:05:14 AM ET] CLOSE stop-loss ES @ 4990.00 pnl=$-500.00
+[11:07:47 AM ET] CLOSE stop-loss ES @ 4990.00 pnl=$-500.00

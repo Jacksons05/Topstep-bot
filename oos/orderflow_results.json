@@ -1,0 +1,71 @@
+{
+ "verdict": "FAIL",
+ "cells": [
+  {
+   "cell": "ALL_judged",
+   "n": 3586,
+   "win_pct": 41.9,
+   "total_usd": -63219.0,
+   "avg_usd": -17.629,
+   "pf": 0.742,
+   "t": -5.624,
+   "p_one_sided": 1.0,
+   "p_bootstrap": 1.0
+  },
+  {
+   "cell": "ALL_slip1_sensitivity",
+   "n": 3586,
+   "win_pct": 33.3,
+   "total_usd": -152869.0,
+   "avg_usd": -42.629,
+   "pf": 0.491,
+   "t": -13.599,
+   "p_one_sided": 1.0,
+   "p_bootstrap": 1.0
+  },
+  {
+   "cell": "RTH",
+   "n": 1031,
+   "win_pct": 44.6,
+   "total_usd": -30386.5,
+   "avg_usd": -29.473,
+   "pf": 0.705,
+   "t": -3.9,
+   "p_one_sided": 0.99995,
+   "p_bootstrap": 1.0
+  },
+  {
+   "cell": "overnight",
+   "n": 2555,
+   "win_pct": 40.9,
+   "total_usd": -32832.5,
+   "avg_usd": -12.85,
+   "pf": 0.769,
+   "t": -4.057,
+   "p_one_sided": 0.99998,
+   "p_bootstrap": 0.9999
+  },
+  {
+   "cell": "LONG_only",
+   "n": 1736,
+   "win_pct": 42.1,
+   "total_usd": -32656.5,
+   "avg_usd": -18.811,
+   "pf": 0.713,
+   "t": -4.701,
+   "p_one_sided": 1.0,
+   "p_bootstrap": 1.0
+  },
+  {
+   "cell": "SHORT_only",
+   "n": 1850,
+   "win_pct": 41.8,
+   "total_usd": -30562.5,
+   "avg_usd": -16.52,
+   "pf": 0.768,
+   "t": -3.457,
+   "p_one_sided": 0.99973,
+   "p_bootstrap": 0.9999
+  }
+ ]
+}

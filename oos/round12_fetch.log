@@ -1,0 +1,4 @@
+<stdin>:7: BentoWarning: The streaming request contained one or more days which have reduced quality: 2017-11-13 (degraded), 2018-10-21 (degraded), 2019-01-15 (degraded)... See: https://databento.com/docs/api-reference-historical/metadata/metadata-get-dataset-condition
+RTY: 620902 5-min bars 2017-07-10 00:05:00+00:00 .. 2026-06-05 20:55:00+00:00
+<stdin>:7: BentoWarning: The streaming request contained one or more days which have reduced quality: 2014-06-11 (degraded), 2014-06-12 (degraded), 2014-06-13 (degraded)... See: https://databento.com/docs/api-reference-historical/metadata/metadata-get-dataset-condition
+GC: 1128152 5-min bars 2010-06-07 00:00:00+00:00 .. 2026-06-05 20:55:00+00:00

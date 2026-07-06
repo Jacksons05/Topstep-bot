@@ -1,0 +1,12 @@
+flow scores pulled: 73 days (2026-02-23 .. 2026-06-05)
+{
+ "n": 55,
+ "verdict": "FAIL",
+ "total_usd": 9955.0,
+ "avg_usd": 181.0,
+ "pf": 1.165,
+ "t": 0.44,
+ "p_one_sided": 0.32979,
+ "p_bootstrap": 0.32895,
+ "win_pct": 52.7
+}

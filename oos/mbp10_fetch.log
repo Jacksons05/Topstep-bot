@@ -1,0 +1,3 @@
+<stdin>:6: BentoWarning: The size of this streaming request is greater than 5 GB. It is recommended to submit a batch download request for large volumes of data, or break this request into smaller requests. 
+<stdin>:6: BentoWarning: The streaming request contained one or more days which have reduced quality: 2026-05-09 (missing), 2026-05-24 (degraded). See: https://databento.com/docs/api-reference-historical/metadata/metadata-get-dataset-condition
+saved
