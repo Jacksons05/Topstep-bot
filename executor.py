@@ -221,7 +221,22 @@ class Executor:
 
         Cancels the resting protective stop first (it will be re-placed at the
         new BE stop price by the caller), then submits the reduction order.
-        Returns True on success. Caller is responsible for updating pos.qty and pos.stop.
+        Returns True on success, False on an ORDINARY failure (safe to retry
+        next cycle — nothing reached the exchange). Caller is responsible for
+        updating pos.qty and pos.stop on True.
+
+        Raises whatever exception class the broker used to signal an AMBIGUOUS
+        transport failure (ProjectX's OrderStateUnknown — detected here by
+        class name so this broker-agnostic module doesn't need to import a
+        ProjectX-specific type) rather than swallowing it into a plain False.
+        The reduction order may have actually reached the exchange despite the
+        transport error, so silently returning False here would let the caller
+        treat this exactly like "safe to retry" and blindly resubmit next
+        cycle — risking a duplicate reduction or, worse, flipping the
+        remaining position to the opposite side if the ambiguous order did
+        fill. The caller must hold this position until reconciliation
+        resolves the broker's true state before attempting another exit.
+
         Shadow positions are bookkeeping-only — no broker order is placed.
         """
         if pos.shadow or close_qty <= 0:
@@ -239,6 +254,11 @@ class Executor:
             self.broker.submit(pos.symbol, close_qty, _flip(pos.side), exit_price)
             return True
         except Exception as exc:  # noqa: BLE001
+            if exc.__class__.__name__ == "OrderStateUnknown":
+                log.error("[exec] %s partial close qty=%d order state UNKNOWN after "
+                          "transport error — NOT treating as an ordinary failure; "
+                          "caller must hold this symbol for reconciliation", pos.symbol, close_qty)
+                raise
             log.error("[exec] partial close %s qty=%d failed: %s", pos.symbol, close_qty, exc)
             return False
 

@@ -31,6 +31,9 @@ topstep_day_state.json
 day_adapt.json
 overnight-drift.log
 
+# Singleton-lock PID file (bot-written; never track)
+ENGINE.lock
+
 # Research data (large; refetch via oos/fetch_databento.py)
 oos/data/
 oos/__pycache__/

@@ -17,6 +17,7 @@ import math
 import time
 from datetime import date, datetime, timezone
 import day_learner as _day_learner
+import singleton_lock
 
 from agents import AgentTeam, SymbolContext, portfolio_weights
 from config import CONFIG
@@ -52,6 +53,9 @@ _US_HOLIDAYS = {
 
 class Engine:
     def __init__(self):
+        # Refuse to start a second engine process against the same account/
+        # state — must happen before anything else touches the broker or DB.
+        self._lock_path = singleton_lock.acquire()
         self.data = MarketData()
         self.news = NewsFeed()
         self.macro = Macro()
@@ -107,60 +111,55 @@ class Engine:
         # the base executor (Sim/Alpaca) so the agentic pipeline still runs in
         # paper — but it warns loudly, because live futures need ProjectX.
         self._topstep: "TopstepRiskManager | None" = None  # type: ignore[name-defined]
+        # Symbols with an unresolved AMBIGUOUS exit (a transport failure after
+        # the order may have already reached the exchange — H-CRIT-2). Exit
+        # management for these is held until the next successful
+        # _reconcile_positions() pass resolves broker truth; blindly retrying
+        # could double-execute or flip the position onto the opposite side.
+        self._exit_ambiguous: set[str] = set()
         if CONFIG.topstep_mode_enabled and CONFIG.projectx_username and CONFIG.projectx_api_key:
+            live_broker = None
             try:
                 from projectx_executor import ProjectXBroker
-                from topstep_risk import TopstepRiskManager
-                self.executor.broker = ProjectXBroker()
-                # Seed the trailing-MLL peak / day base from the live balance.
-                # Falls back to the account size if the call fails (mock mode).
-                try:
-                    acct = self.executor.broker.account()
-                    initial_equity = acct.get("equity") or CONFIG.topstep_account_size
-                except Exception:  # noqa: BLE001
-                    initial_equity = CONFIG.topstep_account_size
-                self._topstep = TopstepRiskManager(initial_equity=initial_equity)
-                # Restore the persisted session anchors (DLL day base, MLL peak,
-                # day-halt) so a restart can't re-arm a fresh daily allowance.
-                _sess = str(self._topstep_session_date())
-                _restored, _halt = self._topstep.load_day_state(_sess)
-                if _restored:
-                    self._topstep_last_reset = self._topstep_session_date()
-                    if _halt:
-                        self._topstep_day_halt = True
-                        notify("🛑 Topstep: DAY HALT restored from persisted "
-                               "session state — no new entries until next session")
-                notify(
-                    "⚡ TOPSTEP/PROJECTX MODE ACTIVE — "
-                    f"env={'live' if CONFIG.projectx_live else 'sim'} | "
-                    f"account=${CONFIG.topstep_account_size:,.0f} | "
-                    f"trailing_MLL=${CONFIG.topstep_trailing_mll:,.0f} | "
-                    f"daily_loss=${CONFIG.topstep_daily_loss_limit:,.0f} | "
-                    f"max_contracts={CONFIG.topstep_max_contracts} | "
-                    f"flatten_at={CONFIG.topstep_flatten_time} ET"
-                )
-                # Live order-flow feed: stream quotes + trades + depth off the
-                # ProjectX market hub into per-symbol OBI/CVD/whale engines. Only
-                # the futures roots in the watchlist get subscribed.
-                if CONFIG.orderflow_gate_enabled:
-                    try:
-                        from projectx_marketdata import ProjectXOrderFlowFeed
-                        self._oflow = ProjectXOrderFlowFeed(self.executor.broker)
-                        n = self._oflow.subscribe(list(CONFIG.watchlist))
-                        notify(f"📡 Order-flow feed: subscribed {n} futures root(s) "
-                               f"(OBI/CVD/whale gate {'live' if n else 'idle — no futures roots'})")
-                    except Exception as e:  # noqa: BLE001
-                        notify(f"⚠ Order-flow feed init failed ({e}) — gate disabled (fails open)")
-                        self._oflow = None
-                # A restart may have orphaned the native protective stops the
-                # previous process placed — re-arm them deterministically.
-                self._revalidate_protective_stops()
+                live_broker = ProjectXBroker()
             except Exception as e:  # noqa: BLE001
                 notify(
-                    f"⚠ TOPSTEP MODE init failed ({e}) — "
-                    "falling back to base executor. Check PROJECTX credentials / signalrcore."
+                    f"⚠ ProjectX connection failed ({e}) — running the agentic "
+                    "pipeline on the base executor (Sim/paper). Check PROJECTX "
+                    "credentials / network and restart to retry."
                 )
-                self._topstep = None
+                live_broker = None
+
+            if live_broker is not None:
+                self._attach_topstep_broker(live_broker)
+
+                # Order-flow feed + protective-stop revalidation only make
+                # sense once the live broker + Topstep risk layer are BOTH
+                # attached together (guarded above).
+                if self._topstep is not None:
+                    # Live order-flow feed: stream quotes + trades + depth off
+                    # the ProjectX market hub into per-symbol OBI/CVD/whale
+                    # engines. Only the futures roots in the watchlist get
+                    # subscribed.
+                    if CONFIG.orderflow_gate_enabled:
+                        try:
+                            from projectx_marketdata import ProjectXOrderFlowFeed
+                            self._oflow = ProjectXOrderFlowFeed(self.executor.broker)
+                            n = self._oflow.subscribe(list(CONFIG.watchlist))
+                            notify(f"📡 Order-flow feed: subscribed {n} futures root(s) "
+                                   f"(OBI/CVD/whale gate {'live' if n else 'idle — no futures roots'})")
+                        except Exception as e:  # noqa: BLE001
+                            notify(f"⚠ Order-flow feed init failed ({e}) — gate disabled (fails open)")
+                            self._oflow = None
+                    # A restart may have orphaned the native protective stops
+                    # the previous process placed — re-arm them
+                    # deterministically. Isolated in its own try/except: a
+                    # failure here must not discard the already-successfully-
+                    # constructed Topstep risk layer above.
+                    try:
+                        self._revalidate_protective_stops()
+                    except Exception as e:  # noqa: BLE001
+                        notify(f"⚠ protective-stop revalidation failed at startup ({e})")
         else:
             notify(
                 "⚠ ProjectX credentials not set (PROJECTX_USERNAME/PROJECTX_API_KEY) — running "
@@ -250,6 +249,67 @@ class Engine:
             d = d + timedelta(days=1)
         return d
 
+    def _attach_topstep_broker(self, live_broker) -> None:
+        """Attach a live, already-connected ProjectX broker together with a
+        freshly-constructed TopstepRiskManager, atomically (H-CRIT-1).
+
+        A live, connected ProjectX broker must NEVER end up assigned to
+        self.executor.broker while self._topstep stays None — that
+        combination trades a real account with zero Topstep-specific
+        protection (MLL, DLL, contract cap, flatten, econ blackout) and
+        nothing else in the engine loop would ever notice or warn about it
+        again. So: self.executor.broker is only ever reassigned to
+        `live_broker` in the success path below. If anything raises before
+        that line, self.executor.broker is simply never touched — it stays
+        whatever build_executor() set (the safe base/Sim executor), and
+        self._topstep stays None.
+
+        Extracted from __init__ specifically so this atomicity can be unit
+        tested without constructing a full Engine (which would need real
+        market-data/news/LLM clients) — see tests/test_live_readiness.py.
+        """
+        try:
+            from topstep_risk import TopstepRiskManager
+            # Seed the trailing-MLL peak / day base from the live balance.
+            # Falls back to the account size on failure.
+            try:
+                acct = live_broker.account()
+                initial_equity = acct.get("equity") or CONFIG.topstep_account_size
+            except Exception:  # noqa: BLE001
+                initial_equity = CONFIG.topstep_account_size
+            topstep = TopstepRiskManager(initial_equity=initial_equity)
+            # Restore the persisted session anchors (DLL day base, MLL peak,
+            # day-halt) so a restart can't re-arm a fresh daily allowance.
+            _sess = str(self._topstep_session_date())
+            _restored, _halt = topstep.load_day_state(_sess)
+            if _restored:
+                self._topstep_last_reset = self._topstep_session_date()
+                if _halt:
+                    self._topstep_day_halt = True
+                    notify("🛑 Topstep: DAY HALT restored from persisted "
+                           "session state — no new entries until next session")
+            # Attach broker + risk layer together, atomically, only once
+            # both are known-good.
+            self.executor.broker = live_broker
+            self._topstep = topstep
+            notify(
+                "⚡ TOPSTEP/PROJECTX MODE ACTIVE — "
+                f"env={'live' if CONFIG.projectx_live else 'sim'} | "
+                f"account=${CONFIG.topstep_account_size:,.0f} | "
+                f"trailing_MLL=${CONFIG.topstep_trailing_mll:,.0f} | "
+                f"daily_loss=${CONFIG.topstep_daily_loss_limit:,.0f} | "
+                f"max_contracts={CONFIG.topstep_max_contracts} | "
+                f"flatten_at={CONFIG.topstep_flatten_time} ET"
+            )
+        except Exception as e:  # noqa: BLE001
+            notify(
+                f"🛑 TOPSTEP RISK LAYER init failed ({e}) after a "
+                "successful ProjectX connection — REFUSING to attach "
+                "the live broker without Topstep protection. Staying "
+                "on the base (Sim) executor. Restart to retry."
+            )
+            self._topstep = None
+
     def close(self) -> None:
         self.data.close()
         self.news.close()
@@ -261,6 +321,7 @@ class Engine:
             self._uw.close()
         if self._uw_log is not None:
             self._uw_log.close()
+        singleton_lock.release(self._lock_path)
 
     # ── adaptive cadence: poll faster when the breaker trips, idle when closed ──
     def next_interval(self) -> int:
@@ -1168,6 +1229,15 @@ class Engine:
 
         if changed:
             self.state.save()
+        # H-CRIT-2: this pass just re-established ground truth for every
+        # local + broker position, so any exit that was previously held for
+        # being ambiguous is now safe to act on again — either it matches
+        # broker reality (retry the exit normally) or reconcile already fixed
+        # the local book above (phantom-closed / orphan-adopted).
+        if self._exit_ambiguous:
+            notify(f"♻ reconcile: clearing {len(self._exit_ambiguous)} ambiguous-exit "
+                   f"hold(s) — {sorted(self._exit_ambiguous)}")
+        self._exit_ambiguous.clear()
 
     def _topstep_flatten_all(self, reason: str) -> None:
         """Market-close every open real position via ProjectX and book it in
@@ -1219,6 +1289,8 @@ class Engine:
         """
         if pos.shadow or pos.qty < 1 or not pos.stop or pos.stop == 0.0:
             return
+        if pos.symbol in self._exit_ambiguous:
+            return  # unresolved ambiguous exit (H-CRIT-2) — wait for reconcile
         long = pos.side == "BUY"
         initial_risk = abs(pos.entry_price - pos.stop)
         if initial_risk <= 0:
@@ -1248,7 +1320,17 @@ class Engine:
         if not st["partial_done"] and pnl_r >= 1.5 and pos.qty >= 2:
             close_qty = max(1, pos.qty // 2)
             if close_qty < pos.qty:
-                ok = self.executor.close_partial(pos, close_qty, mark)
+                try:
+                    ok = self.executor.close_partial(pos, close_qty, mark)
+                except Exception as e:  # noqa: BLE001
+                    if e.__class__.__name__ == "OrderStateUnknown":
+                        notify(f"  ⚠ {pos.symbol} PARTIAL-EXIT order state UNKNOWN "
+                               f"(transport error after send) — NOT retried; holding "
+                               f"until next reconcile confirms broker truth")
+                        self._exit_ambiguous.add(pos.symbol)
+                    else:
+                        notify(f"  ! partial exit failed {pos.symbol}: {e}")
+                    ok = False
                 if ok:
                     partial_pnl = (
                         (mark - pos.entry_price)
@@ -1331,6 +1413,8 @@ class Engine:
                 continue
             if not pos.filled:
                 continue  # entry order still pending — nothing to exit yet
+            if pos.symbol in self._exit_ambiguous:
+                continue  # unresolved ambiguous exit (H-CRIT-2) — wait for reconcile
             mark = self._mark(pos.symbol)
             if mark is None:
                 continue  # no live price (futures need the ProjectX feed) — can't manage
@@ -1354,7 +1438,20 @@ class Engine:
             try:
                 self.executor.close(pos, mark, self.state)
             except Exception as e:  # noqa: BLE001
-                notify(f"  ! exit failed {pos.symbol}: {e}")
+                if e.__class__.__name__ == "OrderStateUnknown":
+                    # H-CRIT-2: the exit order may have already reached the
+                    # exchange despite the transport failure. Blindly retrying
+                    # next cycle (the old behavior) risks a duplicate exit or
+                    # flipping this position to the opposite side if the
+                    # ambiguous order actually filled. Hold it until the next
+                    # _reconcile_positions() pass resolves the broker's real
+                    # state before touching this symbol again.
+                    notify(f"  ⚠ {pos.symbol} EXIT order state UNKNOWN (transport "
+                           f"error after send) — NOT retried; holding until next "
+                           f"reconcile confirms broker truth")
+                    self._exit_ambiguous.add(pos.symbol)
+                else:
+                    notify(f"  ! exit failed {pos.symbol}: {e}")
                 continue
             if self._topstep is not None and not pos.shadow:
                 self._topstep.record_close(pos.pnl_usd, hold_seconds(pos.opened_at))

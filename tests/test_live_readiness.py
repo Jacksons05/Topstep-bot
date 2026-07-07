@@ -286,6 +286,7 @@ def _bare_engine(mark_px: float):
     e._topstep = None
     e._oflow = None
     e._be_state = {}                     # BE/trail ratchet state (set in __init__)
+    e._exit_ambiguous = set()            # ambiguous-exit hold set (set in __init__)
     e.state = State()
     e.state.save = lambda: None          # no DB side effects in tests
     e.executor = _FakeExec()
@@ -313,3 +314,166 @@ def test_exit_path_runs_without_nameerror():
     e._manage_open()
     assert not pos.open and pos.exit_price == pytest.approx(4990.0)
     assert pos.pnl_usd == pytest.approx(-500.0)   # -10pts * 1 * $50
+
+
+# ── H-CRIT-2: ambiguous exit (OrderStateUnknown) must not be blindly retried ──
+class _AmbiguousOnceExec:
+    """Raises OrderStateUnknown on the FIRST close() attempt for a symbol,
+    then would succeed on any later attempt — used to prove the engine holds
+    the position rather than resubmitting blindly on the very next scan."""
+    mode = "paper"
+
+    def __init__(self):
+        self.calls = 0
+
+    def close(self, pos, exit_price, state):
+        from projectx_executor import OrderStateUnknown
+        self.calls += 1
+        raise OrderStateUnknown("read timeout after send")
+
+
+def test_exit_order_state_unknown_holds_position_not_retried():
+    e = _bare_engine(4990.0)
+    e.executor = _AmbiguousOnceExec()
+    pos = _pos("ES", "BUY", 1, 5000.0)
+    pos.stop = 4999.0
+    pos.filled = True
+    e.state.add(pos)
+
+    e._manage_open()
+    assert pos.open, "position must stay open — the exit's true state is unknown"
+    assert "ES" in e._exit_ambiguous
+    assert e.executor.calls == 1
+
+    # A second scan cycle must NOT attempt another close while the symbol is
+    # held for ambiguity — resubmitting here is exactly what could double-
+    # execute or flip the position onto the opposite side.
+    e._manage_open()
+    assert e.executor.calls == 1, "must not blindly retry an ambiguous exit"
+    assert pos.open
+
+
+def test_exit_order_state_unknown_in_partial_close_holds_position():
+    e = _bare_engine(5150.0)   # +1.5R vs a 4900 stop on a 5000 entry (100pt risk)
+    pos = _pos("ES", "BUY", 4, 5000.0)
+    pos.stop = 4900.0
+    pos.filled = True
+    e.state.add(pos)
+    e._be_state = {}
+
+    class _AmbiguousPartialExec:
+        # BE-ratchet (step 1, fires first at +1.0R) amends the native stop —
+        # give it a broker with no-op cancel/place so that leg is a no-op.
+        broker = type("B", (), {})()
+
+        def replace_protective_stop(self, pos, stop_price):
+            pass
+
+        def close_partial(self, pos, close_qty, exit_price):
+            from projectx_executor import OrderStateUnknown
+            raise OrderStateUnknown("read timeout after send")
+
+        def close(self, pos, exit_price, state):
+            raise AssertionError("full close should not run in this test")
+
+    e.executor = _AmbiguousPartialExec()
+    e._manage_partial_exit(pos, 5150.0)
+    assert "ES" in e._exit_ambiguous
+    assert pos.qty == 4, "qty must be unchanged — the reduction's true state is unknown"
+
+    # A second call must be a no-op while the ambiguous hold is in effect —
+    # _manage_partial_exit's own guard should return immediately.
+    e._manage_partial_exit(pos, 5150.0)
+    assert pos.qty == 4
+
+
+def test_reconcile_clears_ambiguous_exit_hold():
+    e = _bare_engine(5000.0)
+    e._exit_ambiguous = {"ES"}
+
+    class _FakeLiveBroker:
+        def get_positions(self):
+            return []   # broker is flat — matches nothing, but the READ succeeded
+
+    e.executor = type("E", (), {"broker": _FakeLiveBroker()})()
+    e._live_projectx = lambda: True
+    e._mark = lambda sym: 5000.0
+
+    e._reconcile_positions()
+    assert e._exit_ambiguous == set(), "a successful reconcile must clear ambiguous holds"
+
+
+def test_reconcile_failure_does_not_clear_ambiguous_hold():
+    e = _bare_engine(5000.0)
+    e._exit_ambiguous = {"ES"}
+
+    class _FailingBroker:
+        def get_positions(self):
+            raise RuntimeError("network error")
+
+    e.executor = type("E", (), {"broker": _FailingBroker()})()
+    e._live_projectx = lambda: True
+
+    e._reconcile_positions()
+    assert e._exit_ambiguous == {"ES"}, (
+        "a FAILED reconcile must not clear the hold — we still don't know the "
+        "broker's true state, so retrying the exit would still be unsafe"
+    )
+
+
+# ── H-CRIT-1: live broker + Topstep risk layer attach atomically or not at all ──
+class _FakeLiveBroker:
+    def account(self):
+        return {"equity": 50_000.0}
+
+
+def test_attach_topstep_broker_failure_leaves_base_executor_attached(monkeypatch):
+    import engine as eng
+    import topstep_risk
+
+    class _RaisingTopstepRiskManager:
+        def __init__(self, *a, **k):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(topstep_risk, "TopstepRiskManager", _RaisingTopstepRiskManager)
+
+    e = eng.Engine.__new__(eng.Engine)
+    e._topstep_last_reset = None
+    e._topstep_day_halt = False
+    base_broker = object()
+    e.executor = type("E", (), {"broker": base_broker})()
+
+    live_broker = _FakeLiveBroker()
+    e._attach_topstep_broker(live_broker)
+
+    assert e._topstep is None
+    assert e.executor.broker is base_broker, (
+        "a failed Topstep-risk-layer init must NEVER leave the live broker "
+        "attached — that combination trades real capital with zero "
+        "Topstep-specific protection"
+    )
+
+
+def test_attach_topstep_broker_success_attaches_both_atomically(monkeypatch):
+    import engine as eng
+    import topstep_risk
+
+    class _FakeTopstepRiskManager:
+        def __init__(self, initial_equity=None):
+            self.initial_equity = initial_equity
+
+        def load_day_state(self, session):
+            return False, False
+
+    monkeypatch.setattr(topstep_risk, "TopstepRiskManager", _FakeTopstepRiskManager)
+
+    e = eng.Engine.__new__(eng.Engine)
+    e._topstep_last_reset = None
+    e._topstep_day_halt = False
+    e.executor = type("E", (), {"broker": object()})()
+
+    live_broker = _FakeLiveBroker()
+    e._attach_topstep_broker(live_broker)
+
+    assert e._topstep is not None
+    assert e.executor.broker is live_broker
