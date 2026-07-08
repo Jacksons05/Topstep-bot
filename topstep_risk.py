@@ -93,13 +93,19 @@ def _now_et() -> datetime:
 
 
 def _parse_time(hhmm: str) -> dtime:
-    """Parse "HH:MM" string to a time object. Falls back to 16:55 on error."""
+    """Parse "HH:MM" string to a time object.
+
+    Falls back to 16:00 ET on a malformed value — deliberately EARLIER than
+    the flatten-time default (16:08 ET, itself before the 16:10 futures
+    close): a parse failure must fail toward flattening too early, never
+    toward flattening late enough to carry a position into the close.
+    """
     try:
         hh, mm = (int(x) for x in hhmm.split(":"))
         return dtime(hh, mm)
     except (ValueError, AttributeError):
-        log.warning(f"[TopstepRisk] Could not parse time '{hhmm}', using 16:55")
-        return dtime(16, 55)
+        log.warning(f"[TopstepRisk] Could not parse time '{hhmm}', using 16:00 (conservative)")
+        return dtime(16, 0)
 
 
 def hold_seconds(opened_at: str) -> float:
@@ -371,9 +377,12 @@ class TopstepRiskManager:
     def should_flatten_now(self) -> bool:
         """True when it's time to flatten all positions before EOD.
 
-        Flatten fires at TOPSTEP_FLATTEN_TIME (default 16:55 ET) and stays
-        True until midnight. The engine calls this once per scan loop and
-        submits flatten_all() on the broker when True.
+        Flatten fires at TOPSTEP_FLATTEN_TIME (default 16:08 ET, matching
+        config.py's default) and stays True until 17:00 ET (the CME
+        maintenance close) — NOT until midnight; the 18:00 ET Globex reopen
+        is a distinct, later boundary where new entries become allowed again
+        (see engine._market_open). The engine calls this once per scan loop
+        and submits flatten_all() on the broker when True.
 
         Note: The existing OPTION_TIME_STOP_ET (15:30 by default) handles
         options; this rule handles futures.

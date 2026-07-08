@@ -10,10 +10,14 @@ adapter feeds `on_depth()` / `on_trade()` from the Rithmic L2 stream
 (async-rithmic); `confirm_entry()` returns a gate the engine applies alongside
 the GEX level and the Risk-Manager agent veto.
 
-Thresholds (overridable via env, defaults from the sources):
-    OF_OBI_THRESHOLD       0.85   OBI magnitude required at a wall (→ ±1.0)
-    OF_WHALE_Z             3.5    MAD modified z-score flag
-    OF_WHALE_NOTIONAL_USD  1e6    min $ in a 1-second bucket to be a "whale"
+Thresholds (overridable via env; defaults below match the CURRENT code
+constants, not the original research doc — they were retuned for MNQ/MES's
+retail-scale prints and the change was never back-ported to docs-orderflow.md
+or .env.example until this pass; if those two files still show 0.85/3.5/$1M,
+trust this file, not them):
+    OF_OBI_THRESHOLD       0.70   OBI magnitude required at a wall (→ ±1.0)
+    OF_WHALE_Z             2.0    MAD modified z-score flag (was 3.5)
+    OF_WHALE_NOTIONAL_USD  250e3  min $ in a 1-second bucket to be a "whale" (was $1M)
     OF_FOOTPRINT_RATIO     10.0   aggressive-side dominance for absorption
     OF_WINDOW_SEC          120    rolling window for z-score / divergence
 """
