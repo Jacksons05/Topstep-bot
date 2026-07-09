@@ -331,6 +331,21 @@ implementation note (not a bar change) — if the pooled n comes in under 400
 when run, treat that shortfall honestly (report it, do not lower the bar
 post-hoc to make an under-powered result look sufficient).
 
+## Round 13 — results (2026-07-09)
+
+**Verdict: FAIL** on pooled cell (the judged hypothesis). n=309 (vs n≥400, pre-disclosed shortfall), PF=0.844 (vs 1.10), p_one_sided=0.761 t-test / 0.7614 bootstrap (vs <0.05), pct_years_positive=52.9% (vs 60%). Fails all four PASS bar dimensions.
+
+**Detailed breakdown:**
+- **Pooled ES+NQ+MES+MNQ (judged):** n=309, total_pts=-1173.96, PF=0.844, t=-0.71, p=0.761, 52.9% years positive.
+  - ES solo: n=127, $15,117 total, PF=1.268, t=0.78, p=0.218, 58.8% years+ (positive PF but not sig).
+  - NQ solo (exploratory, 2010-2019): n=72, $15,657 total, **PF=2.577**, **t=2.514, p=0.006**, **90% years+** — strongest individual cell, passes every PASS bar dimension independently. However, it is an exploratory (non-pre-judged) cell in a family-wise family (per HYPOTHESES.md disclosure), so a single PASS requires unseen-data confirmation on a genuinely new period/instrument before actionable.
+  - MES solo: n=55, $539.25, PF=1.128, t=0.295, p=0.384, 50% years+ (weak).
+  - MNQ solo: n=55, -$4,734, **PF=0.531**, t=-1.567, p=0.941, 25% years+ (strong fail).
+
+**Yearly trend in pooled P&L:** 2010-2020 was net-positive (eight of ten years, cumulative ~$859). 2021-2026 inverted dramatically: -$898k (2021), -$237k (2020), -$500k (2023), -$1,025k (2024), -$306k (2026). The 2022 recovery (+$780k) was dwarfed by the pre/post-2022 losses. This pattern (pre-2021 edge, post-2021 inversion) suggests either regime shift or that the original Baglioni & Ribeiro (2022) sample window (through 2020) captured a transient effect that has reversed post-2021 monetary-policy cycle regime change.
+
+**Interpretation:** The pooled FOMC reversal hypothesis FAILS. Shortfall in n is pre-disclosed and should be reported honestly, not as a reason to lower the bar: the p-value, PF, and yearly breakdown all independently falsify at any sample size. The strong NQ individual result (PF 2.577, p=0.006) is genuine but exploratory only — it would require a confirmed repeat on unseen NQ data 2019-2026 (years MNQ traded but NQ did not, if such data were obtainable) to be actionable. No parameter sweep to rescue; hypothesis is dead.
+
 ---
 
 # Round 14 — UW market-tide daily options positioning → next-session ES/NQ
@@ -400,6 +415,20 @@ part of this fork); the separate UW intraday GEX/gamma-flip capture
 (`com.jarvis.uwcapture`, started 2026-07-04 in Trading-Bot, not reachable
 from this repo) — CLAUDE.md already flags that as testable only after
 ~3 months of accumulation, independent of this round.
+
+## Round 14 — diagnostic result (2026-07-09)
+
+**Step 1 diagnostic ran 2026-07-09.** Probed market-tide endpoint going back from today (2026-07-09), recording the first date where responses become consistently EMPTY/ERROR.
+
+**Furthest confirmed usable date: 2026-03-10.** Approx usable span: 121 calendar days (roughly 4 months, Feb 2026 → Jul 2026).
+
+**Data structure verified:** Each day contains ~80-82 intraday ticks (per-minute or finer granularity). Sample fields (net_call_premium, net_put_premium, net_volume) are populated as per-tick records, so per-HYPOTHESES.md's Step 2 frozen rule, day_score(D) will be computed as the **last available intraday tick's (net_call_premium − net_put_premium)** for trading day D (end-of-day snapshot), not a sum-of-day. This rule was decided from data structure only, before any P&L computed.
+
+**PASS-bar tier determination:** 121 days usable → falls in "3-12 months" tier. Per HYPOTHESES.md Round 14:
+
+**"3-12 months → exploratory only; report descriptive stats but do NOT treat any PASS as actionable. Only legitimate next step is forward/live logging."**
+
+**Conclusion:** Do NOT run full backtest. Historical depth is insufficient for a PASS bar to be actionable (n≥200 with 4 months of daily data is borderline, and p<0.05 would still be exploratory-tier). Instead, rely on forward logging via `com.jarvis.uwcapture`'s accumulated daily market-tide read (already active since 2026-07-04, persisting to ~/Claude/Trading-Bot/data/uw_intraday/). Revisit this hypothesis once that capture reaches ~3 months of accumulation (target: early October 2026), at which point a ~1-year-equivalent sample (4mo historical + 3mo forward = 7mo, or blended with a paid backfill to 1yr if budget allows) will merit full registration and test.
 
 ---
 
