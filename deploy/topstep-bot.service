@@ -1,0 +1,19 @@
+[Unit]
+Description=Topstep futures trading bot
+After=network-online.target ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Topstep-bot
+Environment=PYTHONUNBUFFERED=1
+Environment=PORT=8790
+ExecStart=/home/ubuntu/Topstep-bot/.venv/bin/python /home/ubuntu/Topstep-bot/run.py
+Restart=always
+RestartSec=15
+StandardOutput=append:/home/ubuntu/Topstep-bot/topstep-stdout.log
+StandardError=append:/home/ubuntu/Topstep-bot/topstep-stderr.log
+
+[Install]
+WantedBy=multi-user.target
