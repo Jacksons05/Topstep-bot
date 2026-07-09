@@ -59,6 +59,11 @@ class ProjectXOrderFlowFeed:
         self._conn = None
         self.depth_available = _SIGNALR_AVAILABLE and not getattr(broker, "_mock_mode", True)
         self._last_heal_ts = 0.0
+        # Timestamp of the last successful on_reconnect callback. heal_if_stale
+        # uses this to avoid tearing down and rebuilding a connection that just
+        # reconnected — the re-subscribe may take a few seconds to start
+        # delivering ticks, but that's not a sign the connection is dead.
+        self._last_reconnect_ts = 0.0
 
     def get(self, symbol: str) -> OrderFlowEngine:
         """Return (creating if needed) the engine for a futures root."""
@@ -163,11 +168,33 @@ class ProjectXOrderFlowFeed:
             return False
 
     def _on_reconnect(self) -> None:
-        """Replay every contract subscription after an automatic reconnect."""
+        """Replay every contract subscription after an automatic reconnect.
+
+        Called by signalrcore after a successful automatic reconnect. The
+        reconnect reuses the hub URL that was built in _connect(), which
+        carries the access token at that point in time. If the token has
+        since been refreshed, the reconnect URL carries the old token — the
+        gateway may accept it (the connection is already established) but
+        refresh defensively so the broker HTTP client and the hub are in sync.
+
+        Also stamps _last_reconnect_ts so heal_if_stale doesn't treat the
+        brief quote silence while re-subscribes start flowing as a dead feed
+        and immediately tear down the just-reconnected connection.
+        """
+        self._last_reconnect_ts = time.time()
         if self._conn is None:
             return
+        # Refresh the token before re-subscribing. The reconnect URL carries
+        # the original access token — if it was rotated while the connection
+        # was down this defensive refresh keeps the broker HTTP client (used
+        # for all REST calls including order placement) current.
+        try:
+            self._broker._ensure_token()   # noqa: SLF001
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"[OrderFlow] token refresh on reconnect failed: {exc}")
         log.warning(f"[OrderFlow] SignalR reconnected — re-subscribing "
                     f"{len(self._sub_cids)} contract(s)")
+        failed = []
         for cid in self._sub_cids:
             try:
                 self._conn.send("SubscribeContractQuotes", [cid])
@@ -175,6 +202,14 @@ class ProjectXOrderFlowFeed:
                 self._conn.send("SubscribeContractMarketDepth", [cid])
             except Exception as exc:  # noqa: BLE001
                 log.warning(f"[OrderFlow] re-subscribe failed for {cid}: {exc}")
+                failed.append(cid)
+        if failed:
+            log.error(
+                f"[OrderFlow] {len(failed)}/{len(self._sub_cids)} contracts "
+                f"failed to re-subscribe after reconnect — feed may be partially "
+                f"dead. heal_if_stale will rebuild after {self._HEAL_AFTER_S}s of "
+                f"silence: {failed}"
+            )
 
     # ── SignalR event handlers (args = [contractId, payload]) ─────────────────
 
@@ -259,15 +294,31 @@ class ProjectXOrderFlowFeed:
         to nothing), and (b) token expiry — the reconnect URL carries the
         ORIGINAL access token, which the gateway rejects after rotation.
         Callers must only invoke this while the market is open; outside trading
-        hours silence is normal."""
+        hours silence is normal.
+
+        Respects a post-reconnect quiet window (HEAL_COOLDOWN_S from the last
+        on_reconnect callback) so a freshly-reconnected feed that has not yet
+        delivered its first tick is not immediately torn down again."""
         if self._mock or self._conn is None or not self._subscribed:
             return
+        if not self._engines:
+            return  # guard against max() on empty sequence
         freshest = max((getattr(e, "last_quote_ts", 0.0) or 0.0)
                        for e in self._engines.values())
         now = time.time()
         if freshest <= 0 or now - freshest < self._HEAL_AFTER_S:
             return
         if now - self._last_heal_ts < self._HEAL_COOLDOWN_S:
+            return
+        # Give the automatic-reconnect path its own cooldown window: if
+        # _on_reconnect fired recently, the re-subscriptions may not have
+        # produced a quote yet even though the connection is healthy.
+        if now - self._last_reconnect_ts < self._HEAL_COOLDOWN_S:
+            log.debug(
+                f"[OrderFlow] feed silent {now - freshest:.0f}s but reconnect was "
+                f"{now - self._last_reconnect_ts:.0f}s ago — giving re-subscriptions "
+                f"more time before declaring the connection dead"
+            )
             return
         self._last_heal_ts = now
         log.warning(f"[OrderFlow] feed silent {now - freshest:.0f}s with market open — "
