@@ -86,7 +86,19 @@ CREATE TABLE IF NOT EXISTS state_meta (
 
 def _dsn() -> str:
     url = DATABASE_URL
-    if not url or "sslmode=" in url:
+    if not url:
+        return url
+    if "sslmode=" in url:
+        # If sslmode=disable was explicitly set, warn — this disables TLS on
+        # the Postgres connection, exposing credentials in transit. Acceptable
+        # only for a loopback-only local dev setup; never for a remote DB.
+        if "sslmode=disable" in url.lower():
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "DATABASE_URL contains sslmode=disable — TLS is OFF. "
+                "This is safe only for a loopback-only local Postgres instance. "
+                "For any remote database set sslmode=require."
+            )
         return url
     sep = "&" if "?" in url else "?"
     return f"{url}{sep}sslmode=require"
