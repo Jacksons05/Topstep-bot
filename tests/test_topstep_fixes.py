@@ -234,3 +234,125 @@ def test_session_date_before_18_et_is_today(monkeypatch):
     e = eng.Engine.__new__(eng.Engine)
     monkeypatch.setattr(eng, "datetime", _FakeDT)
     assert e._topstep_session_date() == date(2026, 6, 22)
+
+
+# ── Reconcile float-equality tolerance (correctness audit finding) ────────────
+
+def test_reconcile_exact_match_survives_float_noise(monkeypatch):
+    """A broker qty of 2.0000001 must match a local qty of 2 — float noise from
+    the broker's JSON parser must never cause a phantom-close of a real position."""
+    import engine as eng
+    from state import Position
+
+    e = eng.Engine.__new__(eng.Engine)
+    e._topstep = None
+    e._exit_ambiguous = set()
+    e.state = State()
+    e.state.save = lambda: None
+
+    pos = Position(
+        symbol="MES", asset="future", side="BUY", qty=2,
+        entry_price=5000.0, size_usd=10_000.0, stop=0.0, target=0.0,
+        kind="test", thesis="", opened_at="2026-01-01T00:00:00+00:00", mode="paper",
+    )
+    e.state.add(pos)
+
+    class _FakeBroker:
+        def get_positions(self):
+            # Broker returns the same 2-contract position, but as a float
+            # with a tiny precision error that exact == comparison would fail on.
+            return [{"symbol": "MES", "side": "BUY", "qty": 2.0000001,
+                     "avg_price": 5000.0, "contract_id": "CID"}]
+
+    e.executor = type("E", (), {"broker": _FakeBroker()})()
+    e._live_projectx = lambda: True
+    e._mark = lambda sym: 5000.0
+
+    e._reconcile_positions()
+    assert pos.open, "position must survive — float noise must not cause phantom-close"
+    assert e.state.open_positions == [pos]
+
+
+def test_reconcile_real_size_change_still_adopted(monkeypatch):
+    """A materially different broker qty (1 vs 2 contracts) must still be
+    detected and adopted — the tolerance must not swallow genuine size drift."""
+    import engine as eng
+    from state import Position
+
+    e = eng.Engine.__new__(eng.Engine)
+    e._topstep = None
+    e._exit_ambiguous = set()
+    e.state = State()
+    e.state.save = lambda: None
+
+    pos = Position(
+        symbol="MES", asset="future", side="BUY", qty=2,
+        entry_price=5000.0, size_usd=10_000.0, stop=0.0, target=0.0,
+        kind="test", thesis="", opened_at="2026-01-01T00:00:00+00:00", mode="paper",
+    )
+    e.state.add(pos)
+
+    class _FakeBroker:
+        def get_positions(self):
+            # Broker says only 1 contract remains (partial close on exchange).
+            return [{"symbol": "MES", "side": "BUY", "qty": 1.0,
+                     "avg_price": 5000.0, "contract_id": "CID"}]
+
+    e.executor = type("E", (), {"broker": _FakeBroker()})()
+    e._live_projectx = lambda: True
+    e._mark = lambda sym: 5000.0
+
+    e._reconcile_positions()
+    assert pos.qty == pytest.approx(1.0), "broker qty must be adopted for a genuine size change"
+
+
+# ── day_state.json corruption defense ─────────────────────────────────────────
+
+def test_load_day_state_ignores_non_dict_json(tmp_path, monkeypatch):
+    """Valid JSON that is not a dict (null, list, string) must be treated as
+    absent rather than raising AttributeError on d.get()."""
+    ts = TopstepRiskManager.__new__(TopstepRiskManager)
+    ts.peak_equity = 50_000.0
+    ts.day_start_equity = 50_000.0
+
+    for bad_content in ("null", "[]", '"string"', "42"):
+        state_file = tmp_path / f"day_state_{bad_content[:5]}.json"
+        state_file.write_text(bad_content)
+        monkeypatch.setattr(TopstepRiskManager, "_DAY_STATE_FILE",
+                            type("P", (), {"read_text": lambda self: bad_content,
+                                           "exists": lambda self: True})())
+        # Patch at instance level since _DAY_STATE_FILE is a class variable.
+        ts._DAY_STATE_FILE = state_file
+        restored, halt = ts.load_day_state("2026-07-09")
+        assert not restored, f"non-dict JSON {bad_content!r} must return (False, False)"
+        assert not halt
+
+
+def test_load_day_state_tolerates_truncated_file(tmp_path):
+    """A truncated / syntactically invalid file must be silently ignored."""
+    ts = TopstepRiskManager.__new__(TopstepRiskManager)
+    ts.peak_equity = 50_000.0
+    ts.day_start_equity = 50_000.0
+    state_file = tmp_path / "day_state.json"
+    state_file.write_text('{"session_date": "2026-07-09", "peak_equity": 51000')  # truncated
+    ts._DAY_STATE_FILE = state_file
+
+    restored, halt = ts.load_day_state("2026-07-09")
+    assert not restored
+
+
+def test_load_day_state_peak_equity_wrong_type_does_not_raise(tmp_path):
+    """peak_equity stored as a string must not crash load_day_state."""
+    ts = TopstepRiskManager.__new__(TopstepRiskManager)
+    ts.peak_equity = 50_000.0
+    ts.day_start_equity = 50_000.0
+    state_file = tmp_path / "day_state.json"
+    state_file.write_text(
+        '{"session_date": "2026-07-09", "peak_equity": "corrupt", '
+        '"day_start_equity": 50000.0, "day_halt": false}'
+    )
+    ts._DAY_STATE_FILE = state_file
+    # Must not raise; peak_equity corruption → keeps current value
+    restored, halt = ts.load_day_state("2026-07-09")
+    assert restored  # session matched
+    assert ts.peak_equity == pytest.approx(50_000.0)  # corrupt field → ignored, kept original

@@ -1141,17 +1141,27 @@ class Engine:
         # vs broker BUY 1 (or SELL) is NOT the same position — symbol-only
         # matching let real side/qty drift persist unmanaged (seen live:
         # broker ES x2 vs adopted local ES x1).
+        #
+        # Qty comparison uses a tolerance of 0.5 contracts rather than direct
+        # float equality: futures are always whole-number contracts, so any
+        # difference < 0.5 is floating-point noise (same integer quantity),
+        # and any difference ≥ 0.5 is a genuine size change that must be
+        # adopted. This avoids phantom-closing or adopting a position whose
+        # qty is 2.0 locally vs 2.0000001 from the broker (or vice versa).
+        _QTY_TOL = 0.5  # anything less than half a contract is noise
         for pos in list(self.state.open_positions):
             if pos.shadow:
                 continue
             bp = bro.get(pos.symbol.upper())
             b_side = str(bp.get("side", "")).upper() if bp else ""
             b_qty = float(bp.get("qty") or 0.0) if bp else 0.0
-            if bp is not None and b_side == pos.side.upper() and b_qty == pos.qty:
-                continue        # exact match — nothing to do
-            if bp is not None and b_side == pos.side.upper() and 0 < b_qty != pos.qty:
-                # Same direction, different size (partial fill / external
-                # reduction): adopt the broker's qty as truth.
+            if bp is not None and b_side == pos.side.upper() \
+                    and abs(b_qty - pos.qty) < _QTY_TOL:
+                continue        # exact match (within float noise) — nothing to do
+            if bp is not None and b_side == pos.side.upper() \
+                    and b_qty > 0 and abs(b_qty - pos.qty) >= _QTY_TOL:
+                # Same direction, materially different size (partial fill /
+                # external reduction): adopt the broker's qty as truth.
                 notify(f"♻ reconcile: {pos.symbol} qty {pos.qty:g} → {b_qty:g} "
                        f"(broker truth adopted)")
                 pos.qty = b_qty

@@ -205,10 +205,22 @@ class TopstepRiskManager:
         """Restore persisted anchors at startup. peak_equity is restored
         unconditionally (the trailing MLL spans the whole account cycle);
         day_start_equity and the halt flag apply only when the saved session
-        matches the current one. Returns (session_restored, day_halt)."""
+        matches the current one. Returns (session_restored, day_halt).
+
+        Handles corrupted or structurally-invalid files (truncated, non-dict
+        JSON, wrong field types) by treating them as absent — resetting the
+        anchor is safer than trusting a damaged value that could set the MLL
+        peak too low (loosening the floor) or the day base to zero (nuking
+        the DLL check).
+        """
         try:
             d = json.loads(self._DAY_STATE_FILE.read_text())
         except (OSError, ValueError):
+            return False, False
+        if not isinstance(d, dict):
+            # Valid JSON but wrong structure (null, list, string, …) — treat
+            # as absent rather than letting d.get() raise AttributeError.
+            log.warning("[Topstep] day-state file contains non-dict JSON — ignoring")
             return False, False
         try:
             pk = float(d.get("peak_equity") or 0.0)

@@ -97,8 +97,10 @@ class Config:
     news_lookback_hours: int = _i("NEWS_LOOKBACK_HOURS", 48)
     finnhub_api_key: str = _s("FINNHUB_API_KEY")           # news+sentiment, earnings/econ calendar
     # SEC EDGAR (free, no key) — 8-K material-event filings as headlines. SEC's fair-access
-    # policy REQUIRES a descriptive User-Agent with a contact email; set yours here.
-    sec_user_agent: str = _s("SEC_USER_AGENT", "jarvis-stock jackson.g.sheehan@gmail.com")
+    # policy REQUIRES a descriptive User-Agent with a contact email; set yours here via the
+    # SEC_USER_AGENT environment variable.  The default is a placeholder — set it to
+    # "your-app-name your@email.com" before enabling the sec news source in production.
+    sec_user_agent: str = _s("SEC_USER_AGENT", "jarvis-stock contact@example.com")
     sec_form_types: tuple[str, ...] = _csv("SEC_FORM_TYPES", "8-K")  # filing types to surface
     # Filings are sparse and stay material far longer than a news headline, so they
     # use their own (much longer) lookback rather than NEWS_LOOKBACK_HOURS.
