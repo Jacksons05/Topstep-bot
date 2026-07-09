@@ -273,3 +273,32 @@ def test_heal_noop_when_feed_fresh(monkeypatch):
     f.get("MNQ").last_quote_ts = _time.time() - 5   # fresh
     monkeypatch.setattr(f, "close", lambda: pytest.fail("must not rebuild a fresh feed"))
     f.heal_if_stale()
+
+
+def test_heal_noop_immediately_after_reconnect(monkeypatch):
+    """heal_if_stale must not rebuild a connection that just auto-reconnected.
+
+    The re-subscribe following a reconnect may take a few seconds to start
+    delivering ticks; treating that silence as a dead feed would immediately
+    tear down and rebuild the healthy-but-quiet connection."""
+    f = _feed(monkeypatch)
+    f._mock = False
+    f._conn = object()
+    f._subscribed = {"MNQ"}
+    eng = f.get("MNQ")
+    eng.last_quote_ts = _time.time() - 300   # long silence — would normally heal
+    f._last_reconnect_ts = _time.time() - 10  # reconnected 10s ago (< HEAL_COOLDOWN_S)
+    monkeypatch.setattr(f, "close", lambda: pytest.fail("must not rebuild after a recent reconnect"))
+    f.heal_if_stale()
+
+
+def test_heal_noop_when_no_engines(monkeypatch):
+    """heal_if_stale must not raise when the engines dict is empty."""
+    f = _feed(monkeypatch)
+    f._mock = False
+    f._conn = object()
+    f._subscribed = {"MNQ"}
+    # engines dict deliberately left empty (nothing subscribed yet)
+    assert not f._engines
+    monkeypatch.setattr(f, "close", lambda: pytest.fail("must not rebuild with no engines"))
+    f.heal_if_stale()  # must be a silent no-op, not ValueError from max()
