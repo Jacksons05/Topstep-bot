@@ -17,7 +17,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-DATABASE_URL: str = os.getenv("DATABASE_URL", "")
+DATABASE_URL: str = os.getenv("DATABASE_URL", "").strip()
+_DB_ENABLED: bool = bool(DATABASE_URL)
 
 _DDL_POSITIONS = """
 CREATE TABLE IF NOT EXISTS positions (
@@ -140,7 +141,10 @@ _pool_lock = threading.Lock()
 
 
 def _get_pool():
-    """Return the module-level ThreadedConnectionPool, created lazily on first use."""
+    """Return the module-level ThreadedConnectionPool, created lazily on first use.
+    Returns None if DATABASE_URL is not set (stateless mode)."""
+    if not _DB_ENABLED:
+        return None
     import psycopg2.pool
     global _pool
     if _pool is None:
@@ -158,8 +162,13 @@ def _get_pool():
 
 @contextmanager
 def _db():
-    """Yield a pooled connection; commit on success, rollback on any exception."""
-    conn = _get_pool().getconn()
+    """Yield a pooled connection; commit on success, rollback on any exception.
+    If DATABASE_URL is not set, yields None (stateless mode)."""
+    if not _DB_ENABLED:
+        yield None
+        return
+    pool = _get_pool()
+    conn = pool.getconn()
     try:
         conn.autocommit = False
         yield conn
@@ -168,18 +177,19 @@ def _db():
         conn.rollback()
         raise
     finally:
-        _get_pool().putconn(conn)
+        pool.putconn(conn)
 
 
 def _ensure_schema() -> None:
     # Run the DDL at most once per process. Repeated ALTER TABLE calls (one per
     # State.load(), including every dashboard poll) take ACCESS EXCLUSIVE locks
     # that deadlock against the engine's concurrent positions upsert.
+    # Skipped entirely in stateless mode (DATABASE_URL not set).
     global _schema_ready
-    if _schema_ready:
+    if _schema_ready or not _DB_ENABLED:
         return
     with _schema_lock:
-        if _schema_ready:
+        if _schema_ready or not _DB_ENABLED:
             return
         with _db() as conn:
             with conn.cursor() as cur:
