@@ -34,6 +34,7 @@ from signals import Signal, label_for, quant_signal
 from ml_signal import ML
 from datafeed import LiveRecorder
 from futures_symbols import dollar_value_per_point, is_futures_symbol
+from flow_risk import FlowRiskManager, FlowRead
 from state import Position, State
 from regime_strategy import (
     get_regime_params,
@@ -97,6 +98,16 @@ class Engine:
         # of manufacturing false MLL breaches after the first local close.
         self._equity_baseline: float | None = None
         self._oflow = None  # ProjectXOrderFlowFeed when a live ProjectX feed is up
+        # Flow-risk overlays (flow_risk.py): A10 vol-target sizing (folded into
+        # the futures risk multiplier, de-risk only) + A8 toxicity veto. Reads
+        # are computed from the bars already fetched in _prescreen (no extra
+        # network) and stashed per symbol for the entry loop.
+        self._flow: FlowRiskManager | None = (
+            FlowRiskManager()
+            if (CONFIG.vol_sizing_enabled or CONFIG.toxicity_veto_enabled)
+            else None
+        )
+        self._flow_reads: dict[str, FlowRead] = {}
         self._uw = None     # UWFlowFeed when UW_FLOW_ENABLED=true + UW_API_KEY set
         # Partial-exit / BE-ratchet state keyed by position symbol.
         # {symbol: {"partial_done": bool, "be_done": bool, "trail_peak": float}}
@@ -556,6 +567,14 @@ class Engine:
                 notify(f"  skip ({reason}): {sig.symbol}")
                 continue
 
+            # (A8) Flow-toxicity veto: stand aside when BVC-VPIN sits in the top
+            # tail of this symbol's own toxicity history. Risk filter only (see
+            # flow_risk.py). The same read supplies the (A10) vol multiplier below.
+            flow = self._flow_reads.get(sig.symbol)
+            if flow is not None and flow.veto:
+                notify(f"  skip (toxicity: {flow.veto_reason}): {sig.symbol}")
+                continue
+
             # (d) Regime sizing multiplier applied AFTER the base risk.check()
             #     so the min-size guard still runs against the un-scaled base.
             size = apply_regime_sizing(size, regime_params)
@@ -570,8 +589,12 @@ class Engine:
             # per-trade risk budget), so without this the circuit breaker,
             # regime haircut and day-adapt haircuts silently do nothing for
             # futures — every trade risks the full budget.
+            # (A10) vol-target multiplier folded in. futures_plan caps risk_mult
+            # at 1.0, so on the funded account this can only DE-RISK in an
+            # elevated-vol regime, never size up.
+            _vol_mult = min(1.0, flow.vol_mult) if flow is not None else 1.0
             risk_mult = (cb_mult * (w or 1.0)
-                         * regime_params["size_mult"] * _day_mult)
+                         * regime_params["size_mult"] * _day_mult * _vol_mult)
             if size < CONFIG.min_executable_size_usd:
                 notify(f"  skip (regime {rk} sized to {size:.0f} < min "
                        f"{CONFIG.min_executable_size_usd:.0f}): {sig.symbol}")
@@ -850,6 +873,11 @@ class Engine:
                     return None
             elif CONFIG.regime_block and reg_upper in CONFIG.regime_block:
                 return None
+
+        # Flow-risk read (A10 vol-target sizing + A8 toxicity veto) from the bars
+        # already in hand -- no extra fetch. Consumed in the entry loop.
+        if self._flow is not None:
+            self._flow_reads[sym] = self._flow.assess(bars)
 
         return quant, spot, regime_label
 
