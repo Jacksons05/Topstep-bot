@@ -280,16 +280,49 @@ def test_heal_noop_immediately_after_reconnect(monkeypatch):
 
     The re-subscribe following a reconnect may take a few seconds to start
     delivering ticks; treating that silence as a dead feed would immediately
-    tear down and rebuild the healthy-but-quiet connection."""
+    tear down and rebuild the healthy-but-quiet connection.
+
+    Silence is deliberately well below _HEAL_HARD_S (300s), not exactly at
+    it — at the boundary this test would race the hard-ceiling check below
+    (wall-clock time elapsed between setting last_quote_ts and calling
+    heal_if_stale pushes `now - freshest` slightly past 300, which reads as
+    "hard ceiling reached" and defeats the very cooldown grace this test
+    exists to verify). Keep this comfortably under the ceiling; the ceiling
+    itself is covered by test_heal_forces_rebuild_past_hard_ceiling below."""
     f = _feed(monkeypatch)
     f._mock = False
     f._conn = object()
     f._subscribed = {"MNQ"}
     eng = f.get("MNQ")
-    eng.last_quote_ts = _time.time() - 300   # long silence — would normally heal
+    eng.last_quote_ts = _time.time() - 200   # long silence, but under HEAL_HARD_S
     f._last_reconnect_ts = _time.time() - 10  # reconnected 10s ago (< HEAL_COOLDOWN_S)
     monkeypatch.setattr(f, "close", lambda: pytest.fail("must not rebuild after a recent reconnect"))
     f.heal_if_stale()
+
+
+def test_heal_forces_rebuild_past_hard_ceiling(monkeypatch):
+    """Past _HEAL_HARD_S, a recent reconnect must no longer defer the heal.
+
+    Models the reconnect-churn case _HEAL_HARD_S exists for: repeated
+    socket-close/reconnect cycles keep stamping _last_reconnect_ts (always
+    "recent"), which would otherwise defer heal_if_stale forever even though
+    the feed has been silent far longer than any legitimate re-subscribe
+    delay. Once total silence clears the hard ceiling, the rebuild must fire
+    regardless of how recently the last (unproductive) reconnect happened."""
+    f = _feed(monkeypatch)
+    f._mock = False
+    f._conn = object()
+    f._subscribed = {"MNQ"}
+    eng = f.get("MNQ")
+    eng.last_quote_ts = _time.time() - (f._HEAL_HARD_S + 30)  # past the hard ceiling
+    f._last_reconnect_ts = _time.time() - 10                   # still "recent"
+
+    events = []
+    monkeypatch.setattr(f, "close", lambda: events.append("close"))
+    monkeypatch.setattr(f, "subscribe", lambda roots: events.append(("sub", tuple(roots))) or 1)
+
+    f.heal_if_stale()
+    assert events == ["close", ("sub", ("MNQ",))]
 
 
 def test_heal_noop_when_no_engines(monkeypatch):
