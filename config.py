@@ -468,6 +468,29 @@ class Config:
                     "TOPSTEP_MODE_ENABLED + live (PROJECTX_LIVE/TRADING_MODE=live) requires "
                     "PROJECTX_USERNAME and PROJECTX_API_KEY — refusing to run 'live' in mock mode"
                 )
+        # PROJECTX_LIVE selects the funded ProjectX contract/account universe;
+        # TRADING_MODE is the operator's top-level paper/live intent. The two
+        # must agree — ProjectXBroker.submit() places real orders whenever
+        # credentials are valid regardless of TRADING_MODE, so
+        # PROJECTX_LIVE=true + TRADING_MODE=paper is not a safe "paper test of
+        # the live account", it is a live account with the operator believing
+        # otherwise. Refuse to start rather than let that combination run.
+        if self.topstep_mode_enabled and self.projectx_live and not self.is_live:
+            errs.append(
+                "PROJECTX_LIVE=true (funded ProjectX environment) but TRADING_MODE=paper — "
+                "refusing to start with this contradictory config. Set TRADING_MODE=live to "
+                "confirm you intend to trade the funded account, or PROJECTX_LIVE=false for "
+                "sim/eval."
+            )
+        # Live trading with no persisted state means a restart reseeds
+        # peak_equity from the current balance instead of the true trailing
+        # high-water mark, silently loosening the Topstep MLL floor.
+        if self.is_live and not os.getenv("DATABASE_URL", "").strip():
+            errs.append(
+                "TRADING_MODE=live but DATABASE_URL is empty — live trading requires "
+                "persisted state (peak_equity / day-halt) to survive a restart; refusing "
+                "to start stateless. Set DATABASE_URL or keep TRADING_MODE=paper."
+            )
         if self.llm_backend not in ("anthropic", "ollama"):
             errs.append("LLM_BACKEND must be anthropic|ollama")
         if self.llm_enabled and self.llm_backend == "anthropic" and not self.anthropic_api_key:

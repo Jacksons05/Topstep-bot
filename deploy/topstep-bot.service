@@ -9,6 +9,11 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/Topstep-bot
 Environment=PYTHONUNBUFFERED=1
 Environment=PORT=8790
+# Redundant, systemd-level gate on top of the run.py-internal preflight check:
+# if the readiness preflight FAILs, ExecStart never launches at all (distinct
+# "activating (start-pre) failed" status in `systemctl status`, and no Python
+# process — including the dashboard — comes up on a hard blocker).
+ExecStartPre=/home/ubuntu/Topstep-bot/.venv/bin/python /home/ubuntu/Topstep-bot/preflight.py
 ExecStart=/home/ubuntu/Topstep-bot/.venv/bin/python /home/ubuntu/Topstep-bot/run.py
 Restart=always
 RestartSec=15
