@@ -9,6 +9,9 @@ build/
 
 # Secrets & local config (never commit)
 .env
+.env.*
+!.env.example
+*.pem
 
 # Runtime state (ephemeral — managed by Postgres on Railway)
 signals.log
