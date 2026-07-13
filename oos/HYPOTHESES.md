@@ -729,3 +729,93 @@ to manufacture the paper's edge — the specific unsupervised
 classification/transition-probability machinery is likely load-bearing,
 not incidental. Proxy is dead; do not re-tune threshold/window constants
 (500-bar regime window, 1.0 z-vol, 0.5x ATR pullback) to rescue it.
+
+---
+
+# Round 16 — flow-risk OVERLAYS: vol-target sizing (A10) + toxicity veto (A8) (registered 2026-07-13, before running)
+
+NOTE ON TYPE: unlike Rounds 1-15 these are RISK OVERLAYS, not entry edges. They
+generate no trades of their own -- A10 scales an existing position's size, A8
+stands aside on some of an existing strategy's entries. The standard entry PASS
+bar (PF>=1.15, >=60% years positive on a trade stream) does not apply to a
+non-directional sizing/filter rule; the adapted PASS bar below judges risk-
+adjusted improvement of a base stream, net of the overlay's added turnover, by
+the same machinery (one-sided t + 20k bootstrap seed 7, per calendar year).
+
+DATA STATUS (2026-07-13): oos/data/ (ES 5-min) is not on disk and no Databento
+key is set, so the ES kernel cannot run this round. A10's MECHANISM is tested
+now on the one positive-drift series available offline -- daily SPX close
+2011-05 -> 2026-07 (research/data/squeeze_dix_gex.csv, `price`, N~3800). A8 needs
+intraday signed aggressor flow (oos/data/ES_of_1s.npz `tvol`) and is DATA-BLOCKED
+-- spec frozen below, to run when that file exists.
+
+## A10 -- Volatility-managed sizing (Moreira-Muir 2017 mechanism)
+Base stream: daily long-index return r_t (equity risk premium -- the positive-
+expectancy reference the overlay needs). Managed stream: scale exposure by a
+CAUSAL weight w_t = c / sigma_hat_{t-1}; sigma_hat = trailing 22-day realized vol
+of daily returns using data through t-1 only (no look-ahead); c fixed so the
+managed stream's FULL-SAMPLE realized vol equals the base's (Moreira-Muir vol
+normalization -- a presentation scalar, not a signal). Weights clipped to the
+live overlay bounds, run BOTH ways: symmetric [0.34, 2.00] (mechanism form) and
+the funded-account de-risk-only [0.34, 1.00] (the futures form actually shipped).
+Cost: per-day turnover |w_t - w_{t-1}| charged the ES 1-tick round-trip rate
+($29 = comm_rt 4.00 + 2*1*0.25*50) against index notional (price*50).
+
+## A8 -- Flow-toxicity veto (BVC-VPIN stand-aside) [DATA-BLOCKED]
+On ES intraday, compute bulk-volume-classified VPIN over `tvol` (ES_of_1s.npz),
+equal-volume buckets. Frozen rule: mark bars with VPIN in the top decile of the
+trailing 250-bucket distribution as blocked=1 (fed to _simulate's built-in veto
+so freed slots re-pick the next signal). Judge a base entry stream WITH vs
+WITHOUT the veto.
+
+## PASS bar (adapted for a risk overlay; stated to avoid a moved goalpost)
+A10 PASSES iff, net of turnover cost, ALL of:
+  (1) alpha of managed on base (OLS r_managed ~ a + b*r_base) > 0, one-sided
+      p < 0.05 by t AND 20k bootstrap;
+  (2) Sharpe(managed) > Sharpe(base) AND max-drawdown(managed) < max-DD(base);
+  (3) >= 60% of calendar years show managed >= base (annual net).
+Fail (1) but hold (2) -> retained ONLY as drawdown control, not as alpha
+(reported explicitly). A8 PASSES iff the vetoed stream's Sharpe > unvetoed and
+the removed trades' mean is significantly < kept trades' (t + bootstrap).
+Andersen-Bondarenko NULL registered: if VPIN is mechanical volatility, A8 adds
+nothing beyond A10's vol scaling -> FAIL.
+
+## Transfer disclosure
+A10 on DAILY SPX validates the MECHANISM only. It does NOT license live use on
+the Topstep INTRADAY mandate (flat-by-close, ~zero validated intraday drift --
+Rounds 1-15 found no surviving intraday entry edge; an overlay has nothing to
+improve without a positive-expectancy base). Live use stays blocked until a
+validated intraday entry edge exists OR the overlay is confirmed on the ES 5-min
+kernel with real data.
+
+## Round 16 — results (2026-07-13)
+
+Runner: oos/round16_flow_overlays.py (numpy-only; results in round16_results.json).
+A10 on daily SPX 2011-05 -> 2026-07, N=3796, net of $29 ES 1-tick RT turnover cost.
+
+**A10 verdict: does NOT pass as an alpha source. De-risk-only form validated as
+DRAWDOWN CONTROL only (its intended role).**
+
+- derisk_only [0.34,1.0] (the form actually shipped on the futures bot):
+  Sharpe 0.698 -> 0.732, max-DD -$60,977 -> -$48,218 (-21%). BUT alpha
+  $6.25/day, t=0.855, p=0.196 (t) / 0.201 (20k boot) -> NOT significant.
+  pct_years managed>=base = 12.5% (it mostly holds LESS, so it trails base on
+  raw return in calm up-years while winning on risk). => PARTIAL: retained as
+  drawdown/Sharpe control, explicitly NOT an alpha source (fails PASS cond 1).
+- symmetric [0.34,2.0] (leverage-up mechanism form): Sharpe 0.698 -> 0.657
+  (WORSE), alpha t=0.257, p=0.398. => FAIL. Leveraging into low-vol regimes on
+  post-2011 SPX does not survive costs (consistent with Cederburg et al. 2020's
+  out-of-sample critique of volatility-managed portfolios).
+
+**A8 (toxicity veto): NOT RUN — DATA-BLOCKED.** Needs intraday signed aggressor
+flow (oos/data/ES_of_1s.npz `tvol`), not on disk; requires a Databento fetch +
+oos/mbp10_features.py. Spec stays frozen for when the file exists.
+
+**Interpretation.** Result matches the pre-registered expectation: these are risk
+overlays, not edges. The shipped de-risk-only A10 is a legitimate DRAWDOWN-CONTROL
+tool (Topstep's binding constraint is drawdown, not edge) but adds NO alpha and
+must not be represented as one. Per the transfer disclosure, it has nothing to
+improve on the flat-by-close intraday mandate until a validated intraday entry
+edge exists (Rounds 1-15: none). A8 remains untested. Net: overlays may stay
+wired for risk control; they do NOT change the bot's ENTRY-HALTED status, and no
+entry logic is licensed by this round.
