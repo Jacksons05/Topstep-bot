@@ -279,7 +279,10 @@ class OrderFlowEngine:
         variance = sum((v - mean) ** 2 for v in hist) / len(hist)
         std = variance ** 0.5
         if std < 1e-6:
-            return 0.0
+            # Degenerate window (frozen / perfectly flat book): the z-score is
+            # undefined. Fall back to the raw OBI magnitude rather than a
+            # misleading 0.0 that would always fail an extremeness gate.
+            return hist[-1]
         return (hist[-1] - mean) / std
 
     @property
@@ -343,9 +346,18 @@ class OrderFlowEngine:
         want = 1 if direction == "BUY" else -1
         obi = self.obi
         hist = list(self._obi_history)
+        # Use the z-score path only when the rolling window is BOTH long enough
+        # AND has real variance. A degenerate (near-flat / frozen-feed) window
+        # makes the z-score meaningless (it collapses to ~0 and would veto every
+        # entry). Fall back to the raw-magnitude threshold there, so a PERSISTENT
+        # strong imbalance still confirms and a genuinely balanced book does not.
         use_z = len(hist) >= 10
         if use_z:
-            z = self.obi_z()
+            _zmean = sum(hist) / len(hist)
+            _zstd = (sum((v - _zmean) ** 2 for v in hist) / len(hist)) ** 0.5
+            use_z = _zstd >= 1e-6
+        if use_z:
+            z = (hist[-1] - _zmean) / _zstd
             z_thresh = OBI_Z_OVERNIGHT if is_overnight else OBI_Z_RTH
             obi_ok = z >= z_thresh if want > 0 else z <= -z_thresh
             obi_desc = f"OBI z={z:+.2f} (raw={obi:+.2f})"

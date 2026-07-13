@@ -332,6 +332,11 @@ class ProjectXBroker:
                 "low": [float(b["l"]) for b in bars],
                 "close": [float(b["c"]) for b in bars],
                 "volume": [float(b["v"]) for b in bars],
+                # Per-bar UTC ISO timestamp (e.g. "2026-07-10T20:55:00+00:00").
+                # Kept so the engine can anchor intraday VWAP to the 09:30 ET RTH
+                # open instead of a rolling multi-session window. Alpaca's bars()
+                # omits this key, so consumers must treat "time" as optional.
+                "time": [str(b["t"]) for b in bars],
             }
         except Exception as exc:  # noqa: BLE001
             log.warning(f"[ProjectX] historical_bars({symbol}) failed: {exc}")

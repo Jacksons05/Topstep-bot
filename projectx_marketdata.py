@@ -281,8 +281,14 @@ class ProjectXOrderFlowFeed:
 
     # Rebuild the hub after this much feed silence (engine gates entries at
     # 15s staleness already — this is the deeper "connection is dead" repair).
-    _HEAL_AFTER_S = 120
+    _HEAL_AFTER_S = 60
     _HEAL_COOLDOWN_S = 60  # min spacing between rebuild attempts
+    # Hard ceiling: once the feed has been silent this long, force a full rebuild
+    # even if an automatic reconnect looks recent. Repeated socket-close/reconnect
+    # churn keeps stamping _last_reconnect_ts, which would otherwise defer the
+    # staleness heal indefinitely while no data actually flows (observed 2600s+
+    # silences with the market open).
+    _HEAL_HARD_S = 300
 
     def heal_if_stale(self) -> None:
         """Self-heal a silently-dead connection: if every engine has been
@@ -312,8 +318,11 @@ class ProjectXOrderFlowFeed:
             return
         # Give the automatic-reconnect path its own cooldown window: if
         # _on_reconnect fired recently, the re-subscriptions may not have
-        # produced a quote yet even though the connection is healthy.
-        if now - self._last_reconnect_ts < self._HEAL_COOLDOWN_S:
+        # produced a quote yet even though the connection is healthy. Past the
+        # hard-silence ceiling, stop deferring — the reconnect churn is not
+        # delivering data and would otherwise defer the rebuild forever.
+        if (now - freshest < self._HEAL_HARD_S
+                and now - self._last_reconnect_ts < self._HEAL_COOLDOWN_S):
             log.debug(
                 f"[OrderFlow] feed silent {now - freshest:.0f}s but reconnect was "
                 f"{now - self._last_reconnect_ts:.0f}s ago — giving re-subscriptions "

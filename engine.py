@@ -783,16 +783,36 @@ class Engine:
             )
 
         # ── VWAP directional gate ─────────────────────────────────────────────
-        # RTH VWAP (reset conceptually at 09:30 ET) used as intraday fair-value
-        # anchor. Longs only above VWAP; shorts only below. Don't enter when price
-        # is extended > 0.5×ATR from VWAP (chasing). Research: self-fulfilling
-        # institutional benchmark; most execution desks target VWAP ± bands.
+        # RTH VWAP (reset at 09:30 ET) used as intraday fair-value anchor. Longs
+        # only above VWAP; shorts only below. Don't enter when price is extended
+        # > 0.5×ATR from VWAP (chasing). Research: self-fulfilling institutional
+        # benchmark; most execution desks target VWAP ± bands.
         _closes = bars.get("close") or []
         _volumes = bars.get("volume") or []
         if len(_closes) >= 20 and len(_volumes) >= 20 and sum(_volumes[-100:]) > 0:
             _n = min(len(_closes), len(_volumes))
-            _tv = sum(_volumes[-_n:])
-            _vwap = sum(_closes[i] * _volumes[i] for i in range(len(_closes) - _n, len(_closes))) / _tv if _tv > 0 else spot
+            # Anchor the VWAP window to today's 09:30 ET RTH open when the bars
+            # carry per-bar timestamps (ProjectX futures feed). Without a reset
+            # this becomes a multi-session rolling VWAP that lags far behind on
+            # any trending day, so price reads as permanently "extended" and the
+            # gate below blocks nearly every entry. Falls back to the full window
+            # when timestamps are absent (e.g. Alpaca equities bars).
+            _times = bars.get("time") or []
+            _start = len(_closes) - _n  # default: full min-length window
+            if len(_times) == len(_closes):
+                _rth_open = _now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+                for _i in range(len(_times)):
+                    try:
+                        _bt = datetime.fromisoformat(_times[_i]).astimezone(_ZI("America/New_York"))
+                    except (ValueError, TypeError):
+                        continue
+                    if _bt >= _rth_open:
+                        _start = _i
+                        break
+            _seg_c = _closes[_start:]
+            _seg_v = _volumes[_start:]
+            _tv = sum(_seg_v)
+            _vwap = (sum(_seg_c[i] * _seg_v[i] for i in range(len(_seg_c))) / _tv) if _tv > 0 else spot
             _vwap_dev = abs(spot - _vwap)
             _atr_val = quant.atr if quant.atr and quant.atr > 0 else spot * 0.001
             if _phase != "overnight":

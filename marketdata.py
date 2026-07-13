@@ -107,19 +107,50 @@ class MarketData:
         Returns None on a DATA OUTAGE or insufficient history (caller must fail
         CLOSED — halt new entries), distinct from a genuine 0.0% move (flat tape).
 
-        Alpaca first; if no Alpaca key is configured, falls back to Unusual
-        Whales' stock-state endpoint (close vs prev_close) — avoids requiring a
-        second market-data provider just for the regime/circuit-breaker symbol.
+        Source order: Alpaca (if keyed) -> Unusual Whales stock-state -> yfinance.
+        The result is cached ~60s: the %move vs prior close barely changes intra-
+        minute, and polling it every scan otherwise exhausts the UW daily request
+        quota (a silent 429 that pins the circuit breaker RED for the rest of the
+        day). Caching also spares the free yfinance fallback from per-scan calls.
         """
-        if not CONFIG.alpaca_api_key:
-            return self._intraday_change_pct_uw(symbol)
+        import time as _t
+        cache = self.__dict__.setdefault("_regime_cache", {})
+        now = _t.time()
+        hit = cache.get(symbol)
+        if hit is not None and now < hit[0]:
+            return hit[1]
+        val = self._compute_change_pct(symbol)
+        # Cache successes 60s; failures 15s so a dead source is not hammered every
+        # scan yet recovery is still picked up quickly.
+        cache[symbol] = (now + (60.0 if val is not None else 15.0), val)
+        return val
+
+    def _compute_change_pct(self, symbol: str) -> float | None:
+        if CONFIG.alpaca_api_key:
+            try:
+                b = self._fetch_bars(symbol, "1Day", 2)
+                closes = b.get("close") or []
+                if len(closes) >= 2 and closes[-2] != 0:
+                    return (closes[-1] - closes[-2]) / closes[-2] * 100.0
+            except Exception:  # noqa: BLE001
+                pass  # fall through to the keyless fallbacks
+        v = self._intraday_change_pct_uw(symbol)
+        if v is not None:
+            return v
+        return self._intraday_change_pct_yf(symbol)
+
+    def _intraday_change_pct_yf(self, symbol: str) -> float | None:
+        """Free yfinance fallback (no key) for the regime %-change. Used when
+        Alpaca is unkeyed and the UW stock-state endpoint is unavailable (e.g.
+        the daily request quota is hit and every call 429s)."""
         try:
-            b = self._fetch_bars(symbol, "1Day", 2)
+            import yfinance as yf
+            h = yf.Ticker(symbol).history(period="2d")
+            closes = list(h["Close"]) if not h.empty else []
         except Exception:  # noqa: BLE001
-            return None  # transport/HTTP failure → unknown, caller fails closed
-        closes = b.get("close") or []
-        if len(closes) < 2 or closes[-2] == 0:
-            return None  # not enough data to determine a move
+            return None
+        if len(closes) < 2 or not closes[-2]:
+            return None
         return (closes[-1] - closes[-2]) / closes[-2] * 100.0
 
     def _intraday_change_pct_uw(self, symbol: str) -> float | None:
