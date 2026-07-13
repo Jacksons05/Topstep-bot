@@ -819,3 +819,46 @@ improve on the flat-by-close intraday mandate until a validated intraday entry
 edge exists (Rounds 1-15: none). A8 remains untested. Net: overlays may stay
 wired for risk control; they do NOT change the bot's ENTRY-HALTED status, and no
 entry logic is licensed by this round.
+
+---
+
+# Round 17 — A2: MOC / cash-close imbalance drift (registered 2026-07-13, before running)
+
+RATIONALE: Highest-ranked candidate from the 2026-07 research pass (rank 2) that
+is (a) NOT built on the dealer-gamma-sign DIRECTION mechanism already falsified in
+Round 6 (GEX conditioning inverted in-window), and (b) Topstep-compatible (flat by
+16:00, inside the 16:10 rule). Distinct mechanism: equity closing-auction (MOC)
+order imbalance published ~15:50 ET -> index-arb + ETF hedging push ES into the
+16:00 cash close in the imbalance direction; partial overnight reversion (Bogous-
+slavsky & Muravyev 2023, SSRN 3485840).
+
+## Frozen spec (ES, judged at 1-tick slippage, net; times ET)
+Signal: net equity MOC imbalance (NYSE + Nasdaq, summed, $-notional) published at
+the ~15:50 dissemination. Entry: at the 15:50 bar close, if |imbalance| is in the
+top tercile of the trailing 60-session |imbalance| distribution, take ES in the
+imbalance sign. Exit: 15:58 bar close (flat before 16:00 cash close, well inside
+16:10). One trade per day. No stop (8-minute horizon; a hard $ cap sized to DLL
+in live only). No overnight hold (avoids the documented reversion).
+Costs: $29 ES 1-tick RT (comm 4.00 + 2*1*0.25*50).
+
+## Data source + STATUS (2026-07-13): DATA-BLOCKED
+Requires historical equity MOC imbalance (NYSE Order Imbalances / Nasdaq NOII).
+These are PAID proprietary feeds; free multi-year history is not available. The
+ES 5-min bars (oos/data/) needed for the drift leg are also not on disk. Options:
+  1. FORWARD CAPTURE (recommended, matches the UW-capture precedent, CLAUDE.md
+     priority #2): record net MOC imbalance + the 15:50->16:00 ES move daily; test
+     after >= ~3 months / n>=200 sessions.
+  2. Paid history (NYSE TAQ auction / Nasdaq TotalView-Imbalance, or a vendor) ->
+     run oos/round17_moc_drift.py immediately.
+NO PROXY substitute: the 15:45->15:50 ES move alone is just close momentum (a
+distinct, already-dead hypothesis) and must NOT be reported as A2.
+
+## PASS bar (standard entry-edge bar -- A2 IS a directional entry)
+n >= 200, PF >= 1.15, one-sided p < 0.05 (t AND 20k bootstrap seed 7),
+>= 60% of calendar years positive, judged NET at 1-tick slippage. Any fail ->
+dead, no re-tuning. A single PASS still needs unseen-data / forward confirmation
+before shipping (family-wise discipline).
+
+## Runner
+oos/round17_moc_drift.py -- data-format contract + evaluate() (harness kernel
+conventions); reports DATA-BLOCKED until a MOC-imbalance dataset is present.
