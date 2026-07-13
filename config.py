@@ -345,6 +345,24 @@ class Config:
     # guard below is therefore OFF by default; flip on only if your firm reinstates it.
     topstep_scalp_guard_enabled: bool = _b("TOPSTEP_SCALP_GUARD_ENABLED", False)
 
+    # ── flow-risk overlays (flow_risk.py): vol-target sizing + toxicity veto ──
+    # Research-validated (research/gamma_rv_precheck.py). Self-calibrating against
+    # each symbol's own bar history. A10 vol sizing is folded into the futures
+    # risk multiplier, which futures_plan caps at 1.0 -> on a funded account it
+    # can only DE-RISK in elevated-vol regimes, never size up (the cap value is
+    # therefore only exercised on the equities/USD path, which is dormant here).
+    vol_sizing_enabled: bool = _b("VOL_SIZING_ENABLED", True)
+    vol_target_ratio: float = _f("VOL_TARGET_RATIO", 1.0)      # 1.0 = target the symbol's own normal vol
+    vol_sizing_floor: float = _f("VOL_SIZING_FLOOR", 0.34)     # min multiplier (elevated vol -> size down)
+    vol_sizing_cap: float = _f("VOL_SIZING_CAP", 2.0)          # max multiplier (equities path only; futures clamps to 1.0)
+    # A8 toxicity veto: stand aside when BVC-VPIN sits in the top tail of the
+    # symbol's own VPIN history. Risk filter ONLY, never a directional signal
+    # (Andersen-Bondarenko: VPIN's content is largely mechanical vol/volume).
+    toxicity_veto_enabled: bool = _b("TOXICITY_VETO_ENABLED", True)
+    toxicity_pct_threshold: float = _f("TOXICITY_PCT_THRESHOLD", 0.90)  # veto when VPIN in top decile
+    toxicity_min_bars: int = _i("TOXICITY_MIN_BARS", 60)       # need this much history before vetoing
+    vpin_window_bars: int = _i("VPIN_WINDOW_BARS", 20)         # rolling window for the VPIN calc
+
     # Session timing + econ blackout for the Topstep risk layer.
     topstep_flatten_time: str = _s("TOPSTEP_FLATTEN_TIME", "16:08")        # flatten all by this ET (before 16:10 futures close)
     topstep_econ_blackout_min: int = int(os.getenv("TOPSTEP_ECON_BLACKOUT_MIN", "5"))  # blackout window around econ releases (minutes)
