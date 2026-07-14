@@ -116,8 +116,30 @@ FUTURES_SPECS: dict[str, FutureSpec] = {
         micro=True,
         parent="YM",
     ),
+    "M2K": FutureSpec(
+        full_name="Micro E-mini Russell 2000",
+        exchange="CME",
+        tick_size=0.10,
+        tick_value=0.50,     # $5/pt * 0.10 tick  (1/10 of RTY)
+        multiplier=5.0,
+        margin_est=600,
+        asset_class="equity_index",
+        micro=True,
+        parent="RTY",
+    ),
 
     # ── Energy (NYMEX) ─────────────────────────────────────────────────────
+    "MCL": FutureSpec(
+        full_name="Micro WTI Crude Oil",
+        exchange="NYMEX",
+        tick_size=0.01,      # $0.01/barrel
+        tick_value=1.00,     # 100 bbl/contract * $0.01  (1/10 of CL)
+        multiplier=100.0,
+        margin_est=600,
+        asset_class="energy",
+        micro=True,
+        parent="CL",
+    ),
     "CL": FutureSpec(
         full_name="Crude Oil (WTI)",
         exchange="NYMEX",
@@ -137,6 +159,17 @@ FUTURES_SPECS: dict[str, FutureSpec] = {
         multiplier=100.0,
         margin_est=8_500,
         asset_class="metal",
+    ),
+    "MGC": FutureSpec(
+        full_name="Micro Gold",
+        exchange="COMEX",
+        tick_size=0.10,      # $0.10/troy oz
+        tick_value=1.00,     # 10 oz/contract * $0.10  (1/10 of GC)
+        multiplier=10.0,
+        margin_est=1_000,
+        asset_class="metal",
+        micro=True,
+        parent="GC",
     ),
     "SI": FutureSpec(
         full_name="Silver",
