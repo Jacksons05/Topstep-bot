@@ -862,3 +862,167 @@ before shipping (family-wise discipline).
 ## Runner
 oos/round17_moc_drift.py -- data-format contract + evaluate() (harness kernel
 conventions); reports DATA-BLOCKED until a MOC-imbalance dataset is present.
+
+---
+
+# Round 18 — dealer net-gamma-level reversal, intraday (registered 2026-07-09, diagnostic-first, before P&L)
+
+**Source:** deep-research pass (101-agent, 19 sources, 25 claims adversarially
+verified 9-confirmed/16-refuted), converging on Dim/Eraker/Vilkov (SSRN
+4692190 + extended 5641974), Buis/Pieterse-Bloem/Verschoor/Zwinkels (JEDC
+2024), Baltussen/Da/Lammers/Martens (JFE, peer-reviewed).
+
+**Mechanism:** dealer/market-maker net gamma sign+magnitude determines
+hedging direction: positive net gamma → contrarian (buy-dip/sell-rally)
+delta-hedging → dampened vol, stronger short-horizon reversal; negative net
+gamma → momentum-following hedging → amplified vol/fragility. Sources'
+futures-specific number: higher net gamma predicts lower SPX vol over the
+next ~10min, effect fades within ~1hr, and predicts a stronger E-mini
+reversal over the same window.
+
+**Explicit differentiation from Round 6 (already dead — do not treat this as
+a rescue):** Round 6 conditioned static prior-day GEX SIGN (from UW's EOD-only
+`/greek-exposure` endpoint) as a coarse daily filter bolted onto pre-existing
+C2 ORB / C3 VWAP-reversion entries; it FAILED and its own writeup concluded
+"remaining UW angle would be intraday levels... which needs intraday GEX
+history we do not have." Round 18 uses that intraday history (now confirmed
+to exist and be reachable, see below) as the entry trigger itself — continuous
+gamma MAGNITUDE, not daily sign; direct fade signal, not a filter on an
+unrelated entry rule; calibrated to the literature's stated 10min-1hr decay
+window, not an all-day regime label. This differentiation is real but
+UNPROVEN — treat as a genuinely new hypothesis, tested skeptically, not as
+exempt from Round 6's failure.
+
+**Data-availability check (performed 2026-07-09, live probe against
+`/api/stock/{ticker}/spot-exposures`, current UW subscription tier):**
+- Endpoint confirmed live and reachable with current API key. Returns
+  ~1-min-cadence intraday snapshots (fields: `gamma_per_one_percent_move_oi`,
+  `_vol`, `_dir`, `price`, `time`), spanning ~06:30-16:00 ET per trading day
+  (~480 records/day for SPX).
+- Historical depth is tier-capped: probing back dates returned
+  `403 historic_data_access_missing` for 2025-07-09 (1yr back), with the API
+  reporting the earliest available date as **2026-02-26 (90 trading days)**.
+  120 days back (2026-03-12) and 30 days back both returned 200 with data.
+- **Tier determination (from calendar span, per Round 14's convention — decide
+  from span, never from n):** 90 trading days ≈ 4.3 months → **3-12 months
+  bucket → EXPLORATORY ONLY. No PASS from this round is actionable**, even
+  though intraday sampling could produce n well above 200 — the yearly/
+  half-yearly positive-year check cannot be computed meaningfully within a
+  single partial calendar year, and the harness's tiering is bound to
+  calendar span, not raw trade count. Only legitimate next step on a FAIL or
+  a marginal PASS: keep `com.jarvis.uwcapture` running and continue accruing
+  history in parallel, or evaluate the cost of UW's deeper-history add-on
+  ($250/mo per Round 14's pricing note) as a real, disclosed spend decision —
+  not something to assume.
+
+**Signal field, frozen from structure inspection only (never from a P&L
+run):** `gamma_per_one_percent_move_oi` — the open-interest-based gamma
+figure, not `_vol` (volume-based) or `_dir` (directionalized-flow-based).
+This choice is deliberate and mirrors the deep-research finding that the
+volatility-dampening effect is driven by multi-day *inventory* (OI) rolling
+into short-dated exposure, not same-day flow — the OI-based field is the
+correct analog; the volume/direction fields are the same "same-day flow"
+construct the research explicitly found does NOT propagate into forward
+moves. Live sample (SPX, 2026-07-08) confirmed the field is signed (both
+negative, e.g. -1.8e9, and positive, e.g. +1.3e10, values observed same day).
+
+**Sign-convention assumption (frozen, stated before any P&L — this is the
+single biggest implementation-validity risk carried into this round):**
+assume UW's sign follows the standard industry GEX convention (positive =
+dealers net long gamma = stabilizing/contrarian; negative = net short gamma =
+destabilizing/momentum), matching the academic sources' convention. UW's
+exact computation methodology is undocumented in the public API reference and
+was NOT independently verified against the academic construct — this is
+exactly the "vendor methodology mismatch" risk flagged by the research. If
+this round's result looks inverted from the mechanism's prediction, the
+correct response is to note the sign may be flipped and stop — NOT to flip
+the sign and rerun (that is a rescue).
+
+**Frozen trade rule (Topstep-legal, no overnight hold):**
+1. Underlier: SPX (ES/MES judged instrument — this is the only instrument the
+   source literature directly studied). NDX (proxy for NQ/MNQ) run in parallel
+   but reported exploratory-only per the research's own open question #4 (no
+   source studied NQ/QQQ/MNQ) — never pooled into the judged ES cell.
+2. Trailing distribution: pool all `gamma_per_one_percent_move_oi` snapshots
+   over the trailing 5 trading days (rolling, causal, no look-ahead), tercile
+   split (33.3/66.7 pct), recomputed at each new snapshot.
+3. Entry trigger: current snapshot reading >= top tercile (strongly positive
+   net gamma) AND time-of-day in 09:30-15:00 ET (leaves room for the longest
+   frozen hold below to exit before 15:59 ET flatten) AND no position
+   currently open. Direction: fade the underlier's own trailing 10-minute
+   price move (if price rose over the prior 10min, go short; if it fell, go
+   long; flat trailing move -> skip). Bottom tercile (strongly negative net
+   gamma) -> stand aside (research does not establish a clean momentum-side
+   edge, only the dampening side) — no trade, not a mirrored momentum entry.
+   Middle tercile -> no trade.
+4. Exit — three frozen hold times, pre-registered together (not swept after
+   seeing results):
+   - **Primary, judged:** 10-minute hard time-stop (paper's stated peak-effect
+     window).
+   - **Secondary, exploratory/reported-not-judged:** 30-minute and 60-minute
+     hard time-stops (paper's stated fade boundary), same convention as Round
+     15's exploratory secondary cell.
+   - All holds additionally hard-capped at 15:59 ET same-day flatten.
+5. Execution proxy: ES 5-min bars (`oos/data/ES_5min.csv`, `NQ_5min.csv` for
+   the exploratory NDX/NQ leg) — entry/exit price = nearest bar at-or-after
+   the decision timestamp, tolerance 10min (same helper convention as Round
+   14). Skip a signal if no bar found in tolerance.
+6. Costs: ES $4.00 RT + 1-tick slippage both sides; NQ $4.00 RT + 1-tick
+   slippage (exploratory leg), same convention as prior rounds.
+
+**PASS bar (written now — but per the tier determination above, no PASS from
+this run is actionable regardless of what these numbers say; this exists so
+the exploratory read is still judged against a real bar and not just eyeballed):**
+n >= 200 (primary 10-min cell, ES only), PF >= 1.15, one-sided p < 0.05 (t AND
+20k bootstrap). Reported, not actionable, until calendar span clears 1 year.
+
+**Explicitly not in scope:** any parameter sweep on the tercile window, hold
+times, or trailing-lookback-for-direction (10min) if this round's numbers
+look weak — those are frozen above and stay frozen. VIX/ATM-IV residualization
+(open question #2 from the research) is a genuinely different, separate
+hypothesis to register later, not a fix to apply here after seeing a weak
+result.
+
+## Round 18 — results (2026-07-09)
+
+`oos/round18_gamma_reversal.py`, `oos/round18_gamma_scores.json` (190
+ticker-days pulled, SPX+NDX, 2026-02-26 through 2026-07-08),
+`oos/round18_results.json`.
+
+**Primary judged cell — ES, 10-min hold:** n=1018, PF **0.767**, t **-2.943**,
+p_one_sided **0.99837** (bootstrap 0.9985), win 43.5%, 2026 net -$647 (pts).
+This is not a noisy null — p≈0.998 against the hypothesized direction means
+the observed effect is **decisively wrong-signed**: the frozen fade rule lost
+money at high confidence, the opposite of what the mechanism predicts.
+
+| cell | n | PF | t | p (one-sided) | judged |
+|---|---|---|---|---|---|
+| ES hold10 (primary) | 1018 | 0.767 | -2.943 | 0.99837 | yes |
+| ES hold30 (exploratory) | 394 | 0.816 | -1.527 | 0.93661 | no |
+| ES hold60 (exploratory) | 227 | 0.993 | -0.040 | 0.51589 | no |
+| NQ hold10/30/60 | 0 | — | — | — | no |
+
+**NQ leg produced n=0 — a pre-existing data gap, not a signal finding.**
+`oos/data/NQ_5min.csv` ends 2019-05-03 (stale, superseded by `MNQ_5min.csv`
+in later work); it has zero overlap with the 2026-02-26+ gamma window. Not a
+result on the NQ/NDX hypothesis either way — undetermined. (Separately,
+`ES_5min.csv` ends 2026-06-05, ~5 weeks before the gamma data's end date —
+the primary ES cell above is missing its most recent ~24 trading days for the
+same reason. Noted for completeness; not re-pulled or rerun after seeing the
+result, per no-rescue rule — the effect is already decisive at n=1018.)
+
+**Interpretation:** the frozen spec explicitly pre-committed to this exact
+scenario: *"If this round's result looks inverted from the mechanism's
+prediction, the correct response is to note the sign may be flipped and
+stop — NOT to flip the sign and rerun (that is a rescue)."* That is what
+happened. Two live explanations, not distinguished by this data:
+(1) UW's `gamma_per_one_percent_move_oi` sign convention does not match the
+assumed industry convention (the single biggest implementation-validity risk
+flagged at registration time), or (2) the fade-on-positive-gamma mechanism
+genuinely does not survive this construction/instrument/cost structure.
+**This construction is dead. Do not flip the sign and rerun Round 18.** A
+sign-flip test, if wanted, is a NEW hypothesis (would need its own
+pre-registration, e.g. Round 17) — not a patch to this one. Exploratory
+30/60-min cells show the same negative-t direction, weakening toward zero as
+hold lengthens, consistent with cost-drag on a null/negative signal rather
+than a real effect that fades — not grounds to rescue the 10-min cell.

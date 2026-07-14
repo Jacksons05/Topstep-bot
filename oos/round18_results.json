@@ -1,0 +1,50 @@
+{
+ "ES_hold10": {
+  "n": 1018,
+  "judged": true,
+  "pf": 0.767,
+  "t": -2.943,
+  "p_one_sided": 0.99837,
+  "p_bootstrap": 0.9985,
+  "win_pct": 43.5,
+  "yearly_pts": {
+   "2026": -646.94
+  }
+ },
+ "ES_hold30": {
+  "n": 394,
+  "judged": false,
+  "pf": 0.816,
+  "t": -1.527,
+  "p_one_sided": 0.93661,
+  "p_bootstrap": 0.93645,
+  "win_pct": 47.2,
+  "yearly_pts": {
+   "2026": -316.27
+  }
+ },
+ "ES_hold60": {
+  "n": 227,
+  "judged": false,
+  "pf": 0.993,
+  "t": -0.04,
+  "p_one_sided": 0.51589,
+  "p_bootstrap": 0.5151,
+  "win_pct": 54.2,
+  "yearly_pts": {
+   "2026": -8.66
+  }
+ },
+ "NQ_hold10": {
+  "n": 0,
+  "judged": false
+ },
+ "NQ_hold30": {
+  "n": 0,
+  "judged": false
+ },
+ "NQ_hold60": {
+  "n": 0,
+  "judged": false
+ }
+}

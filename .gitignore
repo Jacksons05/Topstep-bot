@@ -41,3 +41,4 @@ ENGINE.lock
 oos/data/
 oos/__pycache__/
 exec_telemetry.jsonl
+oos/round18_gamma_scores.json
