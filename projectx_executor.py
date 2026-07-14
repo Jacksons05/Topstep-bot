@@ -367,6 +367,15 @@ class ProjectXBroker:
 
     def submit(self, symbol: str, qty: float, side: str, ref_price: float) -> Fill:
         """Place a market order for a futures contract."""
+        # Kill-switch choke point: re-check at the actual order-send site, not
+        # just once per cycle in the engine. Arming the switch mid-cycle (file
+        # created / KILL_SWITCH=1) must stop an order already past the engine's
+        # per-cycle check. Function-local import avoids a module-load cycle.
+        from risk import kill_switch_active
+        if kill_switch_active():
+            log.error(f"[ProjectX] kill-switch ARMED — refusing order: "
+                      f"{side} {qty}x {symbol}")
+            raise RuntimeError(f"kill-switch active: order refused ({symbol})")
         n_contracts = max(1, int(qty))
         log.info(
             f"[ProjectX] {'MOCK' if self._mock_mode else 'LIVE'} submit | "
@@ -644,25 +653,35 @@ class ProjectXBroker:
         """Alias for account() — kept for compatibility."""
         return self.account()
 
-    def flatten_all(self) -> None:
-        """Close ALL open positions (EOD Topstep flatten rule) via closeContract."""
+    def flatten_all(self) -> dict[str, bool]:
+        """Close ALL open positions (EOD/breach Topstep flatten) via closeContract.
+
+        Returns a {contract_id: closed_ok} map so the caller can confirm which
+        positions the broker actually flattened and retry the rest, rather than
+        assuming success. RAISES on a get_positions() outage (unknown broker
+        state) so the caller does NOT treat an API error as 'flat' and
+        phantom-close the local book — a failed flatten must be retried, not
+        silently dropped."""
         log.info(f"[ProjectX] flatten_all() | mock={self._mock_mode}")
         if self._mock_mode:
             log.info("[ProjectX] MOCK flatten_all — no real orders placed")
-            return
-        try:
-            for pos in self.get_positions():
-                cid = pos.get("contract_id")
-                if not cid:
-                    continue
-                try:
-                    d = self._post("/api/Position/closeContract", {
-                        "accountId": self.account_id, "contractId": cid,
-                    })
-                    ok = bool(d.get("success"))
-                    log.info(f"[ProjectX] flatten {pos['symbol']} ({cid}): "
-                             f"{'closed' if ok else 'FAILED ' + str(d.get('errorMessage'))}")
-                except Exception as exc:  # noqa: BLE001
-                    log.error(f"[ProjectX] closeContract({cid}) failed: {exc}")
-        except Exception as exc:  # noqa: BLE001
-            log.error(f"[ProjectX] flatten_all() failed: {exc}")
+            return {}
+        result: dict[str, bool] = {}
+        # get_positions() may raise on a transient API error; let it propagate
+        # so the caller retries next scan instead of booking a phantom flat.
+        for pos in self.get_positions():
+            cid = pos.get("contract_id")
+            if not cid:
+                continue
+            try:
+                d = self._post("/api/Position/closeContract", {
+                    "accountId": self.account_id, "contractId": cid,
+                })
+                ok = bool(d.get("success"))
+                result[cid] = ok
+                log.info(f"[ProjectX] flatten {pos['symbol']} ({cid}): "
+                         f"{'closed' if ok else 'FAILED ' + str(d.get('errorMessage'))}")
+            except Exception as exc:  # noqa: BLE001
+                result[cid] = False
+                log.error(f"[ProjectX] closeContract({cid}) failed: {exc}")
+        return result

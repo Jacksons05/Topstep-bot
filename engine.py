@@ -33,7 +33,12 @@ from risk import check, circuit_breaker, kill_switch_active, should_exit
 from signals import Signal, label_for, quant_signal
 from ml_signal import ML
 from datafeed import LiveRecorder
-from futures_symbols import dollar_value_per_point, is_futures_symbol
+from futures_symbols import (
+    contracts_for_mini_budget,
+    dollar_value_per_point,
+    is_futures_symbol,
+    mini_equivalents,
+)
 from flow_risk import FlowRiskManager, FlowRead
 from state import Position, State
 from regime_strategy import (
@@ -293,6 +298,14 @@ class Engine:
             # day-halt) so a restart can't re-arm a fresh daily allowance.
             _sess = str(self._topstep_session_date())
             _restored, _halt = topstep.load_day_state(_sess)
+            if topstep.cold_start_unsafe():
+                # Persisted state was expected but missing/corrupt — the MLL peak
+                # may be understated. preflight FAILs on this so run.py won't even
+                # start; belt-and-suspenders halt entries if we somehow got here.
+                self._topstep_day_halt = True
+                notify("🛑 Topstep: persisted risk state corrupt/missing at cold "
+                       "start — entries HALTED (fail closed). Restore or remove "
+                       "topstep_day_state.json.")
             if _restored:
                 self._topstep_last_reset = self._topstep_session_date()
                 if _halt:
@@ -423,11 +436,19 @@ class Engine:
                     # lower peak (= looser MLL floor) than Topstep has locked.
                     self._topstep.save_day_state(str(today), self._topstep_day_halt)
                 breached, why = self._topstep.risk_breach(equity, self.state, unrealized)
-                if breached and not self._topstep_day_halt:
-                    notify(f"🛑 TOPSTEP BREACH — {why} | flattening all & halting new entries")
-                    self._topstep_flatten_all(why)
-                    self._topstep_day_halt = True
-                    self._topstep.save_day_state(str(today), True)
+                if breached:
+                    # Latch the ENTRY halt once (persist it), but do NOT use that
+                    # latch to gate the flatten: re-flatten every scan until the
+                    # broker confirms flat. _topstep_flatten_all only books
+                    # positions the broker confirms closed, so a failed first
+                    # attempt leaves them open and this retries instead of
+                    # riding a naked position all day.
+                    if not self._topstep_day_halt:
+                        notify(f"🛑 TOPSTEP BREACH — {why} | flattening all & halting new entries")
+                        self._topstep_day_halt = True
+                        self._topstep.save_day_state(str(today), True)
+                    if any(not p.shadow for p in self.state.open_positions):
+                        self._topstep_flatten_all(why)
                 self._topstep.check_combine_progress(self.state)
 
         # 0. reconcile provisional entries against real broker fills
@@ -634,13 +655,22 @@ class Engine:
                 # push the account total over TOPSTEP_MAX_CONTRACTS. Only enforced
                 # when the Topstep layer is active (the cap is a Topstep rule).
                 if self._topstep is not None:
-                    open_contracts = sum(int(p.qty) for p in self.state.open_positions
-                                         if not p.shadow)
-                    qty_cap = CONFIG.topstep_max_contracts - open_contracts
+                    # Account-wide cap is in MINI-equivalents (5 minis = 50
+                    # micros @ 10:1). Convert the open book to mini-equivalents,
+                    # then convert the remaining budget back into whole contracts
+                    # OF THIS symbol — so a micro can size up to ratio× the
+                    # remaining minis and both sites speak the same unit as
+                    # topstep_risk.contracts_ok().
+                    ratio = CONFIG.topstep_micro_ratio
+                    open_mini = sum(mini_equivalents(p.symbol, int(p.qty), ratio)
+                                    for p in self.state.open_positions
+                                    if not p.shadow)
+                    remaining_mini = CONFIG.topstep_max_contracts - open_mini
+                    qty_cap = contracts_for_mini_budget(sig.symbol, remaining_mini, ratio)
                     if qty_cap < 1:
                         notify(f"  skip (Topstep account-wide contract cap "
-                               f"{CONFIG.topstep_max_contracts} reached — "
-                               f"{open_contracts} open): {sig.symbol}")
+                               f"{CONFIG.topstep_max_contracts} mini-equiv reached — "
+                               f"{open_mini:.1f} open): {sig.symbol}")
                         continue
                 plan = futures_plan(sig, sig.price, risk_mult=risk_mult,
                                     max_contracts=qty_cap)
@@ -1002,6 +1032,14 @@ class Engine:
                     return float(mp)
                 if of.bid and of.ask:
                     return (of.bid + of.ask) / 2
+        # Never fall back to the Alpaca equities quote for a futures root: it
+        # resolves the root to a same-named stock (ES=Eversource ~$60) and the
+        # resulting phantom mark can trip a spurious trailing-MLL breach ->
+        # wrongful _topstep_flatten_all. A futures mark must come only from the
+        # ProjectX flow feed / BBO above; if that is unavailable, return None
+        # and let callers skip the mark (they must not assume 0).
+        if is_futures_symbol(symbol):
+            return None
         q = self.data.quote(symbol)
         return q.price if q and q.price > 0 else None
 
@@ -1298,39 +1336,57 @@ class Engine:
         self._exit_ambiguous.clear()
 
     def _topstep_flatten_all(self, reason: str) -> None:
-        """Market-close every open real position via ProjectX and book it in
-        state. Used by the breach handler and the EOD flatten window."""
+        """Market-close every open real position via ProjectX and book only the
+        ones the BROKER confirms flat. Used by the breach handler and the EOD
+        flatten window, both of which call this every scan — so a partial or
+        failed flatten leaves the unconfirmed positions in local state and the
+        next scan retries, rather than one-shot booking a phantom flat."""
         from projectx_executor import ProjectXBroker
-        if not isinstance(self.executor.broker, ProjectXBroker):
+        broker = self.executor.broker
+        if not isinstance(broker, ProjectXBroker):
             return
         open_futures = [p for p in self.state.open_positions if not p.shadow]
         if not open_futures:
             return
         notify(f"[Topstep] flatten ({reason}) — {len(open_futures)} position(s) "
                f"via ProjectX")
+        # Cancel resting protective stops BEFORE closing: a stop left working
+        # after the flatten would fill on the next trade-through and open a
+        # brand-new naked position on a halted account.
+        for pos in open_futures:
+            pid = getattr(pos, "protective_order_id", "")
+            if pid:
+                try:
+                    broker.cancel_order(pid)
+                    pos.protective_order_id = ""
+                except Exception as e:  # noqa: BLE001
+                    notify(f"  ! stop cancel failed {pos.symbol} ({pid}): {e}")
+        # Submit the flatten. flatten_all() raises on a get_positions() outage
+        # (unknown broker state) — do NOT book any close on that; retry next scan.
         try:
-            # Cancel resting protective stops BEFORE closing: a stop left
-            # working after the flatten would fill on the next trade-through
-            # and open a brand-new naked position on a halted account.
-            for pos in open_futures:
-                pid = getattr(pos, "protective_order_id", "")
-                if pid:
-                    try:
-                        self.executor.broker.cancel_order(pid)
-                        pos.protective_order_id = ""
-                    except Exception as e:  # noqa: BLE001
-                        notify(f"  ! stop cancel failed {pos.symbol} ({pid}): {e}")
-            self.executor.broker.flatten_all()
-            for pos in open_futures:
-                mark = self._mark(pos.symbol)
-                exit_price = mark if mark is not None else pos.entry_price
-                self.state.close(pos, exit_price)
-                self._topstep.record_close(pos.pnl_usd, hold_seconds(pos.opened_at))
-                notify(f"  TOPSTEP-FLATTEN {pos.symbol} qty={pos.qty} @ ~{exit_price:.2f}")
-                if CONFIG.manual_tickets:
-                    notify(exit_ticket(pos, exit_price, reason))
+            broker.flatten_all()
         except Exception as e:  # noqa: BLE001
-            notify(f"  ! Topstep flatten error: {e}")
+            notify(f"  ! Topstep flatten submit failed: {e} — retry next scan")
+            return
+        # Confirm against the broker: only book positions it now reports FLAT.
+        # If we can't read positions, leave the whole local book open to retry.
+        try:
+            still_open = {str(p.get("symbol", "")).upper()
+                          for p in broker.get_positions()}
+        except Exception as e:  # noqa: BLE001
+            notify(f"  ! Topstep flatten confirm failed: {e} — book left open, retry next scan")
+            return
+        for pos in open_futures:
+            if pos.symbol.upper() in still_open:
+                notify(f"  ! {pos.symbol} still open at broker after flatten — retry next scan")
+                continue
+            mark = self._mark(pos.symbol)
+            exit_price = mark if mark is not None else pos.entry_price
+            self.state.close(pos, exit_price)
+            self._topstep.record_close(pos.pnl_usd, hold_seconds(pos.opened_at))
+            notify(f"  TOPSTEP-FLATTEN {pos.symbol} qty={pos.qty} @ ~{exit_price:.2f}")
+            if CONFIG.manual_tickets:
+                notify(exit_ticket(pos, exit_price, reason))
 
     # ── partial exits + BE ratchet + ATR trail ────────────
     def _manage_partial_exit(self, pos: "Position", mark: float) -> None:

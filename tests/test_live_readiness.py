@@ -280,11 +280,28 @@ class _FakeData:
         return _FakeQuote(self._px)
 
 
+class _FakeOFlow:
+    """Inject a futures mark through the ORDER-FLOW feed — the realistic source
+    of a futures price. A1 makes _mark() refuse the Alpaca equities quote for
+    futures roots (ES/MNQ/…), so a futures mark must arrive via the flow feed's
+    micro-price, never data.quote()."""
+    def __init__(self, px):
+        self._px = px
+
+    def get(self, symbol):
+        px = self._px
+        return type("_OF", (), {
+            "has_data": True, "micro_price": px, "bid": px, "ask": px,
+        })()
+
+
 def _bare_engine(mark_px: float):
     import engine as eng
     e = eng.Engine.__new__(eng.Engine)
     e._topstep = None
-    e._oflow = None
+    # Futures marks come from the order-flow feed, not the Alpaca equities quote
+    # (A1). Inject the test mark there so _mark() resolves it the way it does live.
+    e._oflow = _FakeOFlow(mark_px)
     e._be_state = {}                     # BE/trail ratchet state (set in __init__)
     e._exit_ambiguous = set()            # ambiguous-exit hold set (set in __init__)
     e.state = State()
@@ -464,6 +481,9 @@ def test_attach_topstep_broker_success_attaches_both_atomically(monkeypatch):
 
         def load_day_state(self, session):
             return False, False
+
+        def cold_start_unsafe(self):
+            return False
 
     monkeypatch.setattr(topstep_risk, "TopstepRiskManager", _FakeTopstepRiskManager)
 

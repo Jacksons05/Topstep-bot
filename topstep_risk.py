@@ -54,6 +54,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from config import CONFIG
+from futures_symbols import mini_equivalents
 from signals import Signal
 from state import State
 
@@ -150,6 +151,12 @@ class TopstepRiskManager:
         self._win_profit_scalp: float = 0.0
         self._min_days_warned: bool = False
         self._mll_breach_warned: bool = False
+        # Set by load_day_state() when persisted risk state was EXPECTED (the
+        # day-state file exists) but is unreadable/corrupt. In that case the
+        # __init__ peak seed above may sit BELOW the true locked high-water mark,
+        # silently loosening the trailing-MLL floor — so we fail closed (block
+        # entries + preflight FAIL) rather than trade on a reseeded peak.
+        self._cold_start_unsafe: bool = False
         log.info(
             f"[Topstep] initialized | account=${self.account_size:,.0f} | "
             f"start_equity=${start:,.2f} | trailing_MLL=${self.mll_buffer:,.0f} "
@@ -207,25 +214,42 @@ class TopstepRiskManager:
         day_start_equity and the halt flag apply only when the saved session
         matches the current one. Returns (session_restored, day_halt).
 
-        Handles corrupted or structurally-invalid files (truncated, non-dict
-        JSON, wrong field types) by treating them as absent — resetting the
-        anchor is safer than trusting a damaged value that could set the MLL
-        peak too low (loosening the floor) or the day base to zero (nuking
-        the DLL check).
+        A GENUINELY ABSENT file (fresh account/cycle) is fine: the __init__ peak
+        seed (account_size) is the correct starting floor. But a file that is
+        PRESENT yet corrupt/unreadable means state was EXPECTED and lost — the
+        seed may understate the true locked high-water mark and loosen the
+        trailing-MLL floor. That case fails closed (sets _cold_start_unsafe, so
+        preflight FAILs and the engine won't arm entries) instead of silently
+        trading on a reseeded peak.
         """
+        if not self._DAY_STATE_FILE.exists():
+            # No persisted state expected — genuine fresh account/cycle.
+            return False, False
+        # File is present → state was expected. Any failure to read a usable
+        # peak_equity from here is a lost high-water mark, not a fresh start.
         try:
             d = json.loads(self._DAY_STATE_FILE.read_text())
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            self._cold_start_unsafe = True
+            log.error(f"[Topstep] day-state file present but corrupt/unreadable "
+                      f"({exc}) — FAIL CLOSED: entries blocked until resolved")
             return False, False
         if not isinstance(d, dict):
-            # Valid JSON but wrong structure (null, list, string, …) — treat
-            # as absent rather than letting d.get() raise AttributeError.
-            log.warning("[Topstep] day-state file contains non-dict JSON — ignoring")
+            # Valid JSON but wrong structure (null, list, string, …).
+            self._cold_start_unsafe = True
+            log.error("[Topstep] day-state file present but non-dict JSON — "
+                      "FAIL CLOSED: entries blocked until resolved")
             return False, False
         try:
             pk = float(d.get("peak_equity") or 0.0)
         except (TypeError, ValueError):
             pk = 0.0
+        if pk <= 0:
+            # File present but no usable high-water mark — same risk as corrupt.
+            self._cold_start_unsafe = True
+            log.error("[Topstep] day-state present but peak_equity missing/<=0 — "
+                      "FAIL CLOSED: entries blocked until resolved")
+            return False, False
         if pk > self.peak_equity:
             self.peak_equity = pk
         if str(d.get("session_date")) != session_date:
@@ -239,6 +263,13 @@ class TopstepRiskManager:
         log.info(f"[Topstep] restored session state | day_base=${self.day_start_equity:,.2f} "
                  f"| peak=${self.peak_equity:,.2f} | halt={bool(d.get('day_halt'))}")
         return True, bool(d.get("day_halt"))
+
+    def cold_start_unsafe(self) -> bool:
+        """True when persisted risk state was expected (day-state file present)
+        but missing/corrupt at startup — the trailing-MLL peak may be understated,
+        so entries must stay blocked (fail closed) until an operator resolves it.
+        Set by load_day_state()."""
+        return self._cold_start_unsafe
 
     def reset_day(self, current_equity: float) -> None:
         """Call at the start of each new trading day to anchor the Daily Loss
@@ -358,9 +389,15 @@ class TopstepRiskManager:
         cap (the limit is account-wide).
         """
         limit = CONFIG.topstep_max_contracts
-        n = sum(int(p.qty) for p in state.open_positions if not p.shadow)
+        ratio = CONFIG.topstep_micro_ratio
+        # Count in MINI-equivalents: the Topstep cap is denominated in minis
+        # (5 minis = 50 micros @ 10:1). Counting raw qty blocked a micro-only
+        # book at 5 raw micros (10× too tight) and would UNDER-count on a mix.
+        n = sum(mini_equivalents(p.symbol, int(p.qty), ratio)
+                for p in state.open_positions if not p.shadow)
         if n >= limit:
-            reason = f"Topstep max contracts: {n} open account-wide, limit={limit}"
+            reason = (f"Topstep max contracts: {n:.1f} mini-equiv open "
+                      f"account-wide, limit={limit}")
             log.info(f"[Topstep] block: {reason}")
             return False, reason
         return True, "ok"

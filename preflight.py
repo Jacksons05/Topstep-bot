@@ -183,6 +183,20 @@ def check_topstep_risk(rep: Report) -> None:
     equity = rep.equity if rep.equity is not None else CONFIG.topstep_account_size
     src = "live balance" if rep.equity is not None else "configured account size (no live read)"
     ts = TopstepRiskManager(initial_equity=equity)
+    # Cold-start integrity (A5): on a SEPARATE probe manager so restoring state
+    # can't perturb the seed-based headroom calc below. If persisted state was
+    # expected (file present) but corrupt/unreadable, the trailing-MLL peak may
+    # be understated (looser floor) — fail closed. load_day_state() swallows its
+    # own IO/parse errors and just sets the flag; the session date only governs
+    # day-anchor restore, which is irrelevant to this integrity probe.
+    probe = TopstepRiskManager(initial_equity=equity)
+    probe.load_day_state(datetime.now(_ET).date().isoformat())
+    if probe.cold_start_unsafe():
+        rep.add(FAIL, "Topstep risk state",
+                "persisted day-state file is present but corrupt/unreadable — the "
+                "trailing-MLL high-water mark may be understated (looser floor). "
+                "Refusing to arm: inspect/restore topstep_day_state.json or remove it "
+                "to start a genuine fresh cycle.")
     floor = ts.mll_floor()
     headroom = equity - floor
     dll = CONFIG.topstep_daily_loss_limit

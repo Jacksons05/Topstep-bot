@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from config import CONFIG
+from futures_symbols import is_futures_symbol
 
 _DATA_FEED = os.getenv("DATA_FEED", "iex")
 
@@ -80,6 +81,14 @@ class MarketData:
             return {}
 
     def quote(self, symbol: str) -> Quote | None:
+        # A futures root must NEVER be priced off the Alpaca equities endpoint:
+        # roots collide with unrelated stock tickers (ES=Eversource ~$60,
+        # GC/CL/SI/NQ/YM/ZB/ZN too), so a "quote" here would be a phantom mark
+        # feeding the Topstep equity/breach math -> spurious trailing-MLL breach
+        # and wrongful liquidation. Futures marks come only from the ProjectX
+        # flow feed / BBO (see engine._mark). Callers already handle None.
+        if is_futures_symbol(symbol):
+            return None
         try:
             r = self._http.get(
                 f"{CONFIG.alpaca_data_url}/v2/stocks/{symbol}/trades/latest",

@@ -42,3 +42,8 @@ oos/data/
 oos/__pycache__/
 exec_telemetry.jsonl
 oos/round18_gamma_scores.json
+
+# runtime artifacts (never commit; KILL_SWITCH already ignored above)
+state.db
+data/recorded/
+.KILL_SWITCH.*

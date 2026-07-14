@@ -233,3 +233,29 @@ def intraday_margin(symbol: str) -> int:
     """
     spec = spec_for(symbol)
     return spec.margin_est if spec else 0
+
+
+def mini_equivalents(symbol: str, qty: float, micro_ratio: float = 10.0) -> float:
+    """Contract count expressed in MINI-equivalents for the Topstep account-wide
+    cap. Topstep's TOPSTEP_MAX_CONTRACTS is denominated in minis (5 minis =
+    50 micros @ 10:1), so a micro contributes only ``1/micro_ratio`` of a mini.
+    Unknown roots are treated as full minis (conservative — never under-counts).
+    """
+    spec = spec_for(symbol)
+    if spec is not None and spec.micro and micro_ratio > 0:
+        return float(qty) / micro_ratio
+    return float(qty)
+
+
+def contracts_for_mini_budget(symbol: str, mini_budget: float,
+                              micro_ratio: float = 10.0) -> int:
+    """Max whole contracts of ``symbol`` that fit within ``mini_budget``
+    mini-equivalents — the inverse of :func:`mini_equivalents`. A micro root
+    gets ``micro_ratio`` × the budget in contracts; a mini/unknown root gets the
+    budget as-is. Returns 0 for a non-positive budget."""
+    if mini_budget <= 0:
+        return 0
+    spec = spec_for(symbol)
+    if spec is not None and spec.micro and micro_ratio > 0:
+        return int(mini_budget * micro_ratio)
+    return int(mini_budget)

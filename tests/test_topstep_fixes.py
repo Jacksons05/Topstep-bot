@@ -309,50 +309,71 @@ def test_reconcile_real_size_change_still_adopted(monkeypatch):
 # ── day_state.json corruption defense ─────────────────────────────────────────
 
 def test_load_day_state_ignores_non_dict_json(tmp_path, monkeypatch):
-    """Valid JSON that is not a dict (null, list, string) must be treated as
-    absent rather than raising AttributeError on d.get()."""
+    """Valid JSON that is not a dict (null, list, string) must not raise on
+    d.get(), and — because the file was PRESENT (state expected) but unusable —
+    must FAIL CLOSED (A5): no session restore + cold_start_unsafe set."""
     ts = TopstepRiskManager.__new__(TopstepRiskManager)
     ts.peak_equity = 50_000.0
     ts.day_start_equity = 50_000.0
 
     for bad_content in ("null", "[]", '"string"', "42"):
+        ts._cold_start_unsafe = False
         state_file = tmp_path / f"day_state_{bad_content[:5]}.json"
         state_file.write_text(bad_content)
-        monkeypatch.setattr(TopstepRiskManager, "_DAY_STATE_FILE",
-                            type("P", (), {"read_text": lambda self: bad_content,
-                                           "exists": lambda self: True})())
         # Patch at instance level since _DAY_STATE_FILE is a class variable.
         ts._DAY_STATE_FILE = state_file
         restored, halt = ts.load_day_state("2026-07-09")
         assert not restored, f"non-dict JSON {bad_content!r} must return (False, False)"
         assert not halt
+        assert ts.cold_start_unsafe(), f"present-but-corrupt {bad_content!r} must fail closed"
 
 
-def test_load_day_state_tolerates_truncated_file(tmp_path):
-    """A truncated / syntactically invalid file must be silently ignored."""
+def test_load_day_state_truncated_file_fails_closed(tmp_path):
+    """A truncated / syntactically invalid file that is PRESENT means state was
+    expected but lost — A5 fails closed rather than silently reseeding the peak."""
     ts = TopstepRiskManager.__new__(TopstepRiskManager)
     ts.peak_equity = 50_000.0
     ts.day_start_equity = 50_000.0
+    ts._cold_start_unsafe = False
     state_file = tmp_path / "day_state.json"
     state_file.write_text('{"session_date": "2026-07-09", "peak_equity": 51000')  # truncated
     ts._DAY_STATE_FILE = state_file
 
     restored, halt = ts.load_day_state("2026-07-09")
     assert not restored
+    assert ts.cold_start_unsafe()
 
 
-def test_load_day_state_peak_equity_wrong_type_does_not_raise(tmp_path):
-    """peak_equity stored as a string must not crash load_day_state."""
+def test_load_day_state_peak_equity_wrong_type_fails_closed(tmp_path):
+    """peak_equity stored as a non-numeric string must not crash AND — since a
+    bad/absent high-water mark is the exact case that loosens the MLL floor —
+    must FAIL CLOSED (A5) instead of restoring the session on a reseeded peak."""
     ts = TopstepRiskManager.__new__(TopstepRiskManager)
     ts.peak_equity = 50_000.0
     ts.day_start_equity = 50_000.0
+    ts._cold_start_unsafe = False
     state_file = tmp_path / "day_state.json"
     state_file.write_text(
         '{"session_date": "2026-07-09", "peak_equity": "corrupt", '
         '"day_start_equity": 50000.0, "day_halt": false}'
     )
     ts._DAY_STATE_FILE = state_file
-    # Must not raise; peak_equity corruption → keeps current value
+    restored, halt = ts.load_day_state("2026-07-09")  # must not raise
+    assert not restored
+    assert ts.cold_start_unsafe()
+    assert ts.peak_equity == pytest.approx(50_000.0)  # never reseeded below the seed
+
+
+def test_load_day_state_absent_file_is_fresh_not_unsafe(tmp_path):
+    """A GENUINELY ABSENT file is a fresh cycle, not a lost state — it must NOT
+    fail closed (A5): the __init__ seed is the correct starting floor."""
+    ts = TopstepRiskManager.__new__(TopstepRiskManager)
+    ts.peak_equity = 50_000.0
+    ts.day_start_equity = 50_000.0
+    ts._cold_start_unsafe = False
+    ts._DAY_STATE_FILE = tmp_path / "does_not_exist.json"
+
     restored, halt = ts.load_day_state("2026-07-09")
-    assert restored  # session matched
-    assert ts.peak_equity == pytest.approx(50_000.0)  # corrupt field → ignored, kept original
+    assert not restored
+    assert not halt
+    assert not ts.cold_start_unsafe()
