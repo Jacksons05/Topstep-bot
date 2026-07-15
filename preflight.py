@@ -92,12 +92,32 @@ def check_dependencies(rep: Report) -> None:
     else:
         rep.add(PASS, "Core dependencies", "httpx, numpy, python-dotenv present")
 
-    # State persistence — optional but recommended for a 24/7 deploy.
-    if present("psycopg2"):
-        rep.add(PASS, "State backend", "psycopg2 present (Postgres-backed state available)")
-    else:
+    # State persistence — SAFETY-CRITICAL for a 24/7 Topstep deploy. Running
+    # stateless (or with a configured-but-down DB) means a restart forgets open
+    # positions and re-opens them — the 2026-07-14 overnight blow-up. If
+    # DATABASE_URL is set, require a LIVE connection; if it's down, FAIL so the
+    # engine never starts trading stateless.
+    if not present("psycopg2"):
         rep.add(WARN, "State backend",
                 "psycopg2 absent — state is in-memory only (lost on restart)")
+    else:
+        import state as _state
+        if _state.DATABASE_URL:
+            ok, detail = _state.ping()
+            if ok:
+                rep.add(PASS, "State backend", f"Postgres reachable ({detail})")
+            else:
+                rep.add(FAIL, "State backend",
+                        "DATABASE_URL is set but Postgres is UNREACHABLE — refusing to "
+                        "start. Trading stateless re-accumulates positions across "
+                        f"restarts (2026-07-14 blow-up). {detail}")
+        elif CONFIG.topstep_mode_enabled:
+            rep.add(WARN, "State backend",
+                    "Topstep mode with NO DATABASE_URL — state is in-memory only; a "
+                    "restart forgets and could re-open positions. Set DATABASE_URL.")
+        else:
+            rep.add(WARN, "State backend",
+                    "no DATABASE_URL — state is in-memory only (lost on restart)")
 
     # LLM client — only needed when the agent team is on.
     if CONFIG.llm_enabled and CONFIG.llm_backend == "anthropic":

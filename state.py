@@ -204,6 +204,28 @@ def _ensure_schema() -> None:
         _schema_ready = True
 
 
+def ping() -> tuple[bool, str]:
+    """Live DB connectivity probe for preflight.
+
+    (True, "stateless") when DATABASE_URL is unset — that is a deliberate mode.
+    (True, "connected") when a real connection + `SELECT 1` succeeds.
+    (False, <error>) when DATABASE_URL is SET but the server is UNREACHABLE — the
+    caller MUST fail closed. This is the guard for the 2026-07-14 blow-up: a set-
+    but-down DB made State.load() raise → crash-loop → the engine restarted into
+    empty state and re-opened positions it had forgotten. Refusing to start when
+    the configured DB is down keeps the bot from ever trading stateless."""
+    if not _DB_ENABLED:
+        return True, "stateless (DATABASE_URL unset)"
+    try:
+        with _db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+        return True, "connected"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{type(exc).__name__}: {exc}"
+
+
 @dataclass
 class Position:
     symbol: str

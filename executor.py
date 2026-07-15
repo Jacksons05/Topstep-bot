@@ -191,19 +191,25 @@ class Executor:
         if futures and not pos.shadow and filled and stop and pos.qty > 0:
             place = getattr(self.broker, "place_stop_order", None)
             if callable(place):
+                stop_oid = ""
                 try:
                     stop_oid = place(sig.symbol, pos.qty, _flip(sig.side), stop)
-                    pos.protective_order_id = stop_oid or ""
-                    if pos.protective_order_id:
-                        log.info("[exec] %s protective STOP resting @ %.2f (order %s)",
-                                 sig.symbol, stop, pos.protective_order_id)
-                    else:
-                        log.error("[exec] %s protective STOP NOT confirmed — position "
-                                  "relies on client-side stop only!", sig.symbol)
                 except Exception as exc:  # noqa: BLE001
-                    log.error("[exec] %s protective STOP submit failed: %s — "
-                              "client-side stop only!", sig.symbol, exc)
-                    pos.protective_order_id = ""
+                    log.error("[exec] %s protective STOP submit failed: %s",
+                              sig.symbol, exc)
+                pos.protective_order_id = stop_oid or ""
+                if pos.protective_order_id:
+                    log.info("[exec] %s protective STOP resting @ %.2f (order %s)",
+                             sig.symbol, stop, pos.protective_order_id)
+                else:
+                    # No confirmed native stop → NEVER hold a naked futures
+                    # position (2026-07-14 blow-up: rejected stops + a crash/
+                    # DB-down loop left positions naked and re-accumulating). The
+                    # client-side polled stop is not a safe fallback — it's dead
+                    # across a crash. Flatten what we just opened, immediately.
+                    log.error("[exec] %s protective STOP NOT confirmed — flattening "
+                              "immediately to avoid a naked position", sig.symbol)
+                    self._flatten_unprotected(pos, state)
 
         # Cramer inverse shadow — bookkeeping only, never sent to broker.
         if CONFIG.cramer_mode and not state.has_open(sig.symbol, shadow=True):
@@ -215,6 +221,21 @@ class Executor:
                 opened_at=_now(), mode=self.mode, shadow=True,
             ))
         return pos
+
+    def _flatten_unprotected(self, pos: Position, state: State) -> None:
+        """Emergency market-close a futures position that could not be given a
+        native protective stop, and book it closed. Better a small round-trip
+        than a naked position against the trailing MLL. If even this close fails
+        the position is genuinely naked at the broker — log CRITICAL so it's
+        caught (e.g. by a monitor) rather than silently held."""
+        try:
+            self.close(pos, pos.entry_price, state)
+            log.error("[exec] %s flattened (could not arm protective stop) — "
+                      "booked closed", pos.symbol)
+        except Exception as exc:  # noqa: BLE001
+            log.critical("[exec] %s FAILED to flatten an UNPROTECTED position (%s) "
+                         "— MANUAL INTERVENTION: it may be naked at the broker",
+                         pos.symbol, exc)
 
     def close_partial(self, pos: Position, close_qty: int, exit_price: float) -> bool:
         """Close a partial qty of a futures position without fully closing it.
