@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 from broker import build_broker
 from config import CONFIG
-from futures_symbols import dollar_value_per_point, is_futures_symbol
+from futures_symbols import dollar_value_per_point, is_futures_symbol, spec_for
 from signals import Signal
 from state import Position, State
 
@@ -58,7 +58,8 @@ def _futures_risk_budget_usd() -> float:
 
 def futures_plan(sig: Signal, price: float | None = None,
                  risk_mult: float = 1.0,
-                 max_contracts: int | None = None) -> FuturesPlan | None:
+                 max_contracts: int | None = None,
+                 atr_mult: float | None = None) -> FuturesPlan | None:
     """Risk-based futures sizing + ATR bracket. Returns a plan, or None to REJECT
     the trade (invalid/zero ATR, unknown $/pt, or stop too wide for the budget).
 
@@ -85,7 +86,12 @@ def futures_plan(sig: Signal, price: float | None = None,
     # ATR must be finite and strictly positive — it sizes the stop.
     if not (atr and math.isfinite(atr) and atr > 0):
         return None
-    dist = CONFIG.atr_stop_mult * atr            # points — NO equities % floor for futures
+    # Dynamic ATR stop multiplier: the regime playbook's atr_stop_mult (1.5 in
+    # calm regimes / 3.0 in Crisis) overrides the global default when supplied —
+    # previously the playbook value was computed but never reached sizing.
+    _mult = atr_mult if (atr_mult and math.isfinite(atr_mult) and atr_mult > 0) \
+        else CONFIG.atr_stop_mult
+    dist = _mult * atr                           # points — NO equities % floor for futures
     if not (math.isfinite(dist) and dist > 0):
         return None
     per_contract_risk = dist * pv
@@ -133,7 +139,8 @@ class Executor:
 
     def open(self, sig: Signal, size_usd: float, state: State,
              risk_mult: float = 1.0,
-             max_contracts: int | None = None) -> Position | None:
+             max_contracts: int | None = None,
+             atr_mult: float | None = None) -> Position | None:
         """Size + submit an entry. Returns the Position, or None to REJECT (no
         broker order placed) when risk-based sizing yields 0 contracts or the
         stop is non-finite. risk_mult shrinks the futures risk budget (circuit
@@ -141,11 +148,12 @@ class Executor:
 
         `max_contracts` caps futures qty to the remaining ACCOUNT-WIDE capacity
         (TOPSTEP_MAX_CONTRACTS − contracts already open) so a new order can never
-        push the total over the Topstep limit."""
+        push the total over the Topstep limit. `atr_mult` overrides the global
+        ATR stop multiplier with the regime playbook's value."""
         futures = is_futures_symbol(sig.symbol)
         if futures:
             plan = futures_plan(sig, sig.price, risk_mult=risk_mult,
-                                max_contracts=max_contracts)
+                                max_contracts=max_contracts, atr_mult=atr_mult)
             if plan is None:
                 log.warning("[exec] reject %s — futures sizing failed "
                             "(invalid ATR, stop too wide for risk budget, or no "
@@ -161,13 +169,32 @@ class Executor:
                 log.warning("[exec] reject %s — non-finite stop", sig.symbol)
                 return None
 
-        fill = self.broker.submit(sig.symbol, qty, sig.side, sig.price)
+        # ── Server-side bracket at POST time (Phase 3) ────────────────────────
+        # Send the protective stop WITH the entry (ProjectX stopLossBracket, a
+        # positive tick distance from the fill) so the position is protected on
+        # the exchange from the instant it exists — no fill→stop race, and no
+        # "price outside allowed range" rejection off a stale absolute price.
+        # Only the ProjectX broker supports it (capability-detected); the floor
+        # of 1 tick + conservative floor-rounding keeps the resting stop never
+        # farther from entry than the risk-sized distance futures_plan budgeted.
+        sl_ticks: int | None = None
+        if (futures and CONFIG.px_bracket_enabled
+                and callable(getattr(self.broker, "find_bracket_stop", None))):
+            _spec = spec_for(sig.symbol)
+            if _spec and _spec.tick_size > 0:
+                sl_ticks = max(1, math.floor(plan.stop_distance_points / _spec.tick_size))
+
+        if sl_ticks:
+            fill = self.broker.submit(sig.symbol, qty, sig.side, sig.price,
+                                      stop_loss_ticks=sl_ticks)
+        else:
+            fill = self.broker.submit(sig.symbol, qty, sig.side, sig.price)
         filled = fill.status == "filled"
 
         # Re-anchor the bracket to the ACTUAL fill price (distances are unchanged).
         if futures:
             fp = futures_plan(sig, fill.price, risk_mult=risk_mult,
-                              max_contracts=max_contracts) or plan
+                              max_contracts=max_contracts, atr_mult=atr_mult) or plan
             stop, target = fp.stop_price, fp.target_price
         else:
             stop = self._stop(sig, fill.price)
@@ -183,33 +210,86 @@ class Executor:
         state.add(pos)
 
         # ── Native exchange-resting protective stop (C1) ─────────────────────
-        # Submit a STOP order on the opposite side immediately after the entry so a
-        # crash/gap/disconnect can't leave the position unprotected against the
-        # trailing MLL. Only the ProjectX broker exposes place_stop_order; Sim /
-        # Alpaca skip it (no real-money futures). The id is stored so the
-        # client-side exit path can cancel it (see close()).
+        # Preferred path (Phase 3): adopt the SERVER-SIDE bracket child the
+        # gateway created from the entry's stopLossBracket. Adoption is exact
+        # (child.parentOrderId == entry orderId) and the child is VALIDATED —
+        # right side, right side-of-fill price — before it's trusted, so even a
+        # misread of the gateway's tick convention degrades to the flatten
+        # path, never to a naked or wrongly-protected position.
+        # Legacy path: a separate post-fill STOP order (still used when
+        # brackets are disabled/unsupported, and by the re-arm/BE machinery).
         if futures and not pos.shadow and filled and stop and pos.qty > 0:
-            place = getattr(self.broker, "place_stop_order", None)
-            if callable(place):
-                stop_oid = ""
+            adopted = False
+            if sl_ticks:
+                info = None
                 try:
-                    stop_oid = place(sig.symbol, pos.qty, _flip(sig.side), stop)
+                    info = self.broker.find_bracket_stop(fill.order_id)
                 except Exception as exc:  # noqa: BLE001
-                    log.error("[exec] %s protective STOP submit failed: %s",
+                    log.error("[exec] %s bracket-stop adoption failed: %s",
                               sig.symbol, exc)
-                pos.protective_order_id = stop_oid or ""
-                if pos.protective_order_id:
-                    log.info("[exec] %s protective STOP resting @ %.2f (order %s)",
-                             sig.symbol, stop, pos.protective_order_id)
+                if info and info.get("order_id"):
+                    right_side = info.get("side") == _flip(sig.side)
+                    sp = float(info.get("stop_price") or 0.0)
+                    right_price = ((info.get("side") == "SELL" and 0 < sp < fill.price)
+                                   or (info.get("side") == "BUY" and sp > fill.price))
+                    if right_side and right_price:
+                        pos.protective_order_id = info["order_id"]
+                        pos.stop = sp  # book the ACTUAL resting stop, not the plan's
+                        adopted = True
+                        log.info("[exec] %s bracket STOP adopted @ %.2f (order %s)",
+                                 sig.symbol, sp, pos.protective_order_id)
+                    else:
+                        # The gateway created SOMETHING, but not the protection we
+                        # asked for (wrong side/price ⇒ our tick-convention read
+                        # was wrong). Cancel it and flatten — never trade behind
+                        # a stop we don't understand.
+                        log.error("[exec] %s bracket child INVALID (side=%s stop=%.2f "
+                                  "vs fill %.2f) — cancelling child + flattening",
+                                  sig.symbol, info.get("side"), sp, fill.price)
+                        try:
+                            self.broker.cancel_order(info["order_id"])
+                        except Exception:  # noqa: BLE001
+                            pass
+                        self._flatten_unprotected(pos, state)
+                        return pos
                 else:
-                    # No confirmed native stop → NEVER hold a naked futures
-                    # position (2026-07-14 blow-up: rejected stops + a crash/
-                    # DB-down loop left positions naked and re-accumulating). The
-                    # client-side polled stop is not a safe fallback — it's dead
-                    # across a crash. Flatten what we just opened, immediately.
-                    log.error("[exec] %s protective STOP NOT confirmed — flattening "
-                              "immediately to avoid a naked position", sig.symbol)
+                    # Bracket was REQUESTED but no child is visible. It may still
+                    # exist (searchOpen outage) — placing a second stop here could
+                    # double-fill and FLIP the position, so flatten instead.
+                    log.error("[exec] %s bracket STOP not found after entry %s — "
+                              "flattening (a hidden child may rest; never risk a "
+                              "double stop)", sig.symbol, fill.order_id)
                     self._flatten_unprotected(pos, state)
+                    return pos
+            if not adopted and not sl_ticks:
+                place = getattr(self.broker, "place_stop_order", None)
+                if callable(place):
+                    stop_oid = ""
+                    try:
+                        try:
+                            # Pass the fill as the live mark so a stale-ref stop gets
+                            # collared to the valid side instead of rejected (errorCode=2).
+                            stop_oid = place(sig.symbol, pos.qty, _flip(sig.side), stop,
+                                             mark=fill.price)
+                        except TypeError:
+                            # Broker (or test double) predates the mark kwarg.
+                            stop_oid = place(sig.symbol, pos.qty, _flip(sig.side), stop)
+                    except Exception as exc:  # noqa: BLE001
+                        log.error("[exec] %s protective STOP submit failed: %s",
+                                  sig.symbol, exc)
+                    pos.protective_order_id = stop_oid or ""
+                    if pos.protective_order_id:
+                        log.info("[exec] %s protective STOP resting @ %.2f (order %s)",
+                                 sig.symbol, stop, pos.protective_order_id)
+                    else:
+                        # No confirmed native stop → NEVER hold a naked futures
+                        # position (2026-07-14 blow-up: rejected stops + a crash/
+                        # DB-down loop left positions naked and re-accumulating). The
+                        # client-side polled stop is not a safe fallback — it's dead
+                        # across a crash. Flatten what we just opened, immediately.
+                        log.error("[exec] %s protective STOP NOT confirmed — flattening "
+                                  "immediately to avoid a naked position", sig.symbol)
+                        self._flatten_unprotected(pos, state)
 
         # Cramer inverse shadow — bookkeeping only, never sent to broker.
         if CONFIG.cramer_mode and not state.has_open(sig.symbol, shadow=True):

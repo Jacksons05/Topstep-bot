@@ -245,6 +245,13 @@ class Config:
     # ── exits: ATR-based stops + take-profit ──────────────
     atr_stop_mult: float = _f("ATR_STOP_MULT", 2.0)        # stop = entry - mult*ATR
     atr_target_mult: float = _f("ATR_TARGET_MULT", 3.0)    # target = entry + mult*ATR
+    # Attach the protective stop as a SERVER-SIDE bracket on the entry POST
+    # (ProjectX stopLossBracket, ticks from fill) instead of a second order
+    # after the fill — closes the fill→stop race and, being fill-relative,
+    # can't be rejected "price outside allowed range" off a stale ref price.
+    # The bracket child is adopted (parentOrderId), side-validated, and on any
+    # anomaly the position is flattened — same invariant as the legacy path.
+    px_bracket_enabled: bool = _b("PX_BRACKET_ENABLED", True)
     take_profit_pct: float = _f("TAKE_PROFIT_PCT", 0.0)    # 0 = use ATR target only
     stop_loss_pct: float = _f("STOP_LOSS_PCT", 0.08)       # hard floor regardless of ATR
 
@@ -413,6 +420,26 @@ class Config:
     # never affects trades). Empty path = disabled. Analyze with `python uw_logger.py`.
     uw_flow_log: str = _s("UW_FLOW_LOG", "")
 
+    # ── GEX-regime entry engine (Phase 4 pivot) ───────────
+    # "gex"   : dealer net-GEX regime toggle (uw_gex.py + gex_strategy.py) —
+    #           positive gamma → VWAP mean-reversion, negative gamma →
+    #           reduced-risk breakout momentum, neutral → entries locked.
+    # "legacy": the SMA20/50+RSI quant signal (OOS-confirmed negative EV,
+    #           Rounds 1/19 — kept only for comparison runs).
+    entry_engine: str = _s("ENTRY_ENGINE", "gex").lower()
+    # Futures→UW GEX proxy override ("MES:SPY,MNQ:QQQ"); defaults in uw_gex.py.
+    uw_gex_proxy_map_raw: str = _s("UW_GEX_PROXY_MAP", "")
+    uw_gex_cache_sec: int = _i("UW_GEX_CACHE_SEC", 900)   # greek-exposure is daily data
+    # Neutral band as a fraction of median |net_gamma|: |net| below the band =
+    # "no reliable dealer pressure" → entries locked.
+    gex_neutral_band_frac: float = _f("GEX_NEUTRAL_BAND_FRAC", 0.25)
+    gex_mr_atr_dev: float = _f("GEX_MR_ATR_DEV", 1.0)     # ATRs from VWAP to fade
+    gex_breakout_lookback: int = _i("GEX_BREAKOUT_LOOKBACK", 20)  # bars for high/low break
+    # Risk multiplier for negative-gamma (vol-expanded) breakout entries —
+    # the "strictly micro-sized" leg of the pivot. Applied on top of the other
+    # defensive multipliers; futures_plan still caps the product at 1.0.
+    gex_neg_risk_mult: float = _f("GEX_NEG_RISK_MULT", 0.5)
+
     # ── notify / logging ──────────────────────────────────
     discord_webhook: str = _s("DISCORD_WEBHOOK")
     log_file: str = _s("LOG_FILE", "signals.log")
@@ -517,6 +544,20 @@ class Config:
             errs.append("UW_FLOW_ENABLED=true but UW_API_KEY is empty")
         if not 0.0 <= self.uw_flow_lean_weight <= 1.0:
             errs.append("UW_FLOW_LEAN_WEIGHT must be in [0, 1]")
+        if self.entry_engine not in ("gex", "legacy"):
+            errs.append("ENTRY_ENGINE must be gex|legacy")
+        if self.entry_engine == "gex" and not self.uw_api_key:
+            errs.append(
+                "ENTRY_ENGINE=gex needs UW_API_KEY (dealer net-GEX regime feed). "
+                "Without it every scan reads neutral and entries stay locked — "
+                "set the key or fall back to ENTRY_ENGINE=legacy deliberately."
+            )
+        if not 0.0 <= self.gex_neutral_band_frac <= 1.0:
+            errs.append("GEX_NEUTRAL_BAND_FRAC must be in [0, 1]")
+        if not 0.0 < self.gex_neg_risk_mult <= 1.0:
+            errs.append("GEX_NEG_RISK_MULT must be in (0, 1]")
+        if self.gex_breakout_lookback < 5:
+            errs.append("GEX_BREAKOUT_LOOKBACK must be ≥ 5 bars")
         if self.min_confidence not in ("low", "medium", "high"):
             errs.append("MIN_CONFIDENCE must be low|medium|high")
         if not 0 < self.max_position_pct <= 1:

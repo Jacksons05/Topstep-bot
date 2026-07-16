@@ -84,6 +84,22 @@ CREATE TABLE IF NOT EXISTS state_meta (
 )
 """
 
+# Equity history per broker account (Bug #7 / Phase 1). The trailing-MLL peak
+# must reseed from the HISTORICAL maximum on a cold boot — never from the
+# current balance, which after a drawdown silently lowers the floor $2k below
+# wherever the account happens to sit. Keyed by broker account id so a new
+# Combine/Express cycle (new account id) genuinely starts fresh, while a
+# restart of the SAME account always finds its true high-water mark even if
+# the local topstep_day_state.json was lost (redeploy, new host, deleted file).
+_DDL_ACCOUNT_HISTORY = """
+CREATE TABLE IF NOT EXISTS account_history (
+    account_id TEXT        NOT NULL,
+    ts         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    equity     REAL        NOT NULL,
+    PRIMARY KEY (account_id, ts)
+)
+"""
+
 
 def _dsn() -> str:
     url = DATABASE_URL
@@ -198,6 +214,7 @@ def _ensure_schema() -> None:
                 cur.execute(_DDL_POSITIONS)
                 cur.execute(_DDL_DECISIONS)
                 cur.execute(_DDL_META)
+                cur.execute(_DDL_ACCOUNT_HISTORY)
                 for stmt in _DDL_MIGRATE:
                     cur.execute(stmt)
                 cur.execute("INSERT INTO state_meta (id) VALUES (1) ON CONFLICT DO NOTHING")
@@ -224,6 +241,49 @@ def ping() -> tuple[bool, str]:
         return True, "connected"
     except Exception as exc:  # noqa: BLE001
         return False, f"{type(exc).__name__}: {exc}"
+
+
+def record_equity(account_id: str, equity: float) -> None:
+    """Append an equity observation to account_history (Bug #7 / Phase 1).
+
+    Deliberately RAISES on DB failure instead of swallowing it: a write that
+    can't land means the state backend is gone, and the caller (the engine's
+    per-cycle DB heartbeat) must treat that as a fail-closed event, not a
+    logging inconvenience. No-op in stateless mode or on junk input."""
+    if not _DB_ENABLED or not account_id:
+        return
+    eq = float(equity)
+    import math as _math
+    if not _math.isfinite(eq) or eq <= 0:
+        return  # never poison the history the MLL peak reseeds from
+    _ensure_schema()
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO account_history (account_id, equity) VALUES (%s, %s)",
+                (account_id, eq),
+            )
+
+
+def historical_peak_equity(account_id: str) -> float | None:
+    """True historical maximum equity for this broker account, from Postgres.
+
+    Returns None when there is genuinely no history for the account (fresh
+    cycle — seeding from the current balance is then correct) or in stateless
+    mode. RAISES on a DB error: "couldn't read the history" must never be
+    conflated with "there is no history", or a flaky DB quietly reseeds the
+    trailing-MLL peak from a drawn-down balance (Bug #7)."""
+    if not _DB_ENABLED or not account_id:
+        return None
+    _ensure_schema()
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT MAX(equity) FROM account_history WHERE account_id = %s",
+                        (account_id,))
+            row = cur.fetchone()
+    if row is None or row[0] is None:
+        return None
+    return float(row[0])
 
 
 @dataclass
@@ -305,6 +365,20 @@ class State:
                     )
                     for r in cur.fetchall()
                 ]
+
+        # Fail CLOSED on corrupt day-state (Phase 2): a NaN/inf realized or
+        # day-anchor P&L silently disarms the Daily-Loss-Limit math (NaN
+        # comparisons are always False), so the engine would trade with a
+        # dead DLL. Raising here surfaces at preflight/startup instead.
+        import math as _math
+        for _name, _v in (("realized_pnl", realized), ("shadow_pnl", shadow),
+                          ("day_start_pnl", day_start)):
+            if not _math.isfinite(_v):
+                raise RuntimeError(
+                    f"state_meta corrupt: {_name}={_v!r} is not finite — "
+                    "refusing to load day state (fail closed). Inspect the "
+                    "state_meta row in Postgres before restarting."
+                )
 
         s = cls(positions=positions, realized_pnl_usd=realized, shadow_pnl_usd=shadow,
                 day=day, day_start_pnl=day_start, trading_days=trading_days)

@@ -136,15 +136,31 @@ class TopstepRiskManager:
                             balance. update_equity() must be called each scan.
     """
 
-    def __init__(self, initial_equity: float | None = None) -> None:
+    def __init__(self, initial_equity: float | None = None,
+                 historical_peak: float | None = None) -> None:
         # Live equity at startup. Falls back to the configured account size.
         start = initial_equity or CONFIG.topstep_account_size
         self.account_size: float = CONFIG.topstep_account_size
         self.mll_buffer: float = CONFIG.topstep_trailing_mll
         self.day_start_equity: float = start
-        # Peak equity seeds at max(start, account_size): a fresh account starts
-        # at the balance, so the floor begins at account_size - buffer.
-        self.peak_equity: float = max(start, self.account_size)
+        # Peak equity seed (Bug #7 fix): the CURRENT balance is only a valid
+        # peak on a genuinely fresh account. On a cold boot after a drawdown,
+        # seeding from the balance drags the trailing-MLL floor DOWN $2k below
+        # wherever the account sits — looser than the house floor Topstep has
+        # already locked. So the seed is max(current, account_size, HISTORICAL
+        # max) where historical_peak comes from Postgres account_history
+        # (state.historical_peak_equity, keyed by broker account id); None
+        # means no history exists — a fresh cycle — and only then does the
+        # balance-based seed stand alone. load_day_state() may still raise the
+        # peak further from the local JSON snapshot; both sources are ratchets,
+        # never reseeds.
+        self.peak_equity: float = max(start, self.account_size,
+                                      historical_peak or 0.0)
+        self._peak_seed_source: str = (
+            "db_history" if historical_peak is not None
+            and historical_peak >= max(start, self.account_size)
+            else "balance/account_size"
+        )
         # Microscalping attribution (reset each day): gross realized profit from
         # winning trades, and the slice of it earned on trades held ≤Ns.
         self._win_profit_total: float = 0.0
@@ -159,7 +175,8 @@ class TopstepRiskManager:
         self._cold_start_unsafe: bool = False
         log.info(
             f"[Topstep] initialized | account=${self.account_size:,.0f} | "
-            f"start_equity=${start:,.2f} | trailing_MLL=${self.mll_buffer:,.0f} "
+            f"start_equity=${start:,.2f} | peak_seed=${self.peak_equity:,.2f} "
+            f"({self._peak_seed_source}) | trailing_MLL=${self.mll_buffer:,.0f} "
             f"(floor=${self.mll_floor():,.2f}) | daily_loss_limit="
             f"${CONFIG.topstep_daily_loss_limit:,.0f} "
             f"(responsible_trading={CONFIG.topstep_responsible_trading}) | "

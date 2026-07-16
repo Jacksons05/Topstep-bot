@@ -365,8 +365,20 @@ class ProjectXBroker:
 
     # ── core broker interface (mirrors RithmicBroker exactly) ────────────────
 
-    def submit(self, symbol: str, qty: float, side: str, ref_price: float) -> Fill:
-        """Place a market order for a futures contract."""
+    def submit(self, symbol: str, qty: float, side: str, ref_price: float,
+               stop_loss_ticks: int | None = None) -> Fill:
+        """Place a market order for a futures contract.
+
+        stop_loss_ticks: when set (and PX_BRACKET_ENABLED), attach a SERVER-SIDE
+        protective stop to the entry POST itself (PlaceOrderRequest.
+        stopLossBracket = {ticks, type:4}, per the gateway swagger + docs — the
+        documented example uses positive tick distances). The gateway creates
+        the stop child the moment the entry fills, so there is no fill→stop
+        race for a crash/disconnect to land in, and a fill-relative tick offset
+        cannot be rejected "price outside allowed range" off a stale ref price
+        the way an absolute stopPrice could (the 2026-07-14 rejection mode).
+        The caller adopts the child via find_bracket_stop() and MUST verify it
+        (side/price) before trusting it — see Executor.open()."""
         # Kill-switch choke point: re-check at the actual order-send site, not
         # just once per cycle in the engine. Arming the switch mid-cycle (file
         # created / KILL_SWITCH=1) must stop an order already past the engine's
@@ -410,6 +422,15 @@ class ProjectXBroker:
             "size": n_contracts,
             "customTag": f"jarvis_{symbol}_{uuid.uuid4().hex[:8]}",
         }
+        if stop_loss_ticks is not None and stop_loss_ticks > 0 and CONFIG.px_bracket_enabled:
+            # Positive tick DISTANCE from the fill; the gateway derives the
+            # protective direction from the entry side + bracket kind. A
+            # deliberately-unattached takeProfitBracket: the client-side target
+            # exit is the tested path, and an orphaned server TP limit that
+            # outlives a managed close would fill later and FLIP the position
+            # (the same orphan-order failure class as untracked stops).
+            body["stopLossBracket"] = {"ticks": int(stop_loss_ticks),
+                                       "type": _ORDER_TYPE_STOP}
         t0 = time.monotonic()
         try:
             d = self._post("/api/Order/place", body, mutating=True)
@@ -482,8 +503,59 @@ class ProjectXBroker:
             log.debug(f"[ProjectX] trade search for order {order_id} failed: {exc}")
             return None
 
+    def find_bracket_stop(self, entry_order_id: str,
+                          tries: int = 5, delay_s: float = 0.5) -> dict | None:
+        """Locate the server-created bracket STOP child of an entry order.
+
+        The gateway creates the stopLossBracket child when the entry fills; the
+        child carries parentOrderId = the entry's orderId (OrderModel schema),
+        so adoption is exact — no side/size heuristics. Polls searchOpen a few
+        times because the child appears asynchronously after the fill.
+
+        Returns {"order_id", "stop_price", "side", "size"} or None (not found —
+        caller must treat the position as UNPROTECTED and flatten)."""
+        if not entry_order_id or self._mock_mode:
+            return None
+        for _ in range(max(1, tries)):
+            try:
+                d = self._post("/api/Order/searchOpen",
+                               {"accountId": self.account_id})
+                for o in d.get("orders", []) or []:
+                    if (str(o.get("parentOrderId", "")) == str(entry_order_id)
+                            and int(o.get("type", 0)) == _ORDER_TYPE_STOP):
+                        return {
+                            "order_id": str(o.get("id", "")),
+                            "stop_price": float(o.get("stopPrice") or 0.0),
+                            "side": "BUY" if int(o.get("side", -1)) == _SIDE_BUY else "SELL",
+                            "size": int(o.get("size", 0)),
+                        }
+            except Exception as exc:  # noqa: BLE001
+                log.debug(f"[ProjectX] bracket-stop search failed: {exc}")
+            time.sleep(delay_s)
+        return None
+
+    @staticmethod
+    def collar_stop_price(side: str, stop_price: float, mark: float,
+                          tick_size: float) -> tuple[float, bool]:
+        """Clamp a protective-stop price onto the VALID side of the live mark.
+
+        'Price outside allowed range' (errorCode=2, the 2026-07-14 rejection
+        mode) fires when a resting stop lands on the wrong side of the market —
+        e.g. a SELL stop above the mark because the ref price went stale while
+        the order was in flight. A SELL stop (protecting a long) must sit BELOW
+        the mark; a BUY stop (protecting a short) ABOVE it. Returns
+        (clamped_price, was_clamped). Clamping always moves the stop CLOSER to
+        the market — tightening risk, never loosening it."""
+        if not (mark and mark > 0 and tick_size and tick_size > 0):
+            return stop_price, False
+        if side == "SELL" and stop_price >= mark:
+            return mark - tick_size, True
+        if side == "BUY" and stop_price <= mark:
+            return mark + tick_size, True
+        return stop_price, False
+
     def place_stop_order(self, symbol: str, qty: int, side: str,
-                         stop_price: float) -> str:
+                         stop_price: float, mark: float | None = None) -> str:
         """Place a NATIVE exchange-resting protective STOP order (C1).
 
         Submitted on the OPPOSITE side of the entry immediately after the fill so
@@ -518,6 +590,16 @@ class ProjectXBroker:
             ticks = stop_px / spec.tick_size
             ticks = math.ceil(ticks) if side == "SELL" else math.floor(ticks)
             stop_px = ticks * spec.tick_size
+        # Dynamic collar (Phase 3): when the caller supplies a live mark, clamp a
+        # wrong-side stop to one tick past the mark instead of letting the
+        # gateway reject it "outside allowed range" and leaving the position
+        # naked (2026-07-14). Only ever TIGHTENS the stop.
+        if mark is not None and spec and spec.tick_size > 0:
+            stop_px, _clamped = self.collar_stop_price(side, stop_px, mark, spec.tick_size)
+            if _clamped:
+                log.warning(f"[ProjectX] {symbol} protective STOP {side} @ "
+                            f"{float(stop_price):.2f} was on the WRONG side of the "
+                            f"mark {mark:.2f} (stale ref?) — collared to {stop_px:.2f}")
         body = {
             "accountId": self.account_id,
             "contractId": cid,

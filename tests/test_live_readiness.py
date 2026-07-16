@@ -476,8 +476,9 @@ def test_attach_topstep_broker_success_attaches_both_atomically(monkeypatch):
     import topstep_risk
 
     class _FakeTopstepRiskManager:
-        def __init__(self, initial_equity=None):
+        def __init__(self, initial_equity=None, historical_peak=None):
             self.initial_equity = initial_equity
+            self.historical_peak = historical_peak
 
         def load_day_state(self, session):
             return False, False

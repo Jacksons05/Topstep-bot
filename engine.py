@@ -114,6 +114,10 @@ class Engine:
         )
         self._flow_reads: dict[str, FlowRead] = {}
         self._uw = None     # UWFlowFeed when UW_FLOW_ENABLED=true + UW_API_KEY set
+        self._gex = None    # UWGexFeed when ENTRY_ENGINE=gex + UW_API_KEY set
+        self._gex_regimes: dict[str, str] = {}   # symbol → regime at prescreen time
+        self._account_key: str = ""              # broker account id (account_history key)
+        self._last_equity_record: float = 0.0    # throttle for state.record_equity
         # Partial-exit / BE-ratchet state keyed by position symbol.
         # {symbol: {"partial_done": bool, "be_done": bool, "trail_peak": float}}
         self._be_state: dict[str, dict] = {}
@@ -195,6 +199,23 @@ class Engine:
             except Exception as e:  # noqa: BLE001
                 notify(f"⚠ UW flow feed init failed ({e}) — disabled")
                 self._uw = None
+
+        # GEX-regime entry engine (Phase 4). Init failure does NOT fall back to
+        # the legacy SMA/RSI signal (negative EV, Rounds 1/19) — with no feed
+        # every symbol reads neutral and entries stay locked (fail closed).
+        if CONFIG.entry_engine == "gex" and CONFIG.uw_api_key:
+            try:
+                from uw_gex import UWGexFeed
+                self._gex = UWGexFeed()
+                notify("🎛 GEX-regime entry engine enabled "
+                       f"(neutral_band={CONFIG.gex_neutral_band_frac:.0%} of median |GEX| | "
+                       f"MR_dev={CONFIG.gex_mr_atr_dev:g} ATR | "
+                       f"breakout_lookback={CONFIG.gex_breakout_lookback} | "
+                       f"neg_risk_mult={CONFIG.gex_neg_risk_mult:g})")
+            except Exception as e:  # noqa: BLE001
+                notify(f"⚠ GEX feed init failed ({e}) — entries will stay LOCKED "
+                       "(neutral fail-closed); fix the feed or set ENTRY_ENGINE=legacy")
+                self._gex = None
 
         # UW signal-quality logger (optional) — records uw_lean vs forward return
         # so the blend's edge can be measured offline. Behavior-neutral.
@@ -293,7 +314,20 @@ class Engine:
                 initial_equity = acct.get("equity") or CONFIG.topstep_account_size
             except Exception:  # noqa: BLE001
                 initial_equity = CONFIG.topstep_account_size
-            topstep = TopstepRiskManager(initial_equity=initial_equity)
+            # Bug #7 fix: reseed the peak from the DB's historical maximum for
+            # THIS broker account, not the (possibly drawn-down) current
+            # balance. A DB error here deliberately propagates to the outer
+            # except — better to stay on the safe Sim executor than to trade
+            # live behind a floor computed off an understated peak. None (no
+            # rows) is the one legitimate "fresh cycle" case where the
+            # balance-based seed inside TopstepRiskManager stands.
+            self._account_key = str(getattr(live_broker, "account_id", "") or "")
+            hist_peak = None
+            from state import DATABASE_URL as _DB_URL, historical_peak_equity
+            if _DB_URL and self._account_key:
+                hist_peak = historical_peak_equity(self._account_key)
+            topstep = TopstepRiskManager(initial_equity=initial_equity,
+                                         historical_peak=hist_peak)
             # Restore the persisted session anchors (DLL day base, MLL peak,
             # day-halt) so a restart can't re-arm a fresh daily allowance.
             _sess = str(self._topstep_session_date())
@@ -343,6 +377,8 @@ class Engine:
         self.state.save()
         if self._uw is not None:
             self._uw.close()
+        if self._gex is not None:
+            self._gex.close()
         if self._uw_log is not None:
             self._uw_log.close()
         singleton_lock.release(self._lock_path)
@@ -353,8 +389,54 @@ class Engine:
             return CONFIG.closed_interval_sec
         return CONFIG.fast_interval_sec if self.cb_level != "green" else CONFIG.scan_interval_sec
 
+    # ── fail-closed DB guard (Phase 2) ────────────────────
+    def _db_panic_flatten_and_exit(self, why: str) -> None:
+        """The state database died MID-SESSION. Trading on without it is the
+        2026-07-14 blow-up: in-memory state can't persist, the next restart
+        loads an empty/old book and re-opens duplicate positions. So: panic
+        flatten through the broker (bounded retries — the exchange-resting
+        protective stops still cover anything a failed flatten leaves), then
+        hard-exit(1). systemd restarts us, preflight's State-backend check
+        FAILs while the DB is down, and the Requires=postgresql.service
+        dependency keeps the bot from even starting until Postgres is back.
+        SystemExit deliberately bypasses run.py's per-cycle `except Exception`.
+        """
+        import sys as _sys
+        notify(f"🚨 CRITICAL: state DB unreachable mid-session ({why}) — "
+               "PANIC FLATTEN + hard exit (refusing to trade stateless)")
+        broker = getattr(self.executor, "broker", None)
+        flatten = getattr(broker, "flatten_all", None)
+        if callable(flatten):
+            for attempt in range(1, 4):
+                try:
+                    flatten()
+                    notify("🚨 panic flatten: broker confirms flat/closing")
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    notify(f"🚨 panic flatten attempt {attempt}/3 failed: {exc}"
+                           + ("" if attempt < 3 else
+                              " — EXITING ANYWAY; exchange-resting stops are the "
+                              "remaining protection. MANUAL CHECK REQUIRED."))
+                    time.sleep(2.0)
+        _sys.exit(1)
+
+    def _db_heartbeat(self) -> None:
+        """Live DB connectivity check on EVERY engine cycle — the per-tick
+        analog of preflight's startup State-backend gate. Stateless mode
+        (DATABASE_URL unset) is a deliberate dev configuration and passes."""
+        from state import DATABASE_URL as _DB_URL, ping as _ping
+        if not _DB_URL:
+            return
+        ok, why = _ping()
+        if not ok:
+            self._db_panic_flatten_and_exit(why)
+
     # ── one full cycle ────────────────────────────────────
     def run_once(self) -> None:
+        # Fail-closed DB guard FIRST: nothing in this cycle — reconcile,
+        # risk checks, entries, exits — may run against a dead state backend.
+        self._db_heartbeat()
+
         # Cost gate: outside market hours, do nothing (no fills happen, no LLM spend).
         if not self._market_open():
             notify("market closed — idle (no scan)")
@@ -435,6 +517,19 @@ class Engine:
                     # Persist every new high: a restart must never restore a
                     # lower peak (= looser MLL floor) than Topstep has locked.
                     self._topstep.save_day_state(str(today), self._topstep_day_halt)
+                # Bug #7: append the equity observation to Postgres
+                # account_history (throttled ~1/min) so a cold boot reseeds
+                # the trailing-MLL peak from the TRUE historical maximum even
+                # if the local JSON day-state is lost. A failed write is a
+                # dead state backend → same panic path as the heartbeat.
+                if self._account_key and time.time() - self._last_equity_record >= 60.0:
+                    try:
+                        from state import record_equity
+                        record_equity(self._account_key, self._peak_equity_est)
+                        self._last_equity_record = time.time()
+                    except Exception as exc:  # noqa: BLE001
+                        self._db_panic_flatten_and_exit(
+                            f"account_history write failed: {exc}")
                 breached, why = self._topstep.risk_breach(equity, self.state, unrealized)
                 if breached:
                     # Latch the ENTRY halt once (persist it), but do NOT use that
@@ -614,8 +709,14 @@ class Engine:
             # at 1.0, so on the funded account this can only DE-RISK in an
             # elevated-vol regime, never size up.
             _vol_mult = min(1.0, flow.vol_mult) if flow is not None else 1.0
+            # GEX pivot: negative-gamma (vol-expanded) breakout entries run
+            # strictly micro-tier — halve the risk budget on top of the other
+            # defensive multipliers (futures_plan caps the product at 1.0).
+            _gex_mult = (CONFIG.gex_neg_risk_mult
+                         if self._gex_regimes.get(sig.symbol) == "negative" else 1.0)
             risk_mult = (cb_mult * (w or 1.0)
-                         * regime_params["size_mult"] * _day_mult * _vol_mult)
+                         * regime_params["size_mult"] * _day_mult * _vol_mult
+                         * _gex_mult)
             if size < CONFIG.min_executable_size_usd:
                 notify(f"  skip (regime {rk} sized to {size:.0f} < min "
                        f"{CONFIG.min_executable_size_usd:.0f}): {sig.symbol}")
@@ -673,7 +774,8 @@ class Engine:
                                f"{open_mini:.1f} open): {sig.symbol}")
                         continue
                 plan = futures_plan(sig, sig.price, risk_mult=risk_mult,
-                                    max_contracts=qty_cap)
+                                    max_contracts=qty_cap,
+                                    atr_mult=regime_params.get("atr_stop_mult"))
                 if plan is None:
                     notify(f"  skip (sizing: stop too wide / invalid ATR / no contract "
                            f"capacity for risk budget): {sig.symbol}")
@@ -698,7 +800,8 @@ class Engine:
 
             try:
                 pos = self.executor.open(sig, size, self.state, risk_mult=risk_mult,
-                                         max_contracts=qty_cap)
+                                         max_contracts=qty_cap,
+                                         atr_mult=regime_params.get("atr_stop_mult"))
             except Exception as e:  # noqa: BLE001
                 if e.__class__.__name__ == "OrderStateUnknown":
                     notify(f"  ⚠ {sig.symbol} order state UNKNOWN (transport error "
@@ -746,6 +849,41 @@ class Engine:
             "cvd_div": of.cvd_divergence(),
         }
 
+    def _session_vwap(self, bars: dict) -> float | None:
+        """RTH-anchored session VWAP (extracted from the legacy inline gate so
+        the GEX mean-reversion strategy shares the identical anchoring logic).
+
+        Anchors to today's 09:30 ET open when the bars carry per-bar timestamps
+        (ProjectX futures feed) — without the reset this becomes a multi-session
+        rolling VWAP that lags far behind on any trending day. Falls back to the
+        full min-length window when timestamps are absent. None when volume is
+        missing/zero (callers must treat that as 'no VWAP available')."""
+        closes = bars.get("close") or []
+        volumes = bars.get("volume") or []
+        if len(closes) < 20 or len(volumes) < 20 or sum(volumes[-100:]) <= 0:
+            return None
+        from zoneinfo import ZoneInfo as _ZIv
+        now_et = datetime.now(_ZIv("America/New_York"))
+        n = min(len(closes), len(volumes))
+        times = bars.get("time") or []
+        start = len(closes) - n  # default: full min-length window
+        if len(times) == len(closes):
+            rth_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+            for i in range(len(times)):
+                try:
+                    bt = datetime.fromisoformat(times[i]).astimezone(_ZIv("America/New_York"))
+                except (ValueError, TypeError):
+                    continue
+                if bt >= rth_open:
+                    start = i
+                    break
+        seg_c = closes[start:]
+        seg_v = volumes[start:]
+        tv = sum(seg_v)
+        if tv <= 0:
+            return None
+        return sum(seg_c[i] * seg_v[i] for i in range(len(seg_c))) / tv
+
     # ── stage 1: cheap quant prescreen (no LLM/news) ──
     def _prescreen(self, sym: str):
         """Fast pass run on the WHOLE universe: bars + indicators only.
@@ -767,12 +905,23 @@ class Engine:
         micro = self._micro_for(sym)
         if self.recorder is not None:
             self.recorder.record(sym, bars, self._oflow.get(sym) if self._oflow else None)
-        # ML quant signal first (LightGBM on bar + order-flow features); fall back
-        # to the deterministic indicator model when no model is loaded or it has
-        # no opinion. Same QuantRead contract either way.
-        quant = ML.read(bars, micro) if (CONFIG.ml_signal_enabled and ML.ready) else None
-        if quant is None:
-            quant = quant_signal(bars)
+        # ── Signal source ─────────────────────────────────────────────────
+        if CONFIG.entry_engine == "gex":
+            # Phase 4 pivot: the dealer net-GEX regime replaces SMA/RSI (and
+            # the optional ML read) as the entry idea. positive → VWAP
+            # mean-reversion, negative → reduced-risk breakout, neutral (or a
+            # dead/missing GEX feed) → no entries, fail closed.
+            regime = self._gex.get(sym).regime if self._gex is not None else "neutral"
+            self._gex_regimes[sym] = regime
+            from gex_strategy import gex_quant_signal
+            quant = gex_quant_signal(bars, regime, self._session_vwap(bars))
+        else:
+            # Legacy path: ML quant signal first (LightGBM on bar + order-flow
+            # features); fall back to the deterministic indicator model when no
+            # model is loaded or it has no opinion. Same QuantRead either way.
+            quant = ML.read(bars, micro) if (CONFIG.ml_signal_enabled and ML.ready) else None
+            if quant is None:
+                quant = quant_signal(bars)
         if quant is None:
             return None
 
@@ -835,40 +984,20 @@ class Engine:
                 detail=quant.detail + f" · phase={_phase}({_phase_mult:.0%})",
             )
 
-        # ── VWAP directional gate ─────────────────────────────────────────────
+        # ── VWAP directional gate (legacy engine only) ────────────────────────
         # RTH VWAP (reset at 09:30 ET) used as intraday fair-value anchor. Longs
         # only above VWAP; shorts only below. Don't enter when price is extended
         # > 0.5×ATR from VWAP (chasing). Research: self-fulfilling institutional
         # benchmark; most execution desks target VWAP ± bands.
-        _closes = bars.get("close") or []
-        _volumes = bars.get("volume") or []
-        if len(_closes) >= 20 and len(_volumes) >= 20 and sum(_volumes[-100:]) > 0:
-            _n = min(len(_closes), len(_volumes))
-            # Anchor the VWAP window to today's 09:30 ET RTH open when the bars
-            # carry per-bar timestamps (ProjectX futures feed). Without a reset
-            # this becomes a multi-session rolling VWAP that lags far behind on
-            # any trending day, so price reads as permanently "extended" and the
-            # gate below blocks nearly every entry. Falls back to the full window
-            # when timestamps are absent (e.g. Alpaca equities bars).
-            _times = bars.get("time") or []
-            _start = len(_closes) - _n  # default: full min-length window
-            if len(_times) == len(_closes):
-                _rth_open = _now_et.replace(hour=9, minute=30, second=0, microsecond=0)
-                for _i in range(len(_times)):
-                    try:
-                        _bt = datetime.fromisoformat(_times[_i]).astimezone(_ZI("America/New_York"))
-                    except (ValueError, TypeError):
-                        continue
-                    if _bt >= _rth_open:
-                        _start = _i
-                        break
-            _seg_c = _closes[_start:]
-            _seg_v = _volumes[_start:]
-            _tv = sum(_seg_v)
-            _vwap = (sum(_seg_c[i] * _seg_v[i] for i in range(len(_seg_c))) / _tv) if _tv > 0 else spot
-            _vwap_dev = abs(spot - _vwap)
-            _atr_val = quant.atr if quant.atr and quant.atr > 0 else spot * 0.001
-            if _phase != "overnight":
+        # BYPASSED when ENTRY_ENGINE=gex: the positive-gamma mean-reversion leg
+        # deliberately buys BELOW / sells ABOVE VWAP at ≥1 ATR extension — the
+        # exact opposite of this momentum gate (gex_strategy.py owns its own
+        # VWAP logic via _session_vwap).
+        if CONFIG.entry_engine != "gex":
+            _vwap = self._session_vwap(bars)
+            if _vwap is not None and _phase != "overnight":
+                _vwap_dev = abs(spot - _vwap)
+                _atr_val = quant.atr if quant.atr and quant.atr > 0 else spot * 0.001
                 # VWAP gate: longs need price above VWAP, shorts need price below
                 _vwap_ok = (spot > _vwap) if quant.direction == "BUY" else (spot < _vwap)
                 # Extension filter: skip when price is already >0.5 ATR from VWAP
