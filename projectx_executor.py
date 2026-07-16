@@ -423,14 +423,20 @@ class ProjectXBroker:
             "customTag": f"jarvis_{symbol}_{uuid.uuid4().hex[:8]}",
         }
         if stop_loss_ticks is not None and stop_loss_ticks > 0 and CONFIG.px_bracket_enabled:
-            # Positive tick DISTANCE from the fill; the gateway derives the
-            # protective direction from the entry side + bracket kind. A
-            # deliberately-unattached takeProfitBracket: the client-side target
-            # exit is the tested path, and an orphaned server TP limit that
-            # outlives a managed close would fill later and FLIP the position
-            # (the same orphan-order failure class as untracked stops).
-            body["stopLossBracket"] = {"ticks": int(stop_loss_ticks),
-                                       "type": _ORDER_TYPE_STOP}
+            # SIGNED tick offset from the fill — VERIFIED empirically 2026-07-16
+            # against the sim gateway (account 24939267): +40 on a BUY is
+            # rejected errorCode=2 "Ticks should be less than zero when
+            # longing". Negative = below fill (protects a long), positive =
+            # above (protects a short). Requires the account's bracket mode to
+            # be "Auto OCO Brackets" (Position-Brackets mode rejects any API
+            # bracket outright). The public submit() contract stays "positive
+            # distance"; this layer owns the gateway's sign convention.
+            # A deliberately-unattached takeProfitBracket: the client-side
+            # target exit is the tested path, and an orphaned server TP limit
+            # that outlives a managed close would fill later and FLIP the
+            # position (the same orphan-order failure class as untracked stops).
+            signed = -int(stop_loss_ticks) if side == "BUY" else int(stop_loss_ticks)
+            body["stopLossBracket"] = {"ticks": signed, "type": _ORDER_TYPE_STOP}
         t0 = time.monotonic()
         try:
             d = self._post("/api/Order/place", body, mutating=True)
