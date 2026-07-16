@@ -1,0 +1,40 @@
+{
+ "registered": "Round 20 + amendment fb09cc4",
+ "verdict_both_windows": "FAIL",
+ "windows": {
+  "W1_2026-01": {
+   "n_msgs": 289346642,
+   "signals": 5869,
+   "expired_unfilled": 2138,
+   "fills": 3730,
+   "fill_rate_pct": 63.6,
+   "median_queue_s": 6.0,
+   "tp_exits": 763,
+   "timestop_exits": 2967,
+   "n": 3730,
+   "total_usd": -9484.5,
+   "avg_usd": -2.5428,
+   "pf": 0.649,
+   "t": -8.902,
+   "p_one_sided": 1.0,
+   "p_bootstrap": 1.0
+  },
+  "W2_2026-05": {
+   "n_msgs": 301094353,
+   "signals": 4725,
+   "expired_unfilled": 1344,
+   "fills": 3379,
+   "fill_rate_pct": 71.5,
+   "median_queue_s": 5.0,
+   "tp_exits": 636,
+   "timestop_exits": 2743,
+   "n": 3379,
+   "total_usd": -9795.6,
+   "avg_usd": -2.899,
+   "pf": 0.625,
+   "t": -9.581,
+   "p_one_sided": 1.0,
+   "p_bootstrap": 1.0
+  }
+ }
+}

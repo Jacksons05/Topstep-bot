@@ -1287,6 +1287,32 @@ without a genuinely different signal, not just a third fill convention.
    median time-in-queue, and expired-unfilled count per window alongside
    the judged trade stats.
 
+## Round 20 — results (2026-07-16, oos/round20_maker_orderflow.py,
+## round20_results.json; both windows judged, PASS required on both)
+
+**Verdict: FAIL — both windows, decisively and consistently.**
+
+| window | n | total $ | PF | t | p (t / boot) | fill% | med queue | TP exits | timestop |
+|---|---|---|---|---|---|---|---|---|---|
+| W1 2026-01 | 3,730 | −9,484.50 | 0.649 | −8.90 | 1.0 / 1.0 | 63.6% | 6 s | 763 (20%) | 2,967 |
+| W2 2026-05 | 3,379 | −9,795.60 | 0.625 | −9.58 | 1.0 / 1.0 | 71.5% | 5 s | 636 (19%) | 2,743 |
+
+**The registered failure mode is exactly what the honest fill model
+exposed: adverse selection.** Fill rates are HIGH (64-72%, median 5-6 s in
+queue) — the resting order gets filled easily, precisely because it fills
+when flow is coming through it. Only ~20% of positions ever reach the
+passive take-profit; ~80% bleed out through the 5-min taker time-stop.
+Avg net −$2.54 (W1) / −$2.90 (W2) per trade against $1.40 commission →
+negative GROSS in both windows: not a costs story, and queue priority
+cannot rescue a signal whose fills are self-selected against it. The two
+non-adjacent months agree to within 0.024 PF — regime-independent.
+
+**Consequence (per the pre-registered verdict rule, verbatim):** maker-side
+execution does not rescue this signal; the OBI/CVD family is dead in both
+its taker (Round 5) and maker (this round) forms, and no further
+execution-style variant should be tried on it without a genuinely
+different signal, not just a third fill convention.
+
 ---
 
 # Round 21 — GEX vol-regime toggle: the live gex_strategy.py engine as deployed
