@@ -1320,3 +1320,40 @@ proceed to a forward paper trial (kill switch still armed for live).
 PRIMARY fails → ENTRY_ENGINE=gex must NOT trade — entries stay locked; a
 passing SECONDARY alone is a lead for a future registration, not a license.
 No re-tuning of the frozen parameters in either case.
+
+## Round 21 — results (2026-07-16, oos/round21_gex_regime.py, round21_results.json)
+
+**Verdict: FAIL, decisively.** The judged PRIMARY (ES pooled) misses every
+dimension of the PASS bar:
+
+| cell (ES, judged) | n | total $ | PF | t | p (one-sided) | boot | yrs+ |
+|---|---|---|---|---|---|---|---|
+| PRIMARY pooled | 12,382 | −513,247 | 0.809 | −8.95 | 1.0 | 1.0 | 0% |
+| SEC-A MR/positive | 11,996 | −516,533 | 0.795 | −9.73 | 1.0 | 1.0 | 0% |
+| SEC-B breakout/negative | 386 | +3,286 | 1.02 | 0.15 | 0.44 | 0.45 | 50% |
+
+MES (exploratory) mirrors ES: pooled PF 0.817, t=−6.37, 0% years positive.
+Regime mix over the window: 3,259 positive / 180 negative / 437 neutral
+sessions (ES) — the MR leg dominates exposure and does all the damage,
+losing in ALL 15 calendar years.
+
+**Not a costs story.** ES avg net −$41.66/trade vs $29.00 round-trip cost:
+avg GROSS is −$12.66/trade. The signal loses before commissions and
+slippage exist; no execution improvement can rescue it.
+
+**Reading.** The daily vol-regime DESCRIPTION (JARVIS pre-check: positive
+GEX → lower next-day RV, survives the vol-persistence control) is not a
+tradeable intraday edge in this form: fading 1-ATR VWAP stretches on
+vol-suppressed days at a 2:3 ATR bracket is structurally the same dead
+trade Round 2's unconditional C3 was — GEX conditioning changed almost
+nothing (PF 0.795 conditioned vs the C3 family's known-dead profile). The
+negative-gamma breakout leg is a coin flip on n=386. Implementation note:
+the breakout lookback was resolved to WITHIN-session bars (conservative,
+no overnight-gap pseudo-breakouts), decided before results were seen.
+
+**Consequence (per the pre-registered rule).** ENTRY_ENGINE=gex is
+falsified as deployed and must not trade: config default flipped to
+ENTRY_ENGINE=off (no entry signals at all; open positions still managed) —
+as of this round NO candidate entry strategy in this repo has survived OOS
+testing. gex/legacy remain opt-in for research runs only. The kill switch
+stays armed regardless.

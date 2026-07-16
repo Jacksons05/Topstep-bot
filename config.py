@@ -420,13 +420,18 @@ class Config:
     # never affects trades). Empty path = disabled. Analyze with `python uw_logger.py`.
     uw_flow_log: str = _s("UW_FLOW_LOG", "")
 
-    # ── GEX-regime entry engine (Phase 4 pivot) ───────────
+    # ── entry engine ──────────────────────────────────────
+    # "off"   : DEFAULT. No entry signals at all — every candidate strategy
+    #           this repo has OOS-tested is dead: SMA/RSI (Rounds 1/19),
+    #           OBI/CVD taker+maker (5/20), ORB/VWAP-MR/momentum (2), gamma
+    #           reversal (18), and the GEX vol-regime toggle (21: ES pooled
+    #           PF 0.809, t=-9.0, 0% years positive, negative even GROSS of
+    #           costs). Open positions are still managed; nothing new opens.
     # "gex"   : dealer net-GEX regime toggle (uw_gex.py + gex_strategy.py) —
-    #           positive gamma → VWAP mean-reversion, negative gamma →
-    #           reduced-risk breakout momentum, neutral → entries locked.
+    #           FALSIFIED in Round 21; opt-in only for research/paper runs.
     # "legacy": the SMA20/50+RSI quant signal (OOS-confirmed negative EV,
     #           Rounds 1/19 — kept only for comparison runs).
-    entry_engine: str = _s("ENTRY_ENGINE", "gex").lower()
+    entry_engine: str = _s("ENTRY_ENGINE", "off").lower()
     # Futures→UW GEX proxy override ("MES:SPY,MNQ:QQQ"); defaults in uw_gex.py.
     uw_gex_proxy_map_raw: str = _s("UW_GEX_PROXY_MAP", "")
     uw_gex_cache_sec: int = _i("UW_GEX_CACHE_SEC", 900)   # greek-exposure is daily data
@@ -544,8 +549,8 @@ class Config:
             errs.append("UW_FLOW_ENABLED=true but UW_API_KEY is empty")
         if not 0.0 <= self.uw_flow_lean_weight <= 1.0:
             errs.append("UW_FLOW_LEAN_WEIGHT must be in [0, 1]")
-        if self.entry_engine not in ("gex", "legacy"):
-            errs.append("ENTRY_ENGINE must be gex|legacy")
+        if self.entry_engine not in ("off", "gex", "legacy"):
+            errs.append("ENTRY_ENGINE must be off|gex|legacy")
         if self.entry_engine == "gex" and not self.uw_api_key:
             errs.append(
                 "ENTRY_ENGINE=gex needs UW_API_KEY (dealer net-GEX regime feed). "

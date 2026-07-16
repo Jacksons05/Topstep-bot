@@ -906,6 +906,11 @@ class Engine:
         if self.recorder is not None:
             self.recorder.record(sym, bars, self._oflow.get(sym) if self._oflow else None)
         # ── Signal source ─────────────────────────────────────────────────
+        if CONFIG.entry_engine == "off":
+            # Round 21 verdict (HYPOTHESES.md): no candidate entry strategy has
+            # survived OOS testing — the honest default is NO new entries.
+            # Open positions are still managed/flattened by everything above.
+            return None
         if CONFIG.entry_engine == "gex":
             # Phase 4 pivot: the dealer net-GEX regime replaces SMA/RSI (and
             # the optional ML read) as the entry idea. positive → VWAP
