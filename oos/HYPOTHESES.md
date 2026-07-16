@@ -1026,3 +1026,297 @@ pre-registration, e.g. Round 17) — not a patch to this one. Exploratory
 30/60-min cells show the same negative-t direction, weakening toward zero as
 hold lengthens, consistent with cost-drag on a null/negative signal rather
 than a real effect that fades — not grounds to rescue the 10-min cell.
+
+---
+
+# Round 19 — quant-signal confidence stratification: does CONFIDENCE_THRESHOLD
+have anything left to tune? (registered 2026-07-15, before running)
+
+**Motivation.** Live question from the user: "how high should CONFIDENCE_THRESHOLD
+be set?" That is a parameter-sweep question about an entry signal, and per
+CLAUDE.md must go through this harness before being answered with a number.
+
+**Why this is NOT a re-run of the original OOS trial.** The very first
+pre-registered test in this file (top of this document, "Strategy under test")
+ran `backtest_fast._quant_arrays` + `_simulate` at "confidence threshold 0.75
+(full alignment only)" and found it dead (CLAUDE.md: "SMA(20/50)+RSI at 5-min
+cadence: PF 0.74-0.95, negative 17/17 years, ES overnight cell -$402,767,
+t=-9.9"). `_quant_arrays`'s `strength` output is DISCRETE, not continuous: trend
+contributes +-0.5, RSI-extreme confirmation adds another +-0.5, clipped to
+[-1,1] -- so `strength` can only be 0.0 (flat), 0.5 (trend fires, RSI does not
+confirm), or 1.0 (both agree). A threshold of 0.75 therefore already isolated
+the strength==1.0 cell exclusively, and it is the WORST cell on record (17/17
+negative years) -- already dead, not eligible for re-test under the no-retest
+rule. "Raise the threshold" has thus already been answered at its logical
+maximum: no.
+
+**What is actually untested.** The strength==0.5 cell (trend-direction fires,
+RSI does not confirm) has never been isolated on its own -- the original trial's
+0.75 gate excluded it entirely, and Round 15's regime-transition proxy used a
+different construction (GMM-adjacent regime buckets, not this signal's own
+strength value), and Round 18's dealer-gamma test is an unrelated mechanism.
+This round tests the strength==0.5 cell. Answering it closes the loop on
+CONFIDENCE_THRESHOLD: if BOTH discrete tiers (0.5 and 1.0) are dead, no
+setting of this control rescues the SMA/RSI signal family, full stop.
+
+**Disclosed scope limit.** Live `CONFIDENCE_THRESHOLD` gates a BLEND of this
+quant strength value and the qual/LLM stream (50/50 RTH per `engine.py`), not
+quant strength alone. The qual stream cannot be replayed deterministically over
+history, so this round tests only the mechanically backtestable half. A PASS
+here would answer "does the quant signal's own confidence carry information,"
+not "here is the exact number to type into `.env`" -- that would still need the
+qual blend's own validation, which is a separate, harder problem not in scope.
+
+**Frozen spec.**
+- Kernel: `backtest_fast._quant_arrays` + `_simulate` verbatim, live CONFIG
+  brackets (`atr_stop_mult`=2.0, `atr_target_mult`=3.0, `stop_loss_pct` floor),
+  `max_hold`=24 bars (2h) -- identical to every round reusing this kernel
+  (Round 15 precedent). No new indicator, no new bracket logic.
+- Two cells, mutually exclusive, by strength value at entry bar i:
+  - **PARTIAL** (judged): strength(i) == 0.5 exactly.
+  - **FULL** (NOT judged -- replication check only, see below): strength(i) ==
+    1.0 exactly. Expected to reproduce the original trial's dead result; if it
+    doesn't, that flags a runner bug before PARTIAL's result is trusted.
+- Session: RTH only (09:30-16:00 ET, `is_rth()` from `oos/backtest_oos.py`) --
+  live `CONFIDENCE_THRESHOLD` (as opposed to the separate
+  `CONFIDENCE_THRESHOLD_OVERNIGHT`) governs RTH entries specifically. Overnight
+  reported exploratory only, not judged (matches Round 15's session-split
+  disclosure convention; the original trial's worst cell was already overnight).
+- Instruments/costs: ES $4.00 RT + 1-tick slip both sides, full 2010-2026
+  history (judged, statistical power); MNQ $1.40 RT + 1-tick slip, 2019-2026
+  (exploratory, actual Topstep target instrument) -- same convention as every
+  prior round.
+- Stats: `tstat_p`/`boot_p`/`cell` reused verbatim from `oos/backtest_oos.py`
+  (RNG_SEED=7, BOOT_N=20,000) -- no new statistical method introduced.
+
+**PASS bar (PARTIAL cell, ES, RTH -- the judged hypothesis):** n >= 200,
+PF >= 1.15, one-sided p < 0.05 (t AND 20k bootstrap), >= 60% of calendar years
+positive. FULL cell is not re-judged (already dead per the original trial) --
+reported only as a same-method replication check on this runner's correctness.
+MNQ and overnight cells reported, not judged.
+
+**Verdict rule.**
+- PARTIAL FAILS -> both discrete strength tiers of this signal family are dead.
+  The honest answer to "how high should CONFIDENCE_THRESHOLD be" is: no number
+  rescues it; the quant stream needs replacement, not retuning, before this
+  account trades on it. Consistent with CLAUDE.md's own priority list (0DTE
+  gamma walls, tick-level order flow, higher-frequency regimes) -- pursue one of
+  those instead of further threshold tuning.
+- PARTIAL PASSES -> a genuinely new lead, but per this file's family-wise
+  disclosure (many registered hypotheses at p<0.05 -> expected false positives),
+  requires unseen-data confirmation (a different period or instrument) before
+  any CONFIDENCE_THRESHOLD change ships. Not actionable on a single PASS alone.
+
+**Data:** already-local `oos/data/{ES,MNQ}_5min.csv` -- no new pull required.
+
+**Runner:** `oos/round19_confidence_tiers.py` (written alongside this
+registration, not yet executed).
+
+## Round 19 — results (2026-07-15)
+
+Data: `oos/data/{ES,MNQ,MES}_5min.csv` freshly pulled via `fetch_databento.py`
+this round ($38.64, matches the pre-verified estimate, signup credits).
+Runner: `oos/round19_confidence_tiers.py`; full output `oos/round19_results.json`.
+
+**Verdict: FAIL, decisively.** PARTIAL (strength==0.5, the judged, previously-
+untested cell) is dead on ES/RTH -- not a marginal miss, a wrong-signed result
+on every dimension at a very large sample:
+
+| cell | n | PF | t | p (one-sided) | yrs+ |
+|---|---|---|---|---|---|
+| **ES PARTIAL_RTH (judged)** | 13,131 | 0.846 | -6.012 | 1.0 (t) / 1.0 (boot) | **0.0%** |
+| ES PARTIAL_overnight (exploratory) | 32,745 | 0.743 | -15.489 | 1.0 / 1.0 | 5.9% |
+| ES FULL_RTH (replication check) | 776 | 0.791 | — | 0.984 / 0.984 | 41.2% |
+| MNQ PARTIAL_RTH (exploratory) | 5,830 | 1.001 | — | 0.492 / 0.485 | 37.5% |
+| MNQ FULL_RTH (exploratory) | 361 | 0.741 | — | 0.983 / 0.985 | 0.0% |
+
+ES PARTIAL_RTH: total -$427,235 over 13,131 trades, **17/17 calendar years
+(2010-2026) negative, zero exceptions.** p=1.0 on both t-test and 20k
+bootstrap is not "not significant" -- it is maximal evidence the true mean is
+at or below zero, the opposite tail from what a PASS needed. FULL_RTH
+replicates the original trial's dead result (PF 0.791, within the previously
+reported 0.74-0.95 range) -- confirms this runner is not the original
+gate's own generator (already dead, correctly not re-judged). MNQ PARTIAL is
+the least-bad cell in the whole grid (PF~1.00, p~0.49) but that is
+indistinguishable from a coin flip, nowhere near the PASS bar, and not the
+judged cell regardless.
+
+**Answer to the motivating question.** Both discrete strength tiers of the
+live quant signal (0.5 and 1.0 -- the entire domain `strength` can take) are
+now confirmed dead on the judged instrument. There is no CONFIDENCE_THRESHOLD
+value that rescues this signal family -- raising or lowering the number only
+changes which of two already-dead cells gets traded. Per the verdict rule
+registered above: the quant stream needs replacement, not retuning. This
+closes the loop opened by "how high should CONFIDENCE_THRESHOLD be" with a
+direct, evidence-based no -- not a guess, not a default left as a placeholder.
+No re-tuning of the 0.5/1.0 boundary or session split to rescue this result.
+
+---
+
+# Round 20 — maker-side order flow with honest queue-position fill modeling
+(registered 2026-07-16, before pull)
+
+**Mechanism (stated before any data is touched).** Round 5 (order-book
+imbalance + CVD, TAKER fills, 5-min hold) FAILED: PF 0.742, t=-5.6, n=3,586 --
+consistent with OFI literature that imbalance alpha decays in tens of seconds,
+faster than the 5-min hold could capture. That result indicts the EXECUTION
+STYLE and HOLD HORIZON, not necessarily the OBI/CVD signal itself: a taker
+order crossing the spread pays for immediacy on a signal that's already stale
+by the time a retail-latency (~1s) order reaches the exchange, then the
+strategy holds 5 more minutes past that. This round tests the untested half:
+does the SAME entry signal earn a positive edge as a MAKER (resting limit
+order, earning queue priority / the spread) instead of paying to cross it?
+This is not a re-run of Round 5 -- it is a different execution mechanism on a
+signal whose directional read was never itself shown to be wrong, only
+un-capturable at taker/5-min settings. Per CLAUDE.md's own priority list,
+this is explicitly gated on "fill modeling [being] honest about adverse
+selection" -- a resting order that only fills when the market is about to
+move against it is not a real edge, and this spec is written to make that
+failure mode visible rather than hidden.
+
+**Why MBO, not another mbp-10 pull (the level Round 5 already used).**
+mbp-10 gives aggregate size at each of 10 price levels -- enough for OBI/CVD
+features, not enough to know where a hypothetical resting order sits in the
+queue at a price, which is exactly what determines whether and when a
+passive order would realistically fill. Market-By-Order (MBO) carries every
+individual add/modify/cancel/fill message, enabling an honest (if still
+simplified -- see Fill Rule below) queue-position simulation instead of
+Round 8's coarser "any print trades through the price" convention.
+
+**Instrument.** MES only -- NOT ES (which Round 5 used) and NOT MNQ.
+Narrowed from the original MES+MNQ scope (2026-07-16, before any data
+pulled) per the account holder's explicit statement that MES is the only
+instrument they intend to trade -- not a cost-driven cut (MNQ's estimate,
+$181.39 of the $236.82 total, was disclosed in full before this narrowing;
+see cost note below), a scope decision. This account trades micros;
+micro-contract book depth, queue length, and participant mix differ from
+the full-size contract, and validating microstructure on an instrument this
+account cannot or will not trade would not validate anything tradeable.
+
+**Data.** Databento MBO, GLBX.MDP3, MES.v.0 only. TWO non-adjacent one-month
+windows (not one -- Round 5's own registration disclosed its single month as
+a single-regime risk requiring a second independent sample before shipping;
+that second sample never happened. This round provides it by design, both
+windows judged, not sequentially rescued). Windows: 2026-01-06..2026-02-06
+and 2026-05-06..2026-06-06 (the second matches Round 5's own mbp-10 window
+exactly, chosen as a natural reference point before any tick data was
+examined -- not a favorable-regime pick). Cost estimate confirmed
+2026-07-16: MES $27.16 (window 1) + $28.27 (window 2) = **$55.43 total**.
+
+**Frozen signal (identical to Round 5 -- reusing an existing entry read
+verbatim, not proposing a new one).** OBI10 = (Σbid_sz - Σask_sz)/(Σbid_sz +
+Σask_sz) over 10 levels; z = trailing 30-min z-score of OBI10; CVD5 = signed
+trade volume, trailing 5 min. z >= +1.5 AND CVD5 > 0 -> LONG signal. z <=
+-1.5 AND CVD5 < 0 -> SHORT signal.
+
+**Frozen execution (the actual new mechanism under test).** On a signal,
+place a resting LIMIT order at the current best bid (long) / best ask
+(short) -- i.e., join the back of the queue at the touch, do not improve
+price. Track that order's queue position via MBO (its rank among resting
+size ahead of it at that price, from the order-add sequence). FILL RULE:
+counted as filled only when MBO shows the order's queue position would have
+been reached AND consumed by subsequent trade prints at that price (not
+merely "a print occurred at this price" -- must be enough executed volume
+at the price, in sequence, to have reached this order's queue rank). Order
+expires unfilled after 30 seconds resting (a signal that never gets
+front-of-queue in 30s produces no trade, not a market fallback -- Round 8's
+"unfilled = no trade" convention). Exit: EITHER a resting take-profit limit
+at entry +/- 1x the entry-time OBI-implied move (frozen, not swept) with the
+same queue-fill logic, OR a 5-min taker time-stop if the passive target
+never fills (crossing the spread to exit is judged separately from crossing
+to enter -- an asymmetric exit is not the mechanism under test and a taker
+exit is the conservative/honest choice when a passive one hasn't triggered).
+
+**Costs.** $1.40 RT commission (micros). No slippage line item on the entry
+(the queue-fill rule already prices the entry cost as time-in-queue, not a
+tick assumption) -- 1-tick slippage still applied to any taker time-stop
+exit, same convention as every prior round.
+
+**PASS bar.** n >= 1000 (tick-level convention, matching Round 5's bar, not
+the 5-min-bar n>=200 convention), PF >= 1.10, one-sided p < 0.05 (t AND 20k
+bootstrap), on EACH of the two independent one-month windows separately (not
+pooled) -- a single-window PASS is exactly the single-regime risk Round 5
+disclosed and this round exists to close. BOTH windows must clear the bar.
+Fail either -> dead, no re-tuning of the queue-fill rule, order-expiry
+timeout, or target multiple after seeing results.
+
+**Process (before any data is pulled).** 1) Run Databento's
+`metadata.get_cost()` for the proposed MBO windows and report the estimate
+before downloading anything -- MBO event volume is far higher than mbp-10 or
+5-min bars, cost is not assumed to be small. DONE (2026-07-16): $55.43 for
+MES across both windows, confirmed via `metadata.get_cost()`, nothing
+downloaded yet at estimate time. 2) If cost is material, this is a decision
+point for the account holder, not an auto-proceed. 3) Runner:
+`oos/round20_maker_orderflow.py` (not yet written -- written once the data-cost estimate is confirmed, so the fill-simulation
+code is built against the real MBO schema rather than guessed).
+
+**Verdict rule.** PASS on both windows -> genuinely new lead; per this
+file's family-wise discipline, still requires a third, forward/live
+confirmation window before sizing real capital (this is a 2-sample bar
+already, one step past the single-PASS-needs-confirmation default). FAIL
+either window -> maker-side execution does not rescue this signal either;
+the OBI/CVD family is dead in both its taker (Round 5) and maker (this
+round) forms, and no further execution-style variant should be tried on it
+without a genuinely different signal, not just a third fill convention.
+
+---
+
+# Round 21 — GEX vol-regime toggle: the live gex_strategy.py engine as deployed
+(registered 2026-07-16, before running — code shipped in e08b270 behind an
+armed kill switch; this round decides whether the switch may ever be lifted)
+
+**Mechanism (stated before any run).** Dealers long gamma (net GEX > 0) hedge
+against price moves — sell rallies, buy dips — suppressing volatility and
+creating intraday mean-reversion toward fair value. Dealers short gamma
+(net GEX < 0) hedge WITH moves, amplifying them — favoring continuation of
+range breaks. Near-zero net GEX carries no reliable hedging pressure. The
+JARVIS-side pre-check (research/gamma_rv_precheck.py, SqueezeMetrics daily,
+2011-2026) found the vol-suppression claim SURVIVES its vol-persistence
+control at daily frequency. This round tests the INTRADAY, TRADEABLE form —
+the exact rules now live in gex_strategy.py. Prior related verdicts stand:
+Round 2 C3 (UNCONDITIONAL VWAP reversion) FAILED; C2 (unconditional ORB)
+FAILED; Round 18 (daily gamma-REVERSAL, a different claim) FAILED. The new,
+registered claim is strictly the GEX CONDITIONING of these entry shapes.
+
+**Data.** oos/data/{ES,MES}_5min.csv (Databento, ends 2026-06-06). Daily net
+GEX: oos/data/squeeze_dix_gex.csv (SqueezeMetrics SPX series, 2011-05-02 →
+2026-07-09; sign convention > 0 = dealers long gamma, matching uw_gex.py).
+Judged window: 2011-05-03 → 2026-06-06 on ES. MES (2019-05→) exploratory.
+Proxy caveat registered up front: the series is SPX dealer gamma; the live
+feed uses per-proxy UW greek-exposure (MES→SPY). Judged on ES only.
+
+**Frozen rules (mirror gex_strategy.py + the engine's bracket defaults).**
+Regime label: GEX_t (known at close of day t) governs session t+1 — strictly
+forward, no leakage. neutral band = 0.25 × rolling 250-day median |GEX|
+(min 60 obs; mirrors uw_gex.classify_gex with the endpoint's ~250-row
+history). |GEX_t| inside band → session t+1 takes NO entries.
+RTH only: bars 09:30–15:55 ET; entries signal on bar close 09:35–15:30,
+filled at the NEXT bar close; hard flatten at the 15:55 bar close. One
+position at a time per symbol; 1 contract.
+POSITIVE-gamma session — VWAP-MR: session VWAP = cum(close×vol)/cum(vol)
+from 09:30 (the engine's _session_vwap uses closes, not typical price);
+ATR(14) on 5-min bars (rolling simple mean of TR, oos/candidates.py _atr).
+(close − vwap)/ATR ≤ −1.0 → LONG; ≥ +1.0 → SHORT (GEX_MR_ATR_DEV=1.0).
+NEGATIVE-gamma session — breakout: close > max(high of prior 20 RTH bars) →
+LONG; close < min(low of prior 20 bars) → SHORT (GEX_BREAKOUT_LOOKBACK=20;
+the live 0.5× risk haircut is sizing-only and does not change the signal).
+Exits (both legs): stop = entry ∓ 2×ATR(14 at signal bar), target = entry ±
+3×ATR (ATR_STOP_MULT=2.0 / ATR_TARGET_MULT=3.0 live defaults); stop and
+target checked on bar high/low, BOTH-hit-same-bar counts as the STOP
+(conservative); else 15:55 flatten. Costs: round-trip commission (ES $4.00,
+MES $1.40) + 1-tick slippage per side. Judged net at 1 tick.
+
+**Judged cells (named in advance).**
+PRIMARY: ES, all regime-toggled trades pooled (MR on positive days +
+breakout on negative days) — the engine as it would trade.
+SECONDARY-A: ES, MR-on-positive-days leg alone.
+SECONDARY-B: ES, breakout-on-negative-days leg alone.
+PASS bar (each): n ≥ 200, PF ≥ 1.15, one-sided p < 0.05 (t AND 20k
+bootstrap, seed 7), ≥ 60% of calendar years positive. MES cells exploratory
+only. No other cells count.
+
+**Verdict rule.** PRIMARY passes → the toggle survives its first OOS test;
+proceed to a forward paper trial (kill switch still armed for live).
+PRIMARY fails → ENTRY_ENGINE=gex must NOT trade — entries stay locked; a
+passing SECONDARY alone is a lead for a future registration, not a license.
+No re-tuning of the frozen parameters in either case.
