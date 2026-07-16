@@ -1259,6 +1259,34 @@ the OBI/CVD family is dead in both its taker (Round 5) and maker (this
 round) forms, and no further execution-style variant should be tried on it
 without a genuinely different signal, not just a third fill convention.
 
+## Round 20 — pre-run amendment (2026-07-16, before the simulator processed
+## either window; resolves terms the registration left underdetermined)
+
+1. **"OBI-implied move" (TP distance)** := |z_entry| × σ30(mid), where
+   σ30(mid) is the standard deviation of the SAME trailing 30-min 1-second
+   mid-price series the z-window already maintains. Snapped to the tick
+   grid, minimum 1 tick. No new free parameters; not swept.
+2. **Queue-ahead accounting** (the honest reading of the registered fill
+   rule): at join, ahead = the set of orders resting at the join price
+   (from the live MBO order book). It decrements on those orders' fills,
+   cancels, and size REDUCTIONS; a modify that raises size or moves price
+   drops the order from the set (priority lost). Our 1-lot fills when
+   ahead ≤ 0 AND a subsequent trade executes at our price on our side.
+3. **TP exit** uses the identical queue simulation, joining the target
+   price's queue at position-open time. TP-vs-timeout tie in the same
+   second → the taker time-stop wins (conservative).
+4. Sampling/latency per Round 5's registered convention: 1-second samples;
+   the entry order joins the queue at the FIRST snapshot after the signal,
+   at that snapshot's touch. No re-pegging while resting; 30 s expiry as
+   registered.
+5. Taker time-stop executes at the first snapshot ≥ fill+300 s with a
+   valid two-sided book (maintenance-halt gaps roll forward), at the
+   opposite touch worsened by 1 tick (the registered slippage convention).
+6. Runner: oos/round20_maker_orderflow.py. Adverse-selection visibility
+   (registered requirement): the run reports signal count, fill rate,
+   median time-in-queue, and expired-unfilled count per window alongside
+   the judged trade stats.
+
 ---
 
 # Round 21 — GEX vol-regime toggle: the live gex_strategy.py engine as deployed
