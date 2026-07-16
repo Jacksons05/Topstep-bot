@@ -1474,3 +1474,35 @@ forward-confirm on the accumulating T+1 capture before any live arming
 the absorption family is dead at these thresholds; no re-tuning, and the
 next registration must again be a different mechanism, not a parameter
 variant of this one.
+
+## Round 22 — diagnostic-first amendment (2026-07-16, BEFORE any P&L was
+## computed; Round 18 "diagnostic-first" precedent)
+
+Full disclosure of what was observed before this amendment: (1) a smoke run
+of the as-registered sim produced ZERO signals in 20M messages — traced to
+a UTC-vs-ET day-bounds bug (fixed; the bug gated ALL scans off, so no
+outcome information leaked); (2) a base-rate diagnostic over W1's first
+three RTH sessions (funnel counters ONLY, no trades simulated, no P&L)
+measured near-touch level activity at: median 125 fill events / 270
+contracts per 120 s window, and 82% of RTH seconds satisfying the
+registered ≥100-contract/≥5-event gate. The registered detector is
+therefore DEGENERATE — it fires on ordinary MES touch churn and cannot
+measure the registered mechanism (hidden refills). No P&L, win rate, or
+directional statistic existed when this amendment was written.
+
+Amended detector (replaces the volume/event gate; conditions (b)/(c) of
+the original stand):
+  (a′) fills at (P,S) total ≥ 300 contracts across ≥ 5 fill events in the
+       120 s window (raised from 100 to sit above the measured p90 of
+       ordinary churn), AND
+  (b′) REFILL RATIO ≥ 3: windowed fill volume ≥ 3× the maximum DISPLAYED
+       size observed at the level across those fill events — the actual
+       iceberg signature (consumed ≫ displayed). Displayed size is sampled
+       at each fill event (post-fill), a documented approximation of the
+       window max.
+Everything else (120 s aliveness, ≤4 ticks from touch, 10-min re-arm,
+entry/exit/costs, PASS bar incl. the UNDERPOWERED escape, both-windows
+discipline) is unchanged. One further duty-cycle diagnostic (signal-rate
+only, still no P&L) is licensed to CONFIRM non-degeneracy; if the amended
+detector still fires >5% of RTH seconds the round is declared UNTESTABLE
+as specified rather than re-tuned again.
