@@ -1,0 +1,21 @@
+[Unit]
+Description=PostgreSQL 18 (conda env pg, cluster ~/pgdata, port 5433) for topstep-bot
+After=network.target
+
+[Service]
+Type=exec
+User=jackson
+Environment=PGDATA=/home/jackson/pgdata
+ExecStart=/home/jackson/.local/share/mamba/envs/pg/bin/postgres -D /home/jackson/pgdata -p 5433
+# gate "started" on actually accepting connections, so units ordered
+# After= this one can rely on a live socket, not just a forked process
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 60); do /home/jackson/.local/share/mamba/envs/pg/bin/pg_isready -h 127.0.0.1 -p 5433 -q && exit 0; sleep 1; done; exit 1'
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutSec=180
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

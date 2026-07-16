@@ -1,0 +1,12 @@
+[Unit]
+Description=Nightly T+1 Databento MES MBO backfill (Round 20 forward window)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=jackson
+WorkingDirectory=/home/jackson/Topstep-bot
+ExecStart=/home/jackson/Topstep-bot/.venv/bin/python /home/jackson/Topstep-bot/oos/backfill_mbo.py
+# transient network/API failures: the next nightly timer run catches up
+# automatically (the script is idempotent), so no Restart= policy needed

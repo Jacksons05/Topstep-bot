@@ -1,0 +1,24 @@
+[Unit]
+Description=Topstep futures trading bot
+# Hard dependency: the bot must never run without its state database
+# (2026-07-14 blow-up: stateless crash-loop re-opened duplicate positions).
+# Requires= stops the bot if postgresql stops; After= orders startup behind
+# postgres accepting connections (its ExecStartPost readiness gate).
+Requires=postgresql.service
+After=network-online.target postgresql.service ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jackson
+WorkingDirectory=/home/jackson/Topstep-bot
+Environment=PYTHONUNBUFFERED=1
+Environment=PORT=8790
+ExecStart=/home/jackson/Topstep-bot/.venv/bin/python /home/jackson/Topstep-bot/run.py
+Restart=always
+RestartSec=15
+StandardOutput=append:/home/jackson/Topstep-bot/topstep-stdout.log
+StandardError=append:/home/jackson/Topstep-bot/topstep-stderr.log
+
+[Install]
+WantedBy=multi-user.target
