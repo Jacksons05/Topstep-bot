@@ -1506,3 +1506,27 @@ discipline) is unchanged. One further duty-cycle diagnostic (signal-rate
 only, still no P&L) is licensed to CONFIRM non-degeneracy; if the amended
 detector still fires >5% of RTH seconds the round is declared UNTESTABLE
 as specified rather than re-tuned again.
+
+## Round 22 — outcome (2026-07-16): UNTESTABLE at level granularity.
+## No P&L was ever computed in this round.
+
+The licensed duty-cycle diagnostic measured the amended detector at 0.0000%
+of RTH seconds (0 hits over three sessions) — from 82% before the amendment
+to zero after it. Diagnosis: the measurement OBJECT was wrong, not the
+mechanism. On CME, an iceberg is a per-ORDER phenomenon (an order id whose
+cumulative fills exceed its displayed size, replenishing via modify);
+per-LEVEL accounting drowns any hidden component in MES's thick ordinary
+depth (no level clears consumed ≥ 3× displayed while staying alive 120 s).
+
+A final P&L-blind feasibility count (oos/_r23_feasibility.py — order-id
+fill/display ratios only, no direction, no outcomes) found TRUE per-order
+icebergs on MES are real but scarce and small: ~12 per session at
+cum_fill ≥ 2× max_displayed with ≥ 20 contracts filled; median hidden
+volume 37 contracts. Two structural conclusions, recorded for the next
+registration: (1) a per-order MES iceberg round would be UNDERPOWERED by
+construction (~250 trades/window vs the 500 floor); (2) the institutional
+hiding this mechanism needs lives in the FULL-SIZE ES book, not the micro —
+any viable absorption hypothesis is an ES-book-signal → MES-execution
+design (prices arb-locked), which is a genuinely different registration,
+not a parameter variant of this one. Round 22 is closed UNTESTABLE; the
+absorption MECHANISM remains unfalsified and unconfirmed.
