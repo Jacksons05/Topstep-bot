@@ -1411,3 +1411,66 @@ ENTRY_ENGINE=off (no entry signals at all; open positions still managed) —
 as of this round NO candidate entry strategy in this repo has survived OOS
 testing. gex/legacy remain opt-in for research runs only. The kill switch
 stays armed regardless.
+
+---
+
+# Round 22 — hidden-liquidity absorption (iceberg defense) on MES MBO
+(registered 2026-07-16, before the detector was written or either window
+scanned; uses ONLY data already owned — no new purchase)
+
+**Mechanism (stated before any data is touched).** An institution working a
+large passive order hides most of its size: the DISPLAYED depth at its price
+stays modest while fills keep landing there and the level refuses to deplete
+(iceberg refills). That behavior is invisible to displayed-book features —
+Round 5/20's OBI measured displayed size (dead in taker and maker forms) and
+CVD measured aggressor flow (same family, dead) — but it is directly
+observable in MBO: repeated fill events at one price whose level survives
+them. Absorption at/below the bid is a defended floor (institutional buyer)
+→ LONG; at/above the ask is a defended ceiling → SHORT. Unlike the
+seconds-decay OBI alpha, a defended level persists for minutes — the first
+hypothesis in this book whose horizon plausibly tolerates ~1 s retail
+latency. Distinctness claim: this is revealed-HIDDEN-liquidity flow, not
+displayed-size imbalance, not aggressor-volume sign; it is not a member of
+any family this file has killed.
+
+**Data.** The two owned MES MBO windows (2026-01-06..02-06,
+2026-05-06..06-06), judged separately, both must pass — same two-window
+discipline as Round 20. The nightly T+1 MBO forward capture becomes the
+forward-confirmation window if both pass.
+
+**Frozen detector (all parameters fixed here, chosen from mechanism logic
+before any scan; no sweeps).** Per price level P and side S, over a rolling
+120 s window: absorption fires when (a) fills at (P,S) total ≥ 100 contracts
+across ≥ 5 distinct fill events, (b) the displayed size at (P,S) never
+reaches zero inside the window, and (c) P is within 4 ticks of the current
+touch on side S. Rationale anchors: 100 contracts ≈ 25× the MES median
+trade; 5 events excludes single sweeps; 120 s matches the minutes-scale
+defense horizon; 4 ticks keeps the level battle-relevant.
+
+**Frozen entry/exit (taker; the maker variant is NOT licensed by this
+registration — Round 20 closed execution-variant fishing).** Signal
+evaluated on the 1 s grid (Round 5 convention). Entry at the next 1 s
+snapshot, crossing the spread (buy ask / sell bid). Bracket from entry:
+stop = 1.0×, target = 1.5× the trailing 30-min σ of 1 s mid prices (same σ
+construction as Round 20's amendment), both snapped to ticks (min 1);
+stop-first on both-hit bars/events. Max hold 15 min → taker exit. RTH only
+(09:35–15:30 entries, hard flatten 15:55 ET). One position at a time,
+1 contract. Re-arm: a level that already produced an entry cannot re-signal
+for 10 min. Costs: $1.40 RT commission + 1-tick slippage per side (taker
+both ways — the conservative convention).
+
+**PASS bar (tick-level convention).** On EACH window separately: n ≥ 1000
+… relaxed to n ≥ 500 IF the detector's event rate makes 1000 structurally
+impossible at these frozen thresholds (disclosed now: absorption is rarer
+than OBI z-crossings; the n floor is not license to loosen the detector) —
+with PF ≥ 1.10, one-sided p < 0.05 (t AND 20k bootstrap seed 7). BOTH
+windows must clear. n < 500 in either window → UNDERPOWERED verdict: report,
+do not judge, do not re-tune; the forward capture accumulates until n
+suffices.
+
+**Verdict rule.** PASS both → first surviving intraday entry candidate;
+forward-confirm on the accumulating T+1 capture before any live arming
+(kill switch / ENTRY_ENGINE=off stay as they are regardless). FAIL either →
+the absorption family is dead at these thresholds; no re-tuning, and the
+next registration must again be a different mechanism, not a parameter
+variant of this one.
