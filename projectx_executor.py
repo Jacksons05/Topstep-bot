@@ -103,7 +103,18 @@ class ProjectXBroker:
 
         self._http: httpx.Client | None = None
 
-        self._mock_mode: bool = not (self._user and self._api_key)
+        # Mock mode is ONLY for genuinely absent credentials (a dev/paper run
+        # that never intends to reach the gateway). A creds-present broker must
+        # NEVER become mock — see _unavailable below.
+        self._creds_present: bool = bool(self._user and self._api_key)
+        self._mock_mode: bool = not self._creds_present
+        # Fail-closed connection state: set when creds ARE present but the
+        # gateway can't be reached. Unlike mock mode, every ORDER method raises
+        # in this state instead of returning a fake fill — a live broker that
+        # silently faked flattens during an API/DNS outage is exactly how the
+        # 2026-07-17 naked-MCL incident happened (the emergency flatten became a
+        # no-op mock fill while the real position stayed open).
+        self._unavailable: bool = False
         if self._mock_mode:
             log.warning(
                 "ProjectXBroker MOCK MODE (PROJECTX_USERNAME / PROJECTX_API_KEY not set). "
@@ -127,11 +138,29 @@ class ProjectXBroker:
                 f"(id={self.account_id}) | live={self._live}"
             )
         except Exception as exc:  # noqa: BLE001
+            # Creds ARE present (blank creds returned above), so this is a real
+            # connectivity/auth failure, NOT a reason to fake orders. Fail
+            # closed: stay non-mock and mark unavailable so every order method
+            # raises. Preflight's broker check surfaces it at startup; mid-
+            # session, a raised order is caught and retried/halted by the engine
+            # instead of silently succeeding as a mock no-op.
             log.error(
-                f"[ProjectX] connection failed: {exc}. Falling back to mock mode — "
-                "check PROJECTX_USERNAME / PROJECTX_API_KEY."
+                f"[ProjectX] connection FAILED ({exc}) with credentials present — "
+                "marking broker UNAVAILABLE (fail-closed; NOT mock). Orders will "
+                "raise until the gateway is reachable."
             )
-            self._mock_mode = True
+            self._unavailable = True
+
+    def _require_live(self, op: str) -> None:
+        """Guard for order-affecting methods: a creds-present broker that can't
+        reach the gateway must RAISE, never fake success. Callers (executor /
+        engine) treat the raise as 'not done' and retry or halt — the opposite
+        of a mock no-op that reports a phantom fill/flatten."""
+        if self._unavailable:
+            raise RuntimeError(
+                f"[ProjectX] {op} refused — broker UNAVAILABLE (gateway "
+                "unreachable with creds present; fail-closed, never mock)"
+            )
 
     # ── HTTP / auth helpers ───────────────────────────────────────────────────
 
@@ -388,6 +417,7 @@ class ProjectXBroker:
             log.error(f"[ProjectX] kill-switch ARMED — refusing order: "
                       f"{side} {qty}x {symbol}")
             raise RuntimeError(f"kill-switch active: order refused ({symbol})")
+        self._require_live(f"submit {side} {qty}x {symbol}")
         n_contracts = max(1, int(qty))
         log.info(
             f"[ProjectX] {'MOCK' if self._mock_mode else 'LIVE'} submit | "
@@ -578,6 +608,7 @@ class ProjectXBroker:
         the entry's take-profit stays client-side, and the engine cancels this
         resting stop when it flattens.
         """
+        self._require_live(f"protective STOP {side} {qty}x {symbol}")
         n = max(1, int(qty))
         if self._mock_mode:
             log.info(f"[ProjectX] MOCK protective STOP | {side} {n}x {symbol} @ {stop_price:.2f}")
@@ -693,6 +724,7 @@ class ProjectXBroker:
     def cancel_order(self, order_id: str) -> bool:
         """Cancel an open order by its ProjectX orderId."""
         log.info(f"[ProjectX] cancel_order({order_id}) | mock={self._mock_mode}")
+        self._require_live(f"cancel_order {order_id}")
         if self._mock_mode:
             return True
         try:
@@ -751,6 +783,7 @@ class ProjectXBroker:
         phantom-close the local book — a failed flatten must be retried, not
         silently dropped."""
         log.info(f"[ProjectX] flatten_all() | mock={self._mock_mode}")
+        self._require_live("flatten_all")
         if self._mock_mode:
             log.info("[ProjectX] MOCK flatten_all — no real orders placed")
             return {}

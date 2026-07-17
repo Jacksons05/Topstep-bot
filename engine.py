@@ -470,6 +470,14 @@ class Engine:
         # adopt orphans, so we never manage a position that no longer exists.
         self._reconcile_positions()
 
+        # Naked-position guard (2026-07-17 incident): every cycle, no open real
+        # futures position may rest without a CONFIRMED native protective stop.
+        # Re-arm a missing stop; if that fails, flatten (broker-confirmed, retried
+        # next cycle on failure — never booked closed on an unconfirmed result).
+        # The one-shot flatten in executor.open() is not enough: during the MCL
+        # incident a broker outage made that flatten a no-op and nothing retried.
+        self._enforce_stops_or_flatten()
+
         # Refresh the Topstep day base (Daily Loss Limit anchor) each new session.
         # Keyed off the CME/Topstep SESSION date (rolls 18:00 ET), NOT the server
         # UTC/local calendar date — otherwise the daily-loss + consistency limits
@@ -1181,6 +1189,55 @@ class Engine:
         """True only when executing against a real (non-mock) ProjectX account."""
         b = self.executor.broker
         return b.__class__.__name__ == "ProjectXBroker" and not getattr(b, "_mock_mode", True)
+
+    def _enforce_stops_or_flatten(self) -> None:
+        """Per-cycle naked-position guard. Any open real futures position lacking
+        a confirmed native protective stop is first re-armed; if the stop can't
+        be placed, the position is FLATTENED (broker-confirmed). On any broker
+        error the action RAISES/logs and is retried next cycle — a position is
+        NEVER booked closed on an unconfirmed result, and never left silently
+        naked. Complements executor._flatten_unprotected (one-shot at entry)
+        with a persistent retry the entry path can't provide."""
+        if not self._live_projectx():
+            return
+        broker = self.executor.broker
+        for pos in list(self.state.open_positions):
+            if pos.shadow or not is_futures_symbol(pos.symbol) or not pos.filled:
+                continue
+            if getattr(pos, "protective_order_id", ""):
+                continue  # already protected by a native resting stop
+            # Unprotected. Try to re-arm the native stop first.
+            armed = False
+            if pos.stop and pos.stop > 0:
+                stop_side = "SELL" if pos.side == "BUY" else "BUY"
+                try:
+                    try:
+                        oid = broker.place_stop_order(pos.symbol, int(pos.qty),
+                                                      stop_side, pos.stop,
+                                                      mark=self._mark(pos.symbol))
+                    except TypeError:
+                        oid = broker.place_stop_order(pos.symbol, int(pos.qty),
+                                                      stop_side, pos.stop)
+                    if oid:
+                        pos.protective_order_id = oid
+                        armed = True
+                        notify(f"🛡 {pos.symbol} was unprotected → native stop "
+                               f"re-armed {stop_side} @ {pos.stop:.2f}")
+                except Exception as e:  # noqa: BLE001
+                    notify(f"⚠ {pos.symbol} stop re-arm failed ({e}) — flattening")
+            if armed:
+                continue
+            # Still naked → flatten. flatten_all is broker-confirmed and RAISES
+            # on an outage (fail-closed), so a failure just retries next cycle;
+            # reconcile books the close once the broker confirms flat.
+            try:
+                broker.flatten_all()
+                notify(f"🛑 {pos.symbol} could not be protected — FLATTENED "
+                       f"(naked-position guard)")
+            except Exception as e:  # noqa: BLE001
+                notify(f"🚨 {pos.symbol} NAKED and flatten FAILED ({e}) — broker "
+                       f"may be down; RETRYING next cycle, position still open")
+        self.state.save()
 
     def _revalidate_protective_stops(self) -> None:
         """Startup: re-arm the native protective stop on every open real futures
