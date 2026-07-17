@@ -1530,3 +1530,63 @@ any viable absorption hypothesis is an ES-book-signal → MES-execution
 design (prices arb-locked), which is a genuinely different registration,
 not a parameter variant of this one. Round 22 is closed UNTESTABLE; the
 absorption MECHANISM remains unfalsified and unconfirmed.
+
+---
+
+# Round 23 — per-ORDER iceberg absorption in the FULL-SIZE ES book,
+# executed on MES (registered 2026-07-16, before any ES tick data was
+# pulled; $0 data cost — trailing-month GLBX L3 is plan-covered, verified
+# by quote before download, and the account holder has directed that no
+# further Databento money be spent — any nonzero quote aborts the pull)
+
+**Mechanism.** Same absorption thesis as Round 22 (an institution defending
+a price reveals hidden size: fills at one ORDER exceed what it ever
+displayed, refilling via modify), corrected on two counts Round 22's
+diagnostics established with zero P&L observed: (1) the measurement object
+is the ORDER, not the price level; (2) the institutions hide in the
+full-size ES book, not the retail-dominated micro (MES: ~12 icebergs/
+session, median 37 contracts — structurally underpowered). ES and MES are
+cash-settled to the same index and arb-locked to within a tick, so an
+ES-book signal prices MES execution directly.
+
+**Data ($0, quote-verified per pull).** ES.v.0 MBO, GLBX.MDP3, trailing
+month 2026-06-17 → 2026-07-15 (one file per day, per-day $0 quote check,
+any nonzero → skip + disclose). DISCLOSED LIMITATION: one month, one
+regime — a PASS here is promising-not-proven and the nightly T+1 forward
+capture (extended to ES.v.0 from 2026-07-17, also $0/day-guarded) is the
+mandatory second window before anything arms. This is the same
+single-month honesty Round 5 registered.
+
+**Phase A — mechanical threshold fixing (P&L-blind, licensed here).**
+Iceberg CANDIDATE: an order with ≥1 size-uptick modify (refill), cumulative
+fills ≥ 2.0× its maximum displayed size (literature-standard ratio,
+frozen), and cumulative fills ≥ 25 ES contracts. Phase A scans the window
+ONCE recording only candidate counts and their cum-fill distribution — no
+prices beyond grouping, no direction, no outcomes. The SIGNAL threshold is
+then fixed mechanically: cum_fill* = max(25, P75 of the Phase-A candidate
+cum-fill distribution). If Phase A finds < 8 candidates/session on average,
+the round is declared UNDERPOWERED before any P&L and defers to the
+accumulating forward capture. No other quantity may be read from Phase A.
+
+**Phase B — frozen trading rules.** Signal: the moment an order FIRST
+satisfies (refill ≥1, ratio ≥ 2.0, cum_fill ≥ cum_fill*) — online-causal,
+no lookahead — while resting within 4 ticks of the ES touch on its side.
+Direction: bid-side iceberg → LONG, ask-side → SHORT. Entry: taker at the
+next 1 s snapshot's opposite touch (ES prices, MES economics — $5/pt,
+$1.40 RT commission, MES 0.25 tick; the ≤1-tick occasional ES/MES touch
+discrepancy is absorbed by the 1-tick-per-side slippage convention,
+disclosed). Bracket: stop 1.0× / target 1.5× trailing 30-min σ of 1 s ES
+mids, tick-snapped, stop-first; 15-min max hold; RTH entries 09:35–15:30
+ET, flatten 15:55; one position at a time; one signal per iceberg order
+id; 10-min re-arm per price. Costs: $1.40 RT + 1 tick per side.
+
+**PASS bar.** n ≥ 500 (single-window tick-level floor; n < 500 →
+UNDERPOWERED, defer to forward capture, no re-tune), PF ≥ 1.10, one-sided
+p < 0.05 (t AND 20k bootstrap seed 7).
+
+**Verdict rule.** PASS → promising-not-proven; the ES forward capture must
+independently clear the same bar before ENTRY_ENGINE ever exposes it (kill
+switch and ENTRY_ENGINE=off stand regardless). FAIL → the absorption
+mechanism is dead in the venue where it demonstrably exists — the family
+closes for good, and with it, per this file's own accumulated record, the
+last untested intraday-microstructure family this data can support.
