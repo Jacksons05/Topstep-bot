@@ -1671,3 +1671,27 @@ confirmation before sizing capital (family-wise discipline).
 confirm on the accumulating free GLBX capture and consider the UW-GEX
 conditioning secondary. FAIL → value-area rotation is dead at these frozen
 levels; no re-tuning, next registration must be a different mechanism.
+
+## Round 24 — results (2026-07-17, oos/round24_value_area.py, round24_results.json)
+
+**Verdict: FAIL.** ES n=4,843, PF 0.799, t=−4.49, win 24.1%, −$85,053,
+5.9% of years positive (p=1.0 t and bootstrap). MES mirrors it (PF 0.857,
+t=−2.16, 12.5% years+). Fails every PASS-bar dimension. Fading prior-day
+value-area edges gets run over: on the balanced-open days that qualify, price
+breaks THROUGH the faded edge more often than it rotates back to the POC, so
+the near stop (1 ATR beyond the edge) is hit far more than the distant POC
+target — the same "reversion target too far, trend risk too near" failure
+that killed Round 2 C3 and Round 21.
+
+**Process note — a fill-modeling artifact was caught and corrected BEFORE any
+verdict was recorded (integrity disclosure).** The first two runs printed
+PF ~15, t ~89, 100% years positive, +$8.8M — an obvious too-good-to-be-true
+result treated as a bug, not a discovery. Root cause: entries were booked at
+the next bar's CLOSE, which can float past the fixed VAH/VAL level, leaving a
+short's stop (VAH+1·ATR) BELOW its entry; hitting that "stop" then booked a
+PROFIT in the (exit−entry)·side math (a stop-loss recorded as a win), and
+momentum breaks that retraced intrabar manufactured those fake wins en masse.
+Fix (committed with this result): enter at the next bar's OPEN, and admit only
+valid geometry — entry strictly between target and stop in the trade's favour
+(degenerate fills skipped, not booked). The corrected run is the FAIL above.
+Recorded so no future round repeats the artifact or mistakes it for edge.
