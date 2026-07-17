@@ -1613,3 +1613,61 @@ registered bar. Recorded candidly alongside the formal status: the point
 estimate makes an eventual PASS (PF ≥ 1.10, p < 0.05) arithmetically
 implausible; this note exists so a later reader does not mistake deferral
 for hope.
+
+---
+
+# Round 24 — Market/Volume-Profile value-area rotation (registered 2026-07-17,
+# before the runner was written; genuinely untested family — NOT a member of
+# the dead VWAP-MR / OBI / GEX families)
+
+**Mechanism (auction market theory; Steidlmayer/Dalton, *Mind Over Markets*).**
+A session's VALUE AREA — the price band containing 70% of the day's volume
+around the point of control (POC, the max-volume price) — marks where the
+market agreed on fair value. On BALANCED (rotational, non-trend) days, the
+next session opens inside prior value and price rotates AROUND value,
+reverting from the value-area extremes back toward the POC as responsive
+participants fade moves away from perceived fair value. This is distinct
+from Round 2 C3 (fade intraday-VWAP deviation) and Round 21 (GEX-conditioned
+VWAP-MR): the reference levels are the PRIOR SESSION's settled value-area
+boundaries (lookahead-safe by construction), and the trade is gated on a
+balanced open — the market-profile definition of a rotational setup, not an
+add-on filter.
+
+**Institutional reasoning.** Value-area edges are where responsive liquidity
+(mean-reverting institutional flow) concentrates on non-trend days; the POC
+is the session's fair-value magnet. This is the same responsive-vs-initiative
+framework CME's own Market Profile literature describes.
+
+**Data.** PRIMARY (multi-year OOS): oos/data/ES_5min.csv (Databento GLBX,
+2010→2026-06-06, owned, $0). Value area is a session-level construct, so
+5-min volume bucketing is the standard, adequate granularity — finer tick/MBP
+data would add nothing to a DAILY level and would cost money across years.
+Data-usage plan (per account-holder directive, all $0): the free trailing-
+month GLBX L2/L3 (MBO) is reserved as the FORWARD-confirmation window and to
+build a finer intraday developing-profile in live use; UW GEX/greek-exposure
+is reserved as a registered regime-conditioning SECONDARY only if the primary
+passes (conditioning a dead-on-its-own signal is not itself tested here).
+
+**Frozen rules (ES, RTH 09:30–16:00 ET; judged net at 1-tick slippage).**
+Prior-session profile: bucket each RTH 5-min bar's volume at its CLOSE price
+on a 1-point ES grid; POC = max-volume bin; expand outward from POC (adding
+the larger-volume of the two adjacent unclaimed bins each step) until ≥70% of
+session volume is enclosed → VAH (upper), VAL (lower). These settle at the
+16:00 close and become the NEXT session's reference (strictly forward).
+Balanced-open gate: today's 09:30 open must satisfy VAL ≤ open ≤ VAH (prior
+value) — else NO trades today (an out-of-value open is initiative/trend, not
+rotational). Entry (09:35–15:30 ET, one position at a time): first 5-min
+close at/above prior VAH → SHORT; at/below prior VAL → LONG. Target: prior
+POC. Stop: 1.0×ATR(14, 5-min) beyond the entered edge (SHORT stop = VAH +
+1·ATR; LONG stop = VAL − 1·ATR). Hard flatten 15:55 ET. Costs: $4.00 RT
+commission + 1-tick slippage per side (ES).
+
+**PASS bar (standard entry-edge bar).** n ≥ 200, PF ≥ 1.15, one-sided
+p < 0.05 (t AND 20k bootstrap seed 7), ≥ 60% of calendar years positive.
+Any fail → dead, no parameter sweep. A single PASS still needs forward/unseen
+confirmation before sizing capital (family-wise discipline).
+
+**Verdict rule.** PASS → first surviving intraday entry candidate; forward-
+confirm on the accumulating free GLBX capture and consider the UW-GEX
+conditioning secondary. FAIL → value-area rotation is dead at these frozen
+levels; no re-tuning, next registration must be a different mechanism.
