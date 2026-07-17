@@ -1590,3 +1590,26 @@ switch and ENTRY_ENGINE=off stand regardless). FAIL → the absorption
 mechanism is dead in the venue where it demonstrably exists — the family
 closes for good, and with it, per this file's own accumulated record, the
 last untested intraday-microstructure family this data can support.
+
+## Round 23 — results (2026-07-16, oos/round23_reduce.py +
+## round23_phase_ab.py, round23_results.json)
+
+Phase A (mechanical, P&L-blind): 25 sessions, 5,488 iceberg candidates
+(219.5/session — the ES-vs-MES premise confirmed at ~80:1 on a same-day
+cross-check: ES 165 vs MES 2 on 2026-07-10), cum_fill* fixed at 66
+contracts (P75 rule). Viability floor cleared 27×.
+
+Phase B (frozen rules): n=409, PF 0.588, t=−4.43, win 36.4%, −$2,961.35
+net, p=1.0 (t and bootstrap). Avg −$7.24/trade against $3.90 costs → avg
+GROSS −$3.34: negative before costs, the third distinct signal family to
+show the same adverse-selection failure shape at ~1 s retail latency
+(after OBI/CVD maker fills and GEX-conditioned entries).
+
+**Formal verdict: UNDERPOWERED** (n=409 < 500) — per the registered escape,
+NO judgment is entered, nothing is re-tuned, and the nightly $0 ES forward
+capture (reduce-and-delete, same artifacts) accumulates until n ≥ 500
+(~6 further sessions), at which point the combined sample is judged at the
+registered bar. Recorded candidly alongside the formal status: the point
+estimate makes an eventual PASS (PF ≥ 1.10, p < 0.05) arithmetically
+implausible; this note exists so a later reader does not mistake deferral
+for hope.

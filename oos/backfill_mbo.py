@@ -128,6 +128,22 @@ def main() -> int:
 
     client = db.Historical(key)
     failures = sum(0 if _pull_day(client, d, dry_run) else 1 for d in days)
+
+    # ── Round 23 forward window: ES reduce-and-delete (registration 18f21ac) ──
+    # Same zero-spend guard inside reduce_day (any nonzero quote skips). Raw
+    # ES is never retained — only the ~0.5 MB/day compact artifacts the
+    # UNDERPOWERED verdict needs to reach n ≥ 500 and finalize.
+    if not dry_run:
+        try:
+            import round23_reduce as r23
+            d = date(2026, 7, 16)                    # forward window start
+            while d < today_utc:
+                if d.isoweekday() != 6:
+                    log.info(f"R23 ES {d}: {r23.reduce_day(client, d)}")
+                d += timedelta(days=1)
+        except Exception as e:  # noqa: BLE001 — R23 capture must not block MES
+            log.error(f"R23 ES forward reduce failed: {e}")
+
     if failures:
         log.error(f"{failures}/{len(days)} day(s) failed")
         return 1

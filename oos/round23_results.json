@@ -1,0 +1,27 @@
+{
+ "registered": "Round 23 (18f21ac)",
+ "phase_a": {
+  "sessions": 25,
+  "candidates_total": 5488,
+  "candidates_per_session": 219.5,
+  "cum_fill_p50": 45,
+  "cum_fill_p75": 66,
+  "cum_fill_star": 66,
+  "viable": true
+ },
+ "phase_b": {
+  "n": 409,
+  "stop_exits": 243,
+  "target_exits": 108,
+  "timeout_exits": 58,
+  "total_usd": -2961.35,
+  "avg_usd": -7.2405,
+  "pf": 0.588,
+  "win_pct": 36.4,
+  "t": -4.432,
+  "p_one_sided": 1.0,
+  "p_bootstrap": 1.0,
+  "signals": 409
+ },
+ "verdict": "UNDERPOWERED"
+}
