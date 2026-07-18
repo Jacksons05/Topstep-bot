@@ -722,9 +722,15 @@ class Engine:
             # defensive multipliers (futures_plan caps the product at 1.0).
             _gex_mult = (CONFIG.gex_neg_risk_mult
                          if self._gex_regimes.get(sig.symbol) == "negative" else 1.0)
+            # Eval-pass sizing: de-risk after a loss streak and taper toward the
+            # MLL floor (edge-independent variance control). Only ever ≤ 1.0.
+            _eval_mult = 1.0
+            if self._topstep is not None:
+                _eq_for_size, _ = self._account_equity()
+                _eval_mult = self._topstep.combined_size_mult(_eq_for_size)
             risk_mult = (cb_mult * (w or 1.0)
                          * regime_params["size_mult"] * _day_mult * _vol_mult
-                         * _gex_mult)
+                         * _gex_mult * _eval_mult)
             if size < CONFIG.min_executable_size_usd:
                 notify(f"  skip (regime {rk} sized to {size:.0f} < min "
                        f"{CONFIG.min_executable_size_usd:.0f}): {sig.symbol}")

@@ -165,6 +165,11 @@ class TopstepRiskManager:
         # winning trades, and the slice of it earned on trades held ≤Ns.
         self._win_profit_total: float = 0.0
         self._win_profit_scalp: float = 0.0
+        # Eval-pass behavioural state (per-session; also (re)set in reset_day).
+        self._consec_losses: int = 0
+        self._consec_wins: int = 0
+        self._day_realized: float = 0.0
+        self._day_peak_pnl: float = 0.0
         self._min_days_warned: bool = False
         self._mll_breach_warned: bool = False
         # Set by load_day_state() when persisted risk state was EXPECTED (the
@@ -296,8 +301,73 @@ class TopstepRiskManager:
         self._win_profit_total = 0.0
         self._win_profit_scalp = 0.0
         self._mll_breach_warned = False
+        # Eval-pass behavioural state (per-session).
+        self._consec_losses = 0
+        self._consec_wins = 0
+        self._day_realized = 0.0        # realized day P&L accumulated from closes
+        self._day_peak_pnl = 0.0        # intraday high-water of realized day P&L
         log.info(f"[Topstep] day reset | day_base=${current_equity:,.2f} | "
                  f"peak=${self.peak_equity:,.2f} | floor=${self.mll_floor():,.2f}")
+
+    # ── Eval-pass optimization (edge-independent variance/behaviour control) ──
+    # These raise the probability of reaching the profit target before the
+    # trailing drawdown. They NEVER loosen a Topstep hard rule — only tighten.
+
+    def combined_size_mult(self, equity: float | None = None) -> float:
+        """Multiplier in (0, 1] applied to the futures risk budget on top of the
+        engine's other haircuts. Product of the loss-streak de-risk and the
+        MLL-headroom taper; capped at 1.0 so it can only ever REDUCE size."""
+        m = self._loss_streak_size_mult() * self._headroom_size_mult(equity)
+        return max(0.0, min(1.0, m))
+
+    def _loss_streak_size_mult(self) -> float:
+        """Geometric de-risk after topstep_loss_derisk_after consecutive losses,
+        floored at topstep_loss_derisk_floor. 1.0 while under the threshold."""
+        after = CONFIG.topstep_loss_derisk_after
+        if after <= 0 or self._consec_losses < after:
+            return 1.0
+        steps = self._consec_losses - after + 1
+        return max(CONFIG.topstep_loss_derisk_floor,
+                   CONFIG.topstep_loss_derisk_mult ** steps)
+
+    def _headroom_size_mult(self, equity: float | None) -> float:
+        """Linear taper from 1.0 (headroom >= headroom_full) down to the floor
+        multiplier at the MLL floor. Directly protects the trailing drawdown:
+        the closer to the floor, the smaller each new trade's worst case."""
+        full = CONFIG.topstep_headroom_full_usd
+        if full <= 0 or equity is None:
+            return 1.0
+        headroom = equity - self.mll_floor()
+        if headroom >= full:
+            return 1.0
+        floor_m = CONFIG.topstep_headroom_size_floor
+        frac = max(0.0, headroom) / full
+        return floor_m + (1.0 - floor_m) * frac
+
+    def loss_streak_ok(self) -> tuple[bool, str]:
+        """Halt NEW entries for the day after topstep_loss_streak_halt consecutive
+        losing trades — curbs revenge/tilt sequences that turn a normal day into a
+        DLL breach. Exits are never blocked. Off when the knob is 0."""
+        n = CONFIG.topstep_loss_streak_halt
+        if n <= 0 or self._consec_losses < n:
+            return True, "ok"
+        return False, (f"loss-streak halt: {self._consec_losses} consecutive "
+                       f"losses (limit {n}) — no new entries until next session")
+
+    def profit_lock_ok(self) -> tuple[bool, str]:
+        """After the day is up >= topstep_profit_lock_usd, protect it: halt new
+        entries once realized day P&L gives back >= giveback_frac of its intraday
+        peak. Locks in a strong day rather than round-tripping it. Off when 0."""
+        trigger = CONFIG.topstep_profit_lock_usd
+        if trigger <= 0 or self._day_peak_pnl < trigger:
+            return True, "ok"
+        giveback = self._day_peak_pnl - self._day_realized
+        cap = CONFIG.topstep_profit_lock_giveback * self._day_peak_pnl
+        if giveback >= cap:
+            return False, (f"profit-lock: day peak +${self._day_peak_pnl:,.0f} "
+                           f"gave back ${giveback:,.0f} (>= {CONFIG.topstep_profit_lock_giveback:.0%}) "
+                           "— locking the day, no new entries")
+        return True, "ok"
 
     # ── Trailing Maximum Loss Limit (the one HARD Topstep rule) ─────────────
 
@@ -330,8 +400,25 @@ class TopstepRiskManager:
 
     # ── Microscalping guard (Topstep: >50% of profit from ≤5s holds is banned) ──
     def record_close(self, pnl_usd: float, held_sec: float) -> None:
-        """Record a closed trade for scalp-profit attribution. Only winning
-        trades feed the pool — the firm rule is about the source of *profit*."""
+        """Record a closed trade. Updates (a) scalp-profit attribution, (b) the
+        consecutive win/loss streak, and (c) realized day P&L + its intraday
+        peak — the state the eval-pass sizing/halt/lock methods read. Call once
+        per real (non-shadow) close."""
+        # (b) streaks — a scratch (pnl == 0) breaks a loss streak without
+        # starting a win streak (it's not a loss to keep de-risking on).
+        if pnl_usd < 0:
+            self._consec_losses += 1
+            self._consec_wins = 0
+        elif pnl_usd > 0:
+            self._consec_wins += 1
+            self._consec_losses = 0
+        else:
+            self._consec_losses = 0
+        # (c) realized day P&L and its high-water mark (for profit-lock).
+        self._day_realized += pnl_usd
+        if self._day_realized > self._day_peak_pnl:
+            self._day_peak_pnl = self._day_realized
+        # (a) scalp attribution — winners only (the firm rule is about profit source).
         if pnl_usd <= 0:
             return
         self._win_profit_total += pnl_usd
@@ -592,6 +679,15 @@ class TopstepRiskManager:
         gb_ok, gb_reason = self.giveback_ok(equity)
         if not gb_ok:
             return False, gb_reason
+
+        # 4c. Eval-pass behavioural halts: consecutive-loss cooldown (curb tilt)
+        # and profit-lock on a strong day (protect it from a round-trip).
+        ls_ok, ls_reason = self.loss_streak_ok()
+        if not ls_ok:
+            return False, ls_reason
+        pl_ok, pl_reason = self.profit_lock_ok()
+        if not pl_ok:
+            return False, pl_reason
 
         # 5. Account-wide contract cap
         contr_ok, contr_reason = self.contracts_ok(sig.symbol, state)

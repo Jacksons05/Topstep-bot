@@ -348,6 +348,25 @@ class Config:
     # cumulative profit. Topstep: 50%. Enforced as a per-day profit cap that stops
     # NEW entries once today's profit reaches consistency_pct * profit_target.
     topstep_consistency_pct: float = _f("TOPSTEP_CONSISTENCY_PCT", 0.50)
+
+    # ── Eval-pass optimization (edge-independent): the levers that raise the
+    # probability of reaching the profit target BEFORE the trailing drawdown,
+    # by controlling variance/behaviour rather than adding alpha. See
+    # TopstepRiskManager.combined_size_mult / loss_streak_ok / profit_lock_ok.
+    # De-risk after consecutive losing trades (curb tilt / revenge sizing).
+    topstep_loss_derisk_after: int = _i("TOPSTEP_LOSS_DERISK_AFTER", 2)      # losses before haircut
+    topstep_loss_derisk_mult: float = _f("TOPSTEP_LOSS_DERISK_MULT", 0.5)    # geometric per extra loss
+    topstep_loss_derisk_floor: float = _f("TOPSTEP_LOSS_DERISK_FLOOR", 0.25) # min size multiplier
+    # Hard stop for the DAY after this many consecutive losses (0 = off).
+    topstep_loss_streak_halt: int = _i("TOPSTEP_LOSS_STREAK_HALT", 3)
+    # Profit-lock: once the day is up >= lock trigger, protect it — halt new
+    # entries if day P&L gives back >= giveback_frac of its intraday peak.
+    topstep_profit_lock_usd: float = _f("TOPSTEP_PROFIT_LOCK_USD", 750.0)    # 0 = off
+    topstep_profit_lock_giveback: float = _f("TOPSTEP_PROFIT_LOCK_GIVEBACK", 0.5)
+    # Headroom sizing: shrink size linearly as equity nears the MLL floor.
+    # Full size while headroom >= headroom_full_usd; floor multiplier at the floor.
+    topstep_headroom_full_usd: float = _f("TOPSTEP_HEADROOM_FULL_USD", 2_000.0)  # 0 = off
+    topstep_headroom_size_floor: float = _f("TOPSTEP_HEADROOM_SIZE_FLOOR", 0.25)
     # Topstep does NOT ban scalping (unlike the old Topstep ≤5s rule). The microscalp
     # guard below is therefore OFF by default; flip on only if your firm reinstates it.
     topstep_scalp_guard_enabled: bool = _b("TOPSTEP_SCALP_GUARD_ENABLED", False)
