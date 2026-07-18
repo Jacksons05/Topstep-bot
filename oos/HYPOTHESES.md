@@ -1754,3 +1754,39 @@ only. Both-hit → STOP. Hard flatten 15:55 ET.
 **PASS bar (standard).** n ≥ 200, PF ≥ 1.15, one-sided p < 0.05 (t AND 20k
 bootstrap seed 7), ≥ 60% years positive. Fail → the RTH-legal inventory fade
 is dead; the overnight-drift family (illegal hold) stays the only ever-passer.
+
+## Rounds 25 & 26 — results (2026-07-18, oos/round25_26_auction_inventory.py,
+## round25_26_results.json)
+
+**Round 25 (failed-auction fade): FAIL.** ES n=2,881, PF 0.85, t=−2.89,
+win 40.5%, −$95,383, 17.6% years positive. Fading false breakouts beyond
+prior-day extremes loses — the "failed" auction resumes often enough that
+the beyond-extreme stop is hit more than the PDMID target. Dead, no sweep.
+
+**Round 26 (overnight inventory reversal): passes the mechanical bar but is
+NOT ACTIONABLE — killed by sensitivity analysis.** At the registered 1-tick
+slippage it clears every dimension (ES n=1,367, PF 1.262, t=2.33, p=0.010 t /
+0.008 boot, 70.6% years positive) — the FIRST intraday signal in 26 rounds to
+do so. But the disciplined stress tests the account holder asked for falsify
+it as a real edge:
+  1. REGIME-CONCENTRATED. Split by decade: 2010–2019 nets ≈ −$116 (flat/
+     negative, losing in 2011/12/16/17/19); ALL $56k of profit is 2020–2026.
+     The "edge" is a post-COVID high-vol-regime artifact, absent for the first
+     decade of the sample.
+  2. SLIPPAGE-FRAGILE. Entry is AT THE 09:30 RTH OPEN — the worst-slippage
+     moment of the session (opening auction, wide spreads), so 2 ticks is the
+     HONEST execution model, not 1. At 2-tick slippage the result collapses:
+     PF 1.262→1.091, t 2.33→0.91, p 0.010→0.181, years-positive 70.6%→41.2%.
+     A t of 0.91 is indistinguishable from noise.
+
+**Verdict: NOT ACTIONABLE.** The single mechanical PASS in the whole program
+survives only on an optimistic 1-tick cost assumption for an open-entry trade
+and only in the recent regime; it does not clear realistic execution costs and
+is not robust across regimes. Not moving the goalpost — this is the
+pre-requested sensitivity/robustness analysis doing its job. Recorded honestly
+as a fragile lead, NOT an edge: if pursued at all, only via forward paper-
+logging at realistic open-fill costs, never sized on this backtest.
+
+**Program status after 26 rounds: still ZERO robust, actionable intraday
+edges.** The overnight-drift HOLD (Topstep-illegal) remains the only signal
+that survives realistic costs across regimes.
