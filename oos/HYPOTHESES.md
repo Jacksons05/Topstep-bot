@@ -1695,3 +1695,62 @@ Fix (committed with this result): enter at the next bar's OPEN, and admit only
 valid geometry — entry strictly between target and stop in the trade's favour
 (degenerate fills skipped, not booked). The corrected run is the FAIL above.
 Recorded so no future round repeats the artifact or mistakes it for edge.
+
+---
+
+# Round 25 — Failed-auction (false-breakout rejection) fade (registered
+# 2026-07-18, before the runner was written)
+
+**Mechanism (auction market theory).** When price breaks beyond a reference
+extreme (prior-day high/low) but FAILS to find acceptance — no follow-through,
+a bar closes back inside the prior range — it is a failed auction: the
+breakout attracted responsive sellers (above) / buyers (below) who reject the
+excursion and push price back toward value. Fade the failure. Distinct from
+Round 24 (which fades at value-area EDGES regardless of a breakout); this
+requires a breakout THEN a rejection, the classic "false break" the CME
+Market Profile literature calls a failed auction.
+
+**Data.** oos/data/ES_5min.csv (owned, $0), 2010→2026-06-06. MES exploratory.
+
+**Frozen rules (ES, RTH 09:30–16:00 ET; net at 1-tick slip; $4 RT comm).**
+Prior-session references settled at 16:00: PDH, PDL, PDMID=(PDH+PDL)/2.
+Track today's running RTH session high/low. SHORT trigger: session high has
+exceeded PDH at some point today AND a 5-min bar (09:35–15:30 ET) closes back
+below PDH → failed auction above. LONG trigger: session low below PDL AND a
+bar closes back above PDL. One trade per direction per day, one position at a
+time. Entry: NEXT bar OPEN. Target: PDMID. Stop: SHORT = today's session high
++ 0.25·ATR(14); LONG = session low − 0.25·ATR(14) (just beyond the failed
+extreme). Valid-geometry-only (Round-24 rule): admit the trade only if entry
+is strictly between target and stop in its favour, else skip. Both stop+target
+in one bar → STOP (conservative). No exit on the entry bar. Hard flatten 15:55.
+
+**PASS bar (standard).** n ≥ 200, PF ≥ 1.15, one-sided p < 0.05 (t AND 20k
+bootstrap seed 7), ≥ 60% years positive. Fail → dead, no sweep.
+
+---
+
+# Round 26 — Overnight inventory reversal (registered 2026-07-18, before the
+# runner; Topstep-LEGAL — an RTH fade, NOT an overnight hold)
+
+**Mechanism.** A one-directional Globex (overnight) session leaves participants
+with skewed inventory: an overnight rally leaves the market "long inventory"
+that responsive flow corrects after the RTH open, and vice-versa. This is the
+RTH-legal cousin of the overnight-drift family (Rounds 3/4/7/8/11/12): drift
+HOLDS overnight (Topstep-illegal); this FADES the overnight move during RTH and
+is flat by the close. Bogousslavsky (2016, "Infrequent Rebalancing") and the
+inventory-risk microstructure literature (Ho-Stoll) motivate the reversion.
+
+**Data.** oos/data/ES_5min.csv (owned, $0). MES exploratory.
+
+**Frozen rules (ES, RTH; net at 1-tick slip; $4 RT comm).**
+Overnight move ON = (RTH 09:30 open) − (prior RTH 16:00 close). Signal only
+when |ON| is in the TOP TERCILE of the trailing 60-session |ON| distribution
+(a genuinely skewed overnight, not noise). ON > 0 (rallied) → SHORT at the
+09:30 open; ON < 0 → LONG at the 09:30 open. One trade per day. Target: the
+prior RTH close (full reversion of the overnight move). Stop: entry ∓ 1·ATR(14,
+5-min) against the trade (SHORT stop above, LONG stop below). Valid-geometry-
+only. Both-hit → STOP. Hard flatten 15:55 ET.
+
+**PASS bar (standard).** n ≥ 200, PF ≥ 1.15, one-sided p < 0.05 (t AND 20k
+bootstrap seed 7), ≥ 60% years positive. Fail → the RTH-legal inventory fade
+is dead; the overnight-drift family (illegal hold) stays the only ever-passer.
