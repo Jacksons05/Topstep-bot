@@ -12,8 +12,7 @@ subscription surface, but spend nothing further):
     * L1 trailing year, L2/L3 trailing month — used by oos/backfill_mbo.py
       and oos/round23_reduce.py, never re-downloaded here.
   SqueezeMetrics daily DIX/GEX (oos/data/squeeze_dix_gex.csv)
-  Unusual Whales (live API, TTL-cached): dealer greek exposure via uw_gex.py,
-    options flow via uw_flow.py.
+  Unusual Whales (live API, TTL-cached): options flow via uw_flow.py.
 
 Everything returns plain numpy/dicts so rounds stay dependency-light and the
 same arrays feed both backtests and the live engine.
@@ -152,23 +151,6 @@ def captured_sessions(sym: str = "ES") -> list[date]:
         except ValueError:
             continue
     return sorted(days)
-
-
-def uw_gex_live(symbol: str = "MES"):
-    """Live UW dealer-gamma regime read (TTL-cached, fail-closed neutral).
-    Returns a uw_gex.GexRead, or None when UW is unconfigured."""
-    try:
-        from uw_gex import UWGexFeed
-    except Exception:  # noqa: BLE001
-        return None
-    from config import CONFIG
-    if not CONFIG.uw_api_key:
-        return None
-    feed = UWGexFeed()
-    try:
-        return feed.get(symbol)
-    finally:
-        feed.close()
 
 
 def inventory() -> dict:

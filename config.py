@@ -467,24 +467,11 @@ class Config:
     #           OBI/CVD taker+maker (5/20), ORB/VWAP-MR/momentum (2), gamma
     #           reversal (18), and the GEX vol-regime toggle (21: ES pooled
     #           PF 0.809, t=-9.0, 0% years positive, negative even GROSS of
-    #           costs). Open positions are still managed; nothing new opens.
-    # "gex"   : dealer net-GEX regime toggle (uw_gex.py + gex_strategy.py) —
-    #           FALSIFIED in Round 21; opt-in only for research/paper runs.
+    #           costs — its live UW GEX feed has since been removed). Open
+    #           positions are still managed; nothing new opens.
     # "legacy": the SMA20/50+RSI quant signal (OOS-confirmed negative EV,
     #           Rounds 1/19 — kept only for comparison runs).
     entry_engine: str = _s("ENTRY_ENGINE", "off").lower()
-    # Futures→UW GEX proxy override ("MES:SPY,MNQ:QQQ"); defaults in uw_gex.py.
-    uw_gex_proxy_map_raw: str = _s("UW_GEX_PROXY_MAP", "")
-    uw_gex_cache_sec: int = _i("UW_GEX_CACHE_SEC", 900)   # greek-exposure is daily data
-    # Neutral band as a fraction of median |net_gamma|: |net| below the band =
-    # "no reliable dealer pressure" → entries locked.
-    gex_neutral_band_frac: float = _f("GEX_NEUTRAL_BAND_FRAC", 0.25)
-    gex_mr_atr_dev: float = _f("GEX_MR_ATR_DEV", 1.0)     # ATRs from VWAP to fade
-    gex_breakout_lookback: int = _i("GEX_BREAKOUT_LOOKBACK", 20)  # bars for high/low break
-    # Risk multiplier for negative-gamma (vol-expanded) breakout entries —
-    # the "strictly micro-sized" leg of the pivot. Applied on top of the other
-    # defensive multipliers; futures_plan still caps the product at 1.0.
-    gex_neg_risk_mult: float = _f("GEX_NEG_RISK_MULT", 0.5)
 
     # ── notify / logging ──────────────────────────────────
     discord_webhook: str = _s("DISCORD_WEBHOOK")
@@ -590,20 +577,8 @@ class Config:
             errs.append("UW_FLOW_ENABLED=true but UW_API_KEY is empty")
         if not 0.0 <= self.uw_flow_lean_weight <= 1.0:
             errs.append("UW_FLOW_LEAN_WEIGHT must be in [0, 1]")
-        if self.entry_engine not in ("off", "gex", "legacy"):
-            errs.append("ENTRY_ENGINE must be off|gex|legacy")
-        if self.entry_engine == "gex" and not self.uw_api_key:
-            errs.append(
-                "ENTRY_ENGINE=gex needs UW_API_KEY (dealer net-GEX regime feed). "
-                "Without it every scan reads neutral and entries stay locked — "
-                "set the key or fall back to ENTRY_ENGINE=legacy deliberately."
-            )
-        if not 0.0 <= self.gex_neutral_band_frac <= 1.0:
-            errs.append("GEX_NEUTRAL_BAND_FRAC must be in [0, 1]")
-        if not 0.0 < self.gex_neg_risk_mult <= 1.0:
-            errs.append("GEX_NEG_RISK_MULT must be in (0, 1]")
-        if self.gex_breakout_lookback < 5:
-            errs.append("GEX_BREAKOUT_LOOKBACK must be ≥ 5 bars")
+        if self.entry_engine not in ("off", "legacy"):
+            errs.append("ENTRY_ENGINE must be off|legacy")
         if self.min_confidence not in ("low", "medium", "high"):
             errs.append("MIN_CONFIDENCE must be low|medium|high")
         if not 0 < self.max_position_pct <= 1:

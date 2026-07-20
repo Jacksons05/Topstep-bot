@@ -1,5 +1,5 @@
 """Phase C hardening tests: Bug #7 peak reseed, mid-session DB fail-closed,
-server-side brackets + stop collar, and the GEX-regime entry pivot.
+server-side brackets + stop collar.
 
 Naming follows test_phase_a_safety.py / test_phase_b_safety.py.
 """
@@ -343,91 +343,3 @@ class TestBracketAdoption:
         assert broker.submitted[0]["stop_loss_ticks"] is None
         assert placed and placed[0][3] == pytest.approx(5000.0)  # mark = fill
         assert pos.protective_order_id == "legacy-stop-1"
-
-
-# ── Phase 4: GEX regime classification + entry signals ───────────────────────
-
-class TestGexClassification:
-    def test_bands(self):
-        from uw_gex import classify_gex
-        hist = [100.0, 120.0, 80.0, 110.0, 90.0]  # median 100 → band 25 @ 0.25
-        assert classify_gex(60.0, hist, 0.25) == "positive"
-        assert classify_gex(-60.0, hist, 0.25) == "negative"
-        assert classify_gex(10.0, hist, 0.25) == "neutral"
-        assert classify_gex(-10.0, hist, 0.25) == "neutral"
-
-    def test_empty_history_classifies_by_sign(self):
-        from uw_gex import classify_gex
-        assert classify_gex(1.0, [], 0.25) == "positive"
-        assert classify_gex(-1.0, [], 0.25) == "negative"
-        assert classify_gex(0.0, [], 0.25) == "neutral"
-
-
-def _bars(closes, highs=None, lows=None):
-    highs = highs or [c + 2 for c in closes]
-    lows = lows or [c - 2 for c in closes]
-    return {"close": list(closes), "high": list(highs), "low": list(lows),
-            "volume": [100] * len(closes)}
-
-
-class TestGexStrategy:
-    def test_neutral_locks_entries(self):
-        from gex_strategy import gex_quant_signal
-        bars = _bars([5000 + i * 0.1 for i in range(60)])
-        assert gex_quant_signal(bars, "neutral", 5000.0) is None
-
-    def test_positive_gamma_fades_stretch_below_vwap(self):
-        from gex_strategy import gex_quant_signal
-        closes = [5000.0] * 59 + [4970.0]   # last close well below vwap
-        bars = _bars(closes)
-        read = gex_quant_signal(bars, "positive", 5000.0)
-        assert read is not None and read.lean > 0  # revert LONG toward vwap
-        assert "VWAP-MR" in read.detail
-
-    def test_positive_gamma_fades_stretch_above_vwap(self):
-        from gex_strategy import gex_quant_signal
-        closes = [5000.0] * 59 + [5030.0]
-        bars = _bars(closes)
-        read = gex_quant_signal(bars, "positive", 5000.0)
-        assert read is not None and read.lean < 0  # revert SHORT
-
-    def test_positive_gamma_no_stretch_no_entry(self):
-        from gex_strategy import gex_quant_signal
-        closes = [5000.0] * 60
-        bars = _bars(closes)
-        assert gex_quant_signal(bars, "positive", 5000.0) is None
-
-    def test_negative_gamma_breakout_long(self):
-        from gex_strategy import gex_quant_signal
-        closes = [5000.0] * 59 + [5015.0]
-        highs = [5005.0] * 59 + [5016.0]    # prior high 5005, close 5015 above it
-        lows = [4995.0] * 60
-        bars = _bars(closes, highs, lows)
-        read = gex_quant_signal(bars, "negative", None)
-        assert read is not None and read.lean > 0
-        assert "breakout" in read.detail
-
-    def test_negative_gamma_breakdown_short(self):
-        from gex_strategy import gex_quant_signal
-        closes = [5000.0] * 59 + [4985.0]
-        highs = [5005.0] * 60
-        lows = [4995.0] * 59 + [4984.0]
-        bars = _bars(closes, highs, lows)
-        read = gex_quant_signal(bars, "negative", None)
-        assert read is not None and read.lean < 0
-
-    def test_negative_gamma_inside_range_no_entry(self):
-        from gex_strategy import gex_quant_signal
-        closes = [5000.0] * 60
-        bars = _bars(closes)
-        assert gex_quant_signal(bars, "negative", None) is None
-
-    def test_positive_without_vwap_fails_closed(self):
-        from gex_strategy import gex_quant_signal
-        closes = [5000.0] * 59 + [4970.0]
-        assert gex_quant_signal(_bars(closes), "positive", None) is None
-
-    def test_unknown_regime_fails_closed(self):
-        from gex_strategy import gex_quant_signal
-        closes = [5000.0] * 59 + [4970.0]
-        assert gex_quant_signal(_bars(closes), "weird", 5000.0) is None
