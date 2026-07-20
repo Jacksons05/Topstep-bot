@@ -64,9 +64,18 @@ def evaluate(net, ts_years):
 
 
 def passes(c):
-    return (c.get("n", 0) >= 200 and (c.get("pf") or 0) >= 1.15
-            and (c.get("p_one_sided") or 1) < 0.05 and (c.get("p_bootstrap") or 1) < 0.05
-            and (c.get("pct_years_positive") or 0) >= 60)
+    # NOTE: `is not None`, not `x or default` -- a perfect/extreme result can
+    # legitimately compute p_one_sided/p_bootstrap == 0.0, and `0.0 or 1`
+    # evaluates to 1 in Python (falsy-zero), which would silently force a
+    # FAIL on the strongest possible results. Found + fixed 2026-07-20 while
+    # building round28_relative_value.py (copied this pattern, smoke-tested
+    # against it, caught it there). Matches candidates.py's passes(), the
+    # original correct reference kernel. This round was never run (DATA-
+    # BLOCKED throughout), so no prior verdict in HYPOTHESES.md is affected.
+    return bool(c.get("n", 0) >= 200 and (c.get("pf") or 0) >= 1.15
+                and c.get("p_one_sided") is not None and c["p_one_sided"] < 0.05
+                and c.get("p_bootstrap") is not None and c["p_bootstrap"] < 0.05
+                and (c.get("pct_years_positive") or 0) >= 60)
 
 
 def build_trades(rows):

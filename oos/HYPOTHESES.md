@@ -2011,3 +2011,88 @@ defaults to `off` (Round 21 killed the GEX entry engine), `UW_FLOW_ENABLED`
 already defaults to `False`, and every UW-keyed code path (uw_gex.py,
 uw_flow.py, marketdata.py's regime-fallback) fails closed/safe on a
 dead key by design — no code change was required.
+
+---
+
+# Round 28 — ES/NQ intraday relative-value mean reversion (registered
+# 2026-07-20, before any pull; a RELATIVE-VALUE mechanism, never tested in
+# this program's 27 prior rounds, which are all single-instrument
+# directional or regime-conditioned signals)
+
+**Motivation (why this is genuinely new, not a re-parameterization of
+anything dead).** Every prior round bets on ONE instrument's own price
+relative to itself (trend, VWAP/value-area, regime-conditioned direction,
+overnight gap/drift) or on an order-flow/microstructure signal. This round
+instead bets on the RELATIONSHIP between two highly-correlated but
+non-identical instruments (ES/S&P 500 vs NQ/Nasdaq-100) — a pairs-trading /
+statistical-arbitrage mechanism (Gatev, Goetzmann & Rouwenhorst 2006;
+classic index-arbitrage/comovement literature) never applied in this
+ledger. Distinct from Round 12 (cross-asset OVERNIGHT drift, a different
+mechanism on different instruments) and Round 15 (single-instrument
+regime-transition confluence).
+
+**Mechanism.** ES and NQ are both broad US equity index futures with high
+intraday co-movement but different sector composition (NQ tech-heavy, ES
+broad-market) and partially different participant/hedging flows. Temporary
+intraday divergences in their relative performance should attract
+cross-hedging/index-arb flow that restores the normal relationship —
+classic relative-value mean reversion, not a bet on either index's
+direction. Session-LOCAL divergence (reset each RTH day, not a multi-day
+cumulative spread) is used specifically to avoid the confound of NQ's
+well-known multi-year secular outperformance vs ES (2010-2019 was a
+sustained Nasdaq bull run) contaminating the signal with a directional
+drift disguised as "reversion."
+
+**Data.** `oos/data/ES_5min.csv` (owned, 2010→2026) ∩ `oos/data/NQ_5min.csv`
+(owned, 2010→2019 per CLAUDE.md's infra map) → judged window is their
+overlap, 2010-01-01→2019-12-31 (bounded programmatically by NQ's actual
+min/max timestamp, not hand-picked). MES/MNQ (2019→2026 overlap) exploratory
+only. **Zero additional cost — no new data pull, no vendor decision.**
+
+**Frozen rule (RTH 09:30–16:00 ET only; both legs judged net; 5-min bars).**
+1. Per RTH session (Mon–Fri, `mins(t)` in `[9:30, 15:55]`), for each symbol
+   independently: `pct_from_open(t) = 100 * (close(t) / session_open − 1)`,
+   where `session_open` is that session's FIRST RTH bar's open. Resets every
+   session — no cross-day carry.
+2. `divergence(t) = pct_from_open_NQ(t) − pct_from_open_ES(t)` (percentage
+   points), computed only at 5-min timestamps present in BOTH series.
+3. `z(t) = (divergence(t) − rolling_mean) / rolling_std`, rolling stats over
+   the trailing 30 bars of `divergence` **within the current session only**
+   (a session with < 30 bars so far has no z yet that day — no cross-session
+   lookback, no leakage of yesterday's regime into today).
+4. Entry (one pair-position at a time, whole backtest): only between 10:30
+   and 15:00 ET (guarantees the 30-bar in-session lookback exists and leaves
+   time for the trade to play out before flatten). `z(t) ≥ +2.0` → NQ has
+   intraday-outperformed its recent relationship to ES → SHORT 1 NQ, LONG 1
+   ES (fade). `z(t) ≤ −2.0` → LONG 1 NQ, SHORT 1 ES. Entry price: both legs'
+   bar CLOSE at signal time (no next-bar-open convention here — this is a
+   continuous-signal mean-reversion entry, matching Round 5's crossed-spread-
+   at-signal convention, not a discrete breakout/geometry trade like Rounds
+   24–26).
+5. Exit (first to trigger, same session): `|z(t)| ≤ 0.5` (reverted) OR 12
+   bars elapsed (60 min) OR the session's 15:55 bar (hard flatten, well
+   inside the Topstep 16:10 rule even though this account only trades ES/
+   NQ's micro cousins live — the rule is honored anyway for realism). Exit
+   price: both legs' bar CLOSE at the exit bar.
+6. Sizing: PRIMARY cell is flat 1 ES + 1 NQ contract (equal CONTRACT count,
+   not equal notional/beta — the simplest, most transparent form, matching
+   how Round 5 tested OBI/CVD in its plainest form before any refinement).
+   If this round PASSes, a beta/vol-weighted sizing variant would be its own
+   follow-up registration, not folded in here.
+7. Costs (both legs, both sides): commission $4.00 RT each (ES $4.00, NQ
+   $4.00 — CME e-mini standard, matching confirm_c1_nq.py's NQ rate) + 1-tick
+   slippage each leg each side (4 slippage events per round-trip: ES entry,
+   ES exit, NQ entry, NQ exit). MES/MNQ exploratory leg: $1.40 RT each,
+   1-tick slippage on the micro tick value.
+
+**PASS bar (standard).** n ≥ 200 pair-trades, PF ≥ 1.15, one-sided p < 0.05
+(t AND 20k bootstrap seed 7), ≥ 60% of calendar years positive, judged NET.
+Fail → dead, no sweep (no retrying other z-thresholds, lookback windows, or
+hold times — this exact frozen form is what gets judged).
+
+**Runner.** `oos/round28_relative_value.py` — implements the above verbatim,
+reuses `candidates.load`/`mins`. **Not run in this session — no
+`oos/data/*.csv` exists in this cloud sandbox (gitignored, local-machine
+only).** Run locally (`.venv/bin/python oos/round28_relative_value.py`) and
+report the printed verdict + `oos/round28_results.json` back before treating
+any number here as a result.
