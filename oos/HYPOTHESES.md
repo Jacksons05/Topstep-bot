@@ -2096,3 +2096,23 @@ reuses `candidates.load`/`mins`. **Not run in this session — no
 only).** Run locally (`.venv/bin/python oos/round28_relative_value.py`) and
 report the printed verdict + `oos/round28_results.json` back before treating
 any number here as a result.
+
+## Round 28 — exploratory PILOT, real data, NOT the verdict (2026-07-20,
+## same day as registration)
+
+`oos/round28_pilot_spy_qqq.py`: the same signal logic (identical LOOKBACK/
+Z_ENTRY/Z_EXIT/MAX_HOLD), run against real SPY/QQQ 5-min bars pulled free
+from Yahoo Finance (the only real market data this cloud sandbox can reach
+— it cannot reach `oos/data/*.csv` or Databento). This is explicitly a
+different data source, instrument (ETF not futures), and window than the
+frozen spec above — it exists only to answer "obviously dead on any real
+data, or worth a real run?", nothing stronger.
+
+**Result: n=54, PF=1.225, win 59.3%, t=0.589, p_one_sided=0.278** (window
+2026-04-23→2026-07-20, ~60 trading days — Yahoo's 5-min-interval history
+limit). Directionally positive, nowhere near the n≥200/p<0.05 PASS bar (n
+is ~27% of the floor and this window alone couldn't reach significance even
+if the true edge were real) — **not obviously dead, but not evidence of
+anything either.** No conclusion should be drawn beyond "still worth running
+the real, frozen test" — this pilot itself is NOT a PASS, NOT a FAIL, and
+must not be cited as either.
