@@ -863,6 +863,32 @@ before shipping (family-wise discipline).
 oos/round17_moc_drift.py -- data-format contract + evaluate() (harness kernel
 conventions); reports DATA-BLOCKED until a MOC-imbalance dataset is present.
 
+## Round 17 — data-availability update (2026-07-20, re-checked during a
+## full-ledger re-evaluation; still DATA-BLOCKED, status only, no P&L)
+
+Re-confirmed via Databento's own docs (not re-tested, not re-tuned): Databento
+DOES carry both legs. NYSE closing-auction imbalance (`ref_price`,
+`paired_qty`, `total_imbalance_qty`, `side`) is in the `imbalance` schema on
+`XNYS.PILLAR`, disseminated every 1s from 15:50 ET — an exact match for this
+round's frozen 15:50 signal timestamp. Nasdaq NOII is in the `imbalance`
+schema on `XNAS.ITCH`. Pricing is NOT yet confirmed at the historical,
+one-off-pull rate this program has always used (Databento's public page only
+advertises a real-time "Plus/Unlimited" subscription starting at $1,000/mo
+for the imbalance-only tier; the separate historical-usage-based rate for a
+one-time backtest pull, which is what every prior round in this file has
+paid, has not been quoted). Before any spend: run
+`Historical.metadata.get_cost()` for the exact ES/NYSE+NASDAQ imbalance
+window needed and report the number BEFORE downloading anything (same
+discipline as Round 20's MBO cost check) -- this may be materially cheaper
+than the $1,000/mo headline figure, or it may not; find out, do not assume
+either way. A real-time capture (the $0 forward-logging alternative used for
+UW GEX) does NOT look zero-cost here either -- Databento's real-time
+imbalance access is gated behind the same Plus/Unlimited tier. **This is a
+disclosed $ decision for the account holder, same as Round 12's deferred
+CL/YM leg -- not something to spend on without explicit approval.** Status
+remains DATA-BLOCKED pending that decision; the frozen spec above is
+unchanged and ready to run the moment data exists.
+
 ---
 
 # Round 18 — dealer net-gamma-level reversal, intraday (registered 2026-07-09, diagnostic-first, before P&L)
@@ -1790,3 +1816,135 @@ logging at realistic open-fill costs, never sized on this backtest.
 **Program status after 26 rounds: still ZERO robust, actionable intraday
 edges.** The overnight-drift HOLD (Topstep-illegal) remains the only signal
 that survives realistic costs across regimes.
+
+---
+
+# Full-ledger re-evaluation (2026-07-20) — account holder wants to stay on
+# Topstep; re-read all 26 rounds + the original trial end-to-end before
+# proposing anything new, rather than re-litigating any dead family
+
+**Re-confirmed, not re-tested (no data touched for this section):**
+- Topstep-legal overnight-drift is EXHAUSTED (Round 12 synthesis): 0/4
+  instruments (NQ/MNQ/RTY/GC) pass the 18:00-entry variant. Only the
+  16:00-entry variant (violates the flatten rule) has ever passed, Nasdaq-
+  linked only. No new instrument or parameter is licensed on this family.
+- Every single-bar OHLCV pattern family tested (ORB, VWAP-reversion, SMA/RSI
+  both strength tiers, intraday momentum, overnight-gap fade, regime-
+  transition-confluence proxy, value-area rotation, failed-auction fade) is
+  dead, cross-validated against outside literature (Round 14 addendum).
+- Every order-flow-imbalance construction tested (taker OBI/CVD Round 5,
+  maker/queue-fill Round 20, per-level iceberg Round 22 UNTESTABLE, per-order
+  iceberg Rounds 22/23 UNDERPOWERED but decisively negative point estimate)
+  is dead or effectively dead. OFI decay at ~1s is independently reconfirmed
+  by 2025-26 literature (Takahashi 2025 SVAR on ES E-mini BBO: OFI/price
+  shocks "dissipate almost entirely within a second") — nothing left to
+  retry here without a genuinely different signal.
+- Every GEX/dealer-gamma construction (daily sign Round 6, live engine
+  regime-toggle Round 21, intraday-magnitude fade Round 18) is dead or
+  inverted-in-window. The one untested leg — Round 18's negative-gamma
+  ("momentum-following") side, explicitly stood aside on rather than tested
+  — is registered below as Round 27, not a rescue of Round 18's dead fade.
+- Overnight inventory reversal (Round 26) is the only mechanical PASS in the
+  whole program and remains NOT ACTIONABLE (regime-concentrated,
+  slippage-fragile). Not re-opened.
+
+**The one mechanism in this file that is genuinely UNTESTED, not dead —
+MOC/closing-auction imbalance drift (Round 17).** Re-checked Databento's own
+schema docs (2026-07-20): both legs (NYSE `imbalance` on `XNYS.PILLAR`,
+Nasdaq NOII on `XNAS.ITCH`) are real, purchasable products, timestamped
+exactly to this round's frozen 15:50 ET signal. Status updated above
+(still DATA-BLOCKED on cost confirmation, not on mechanism or data
+existence) — this is the highest-value next step if the account holder
+wants to spend to find out, because unlike everything else in this file it
+has never been run, not merely failed.
+
+**Considered and NOT registered (2026-07-20): large-trade / sweep
+detection.** Motivation: OFI's own seconds-scale decay is well-established
+(Rounds 4/5/20 + the literature above), but a handful of 2025-26 papers
+distinguish large/aggressive trades from ordinary OFI as a separately
+informative signal (Jain et al., intermarket sweep orders in EQUITIES carry
+disproportionate information share). **Rejected before any data pull**: the
+most recent and most directly relevant paper (arXiv 2607.01198, "When large
+trades are not news," 2026) finds a large trade's informativeness is NOT
+unconditional — it depends on the prevailing liquidity-tail regime (thin-
+tailed liquidity demand → large trades are informative; heavy-tailed →
+they're liquidity shocks that get quickly reverted, not signal). Any
+tradeable version of this idea would therefore need a live liquidity-regime
+classifier bolted on before the entry signal even fires — structurally the
+same regime-conditioning shape that already failed three times in this file
+(Round 6 GEX-sign, Round 18 gamma-magnitude, Round 21 live-engine GEX
+toggle — the last two inverted or wrong-signed, not just insignificant).
+Also, the sweep-order literature itself is EQUITY market-structure specific
+(Reg NMS order-routing fragmentation creates the ISO mechanism); CME futures
+do not have an equivalent routing structure, so the mechanism may not even
+transfer. Not registered — flagged here so it is not re-proposed later
+without this context, same convention as the FOMC/CPI-generalization
+rejection above.
+
+---
+
+# Round 27 — UW dealer-gamma NEGATIVE-tercile leg (momentum-following),
+# the untested half of Round 18 (registered 2026-07-20, before any new pull;
+# a NEW hypothesis per Round 18's own text, not a sign-flip rescue of it)
+
+**Why this is not a rescue.** Round 18 froze and judged exactly one leg:
+fade the trailing 10-min move when `gamma_per_one_percent_move_oi` is in the
+top (most-positive) tercile; the bottom tercile was explicitly "stand aside
+— research does not establish a clean momentum-side edge, only the
+dampening side," and its own writeup names a sign-flip test as "a NEW
+hypothesis (would need its own pre-registration)" if ever wanted. This round
+IS that pre-registration, for the OTHER, never-tested leg: momentum
+continuation (not reversal) when dealers are net SHORT gamma. Round 18's own
+top-tercile result (decisively wrong-signed, PF 0.767, p=0.998) is NOT
+reused, re-judged, or re-interpreted here.
+
+**Frozen trade rule (mirrors Round 18's structure exactly except direction
+and tercile; Topstep-legal, no overnight hold):**
+1. Same underlier (SPX/ES judged; NDX/NQ exploratory), same field
+   (`gamma_per_one_percent_move_oi`, OI-based, not `_vol`/`_dir`), same
+   trailing-5-trading-day rolling tercile split, same execution proxy
+   (nearest 5-min bar within 10min tolerance).
+2. Entry trigger: current snapshot in the BOTTOM tercile (strongly negative
+   net gamma) AND 09:30–15:00 ET AND no position open. Direction: WITH the
+   trailing 10-minute move (if price rose, go long; if it fell, go short;
+   flat → skip) — momentum, the mirror of Round 18's fade. Top tercile →
+   stand aside (Round 18's leg is dead; not re-tested here). Middle tercile
+   → no trade.
+3. Exit: same three frozen hold times as Round 18 (10min primary/judged,
+   30min + 60min exploratory), all hard-capped at 15:59 ET flatten.
+4. Costs: identical to Round 18 (ES/NQ $4.00 RT + 1-tick slippage both
+   sides).
+
+**PASS bar / actionability tier.** Identical constraint to Round 18: UW's
+intraday gamma history was ~90-120 trading days as of 2026-07 (< 1 calendar
+year) → **whatever this round finds is EXPLORATORY ONLY, not actionable**,
+regardless of PF/p/n, until the accumulating `com.jarvis.uwcapture` history
+clears a full year (~Oct 2026, same maturity date as Round 14's UW
+market-tide leg — both should be revisited together then). Registered now,
+before running, purely so it is ready to test the moment the data matures
+rather than being designed after looking at a year of results. n ≥ 200
+(primary 10-min cell, ES only), PF ≥ 1.15, one-sided p < 0.05 (t AND 20k
+bootstrap) is the bar that will apply once the tier allows actionability;
+reported-only numbers before then use the same bar for comparison purposes,
+not as a trading decision.
+
+**Data.** `oos/round18_gamma_scores.json` (190 ticker-days already pulled,
+2026-02-26→2026-07-08) can be re-used for the exploratory read AS-IS — this
+round adds no new UW pull. A full re-run once the capture matures past 1
+year will need a fresh pull covering the extended window.
+
+**Runner.** Extend `oos/round18_gamma_reversal.py` with the mirrored
+direction/tercile rule (or a sibling `oos/round27_gamma_momentum.py`) —
+not yet written.
+
+---
+
+**Honest bottom line for the account holder (2026-07-20):** after re-reading
+every registered round end-to-end, there is still no proven, actionable,
+Topstep-legal intraday edge. That has not changed by re-reading it — it is
+what a correct re-read of an honestly-run 26-round program looks like. The
+two live paths forward are (1) spend to unblock Round 17 (MOC imbalance —
+get the exact Databento cost, then decide), and (2) wait for the UW gamma
+and market-tide captures to clear ~1 year of history (~Oct 2026) so Round 27
+and Round 14 stop being exploratory-only. Nothing on the dead list is
+eligible to be revisited by relabeling or re-parameterizing it.
