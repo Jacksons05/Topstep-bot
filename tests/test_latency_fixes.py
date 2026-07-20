@@ -103,13 +103,15 @@ def test_anthropic_client_uses_configured_timeout(monkeypatch):
                 captured["api_key"] = api_key
                 captured["timeout"] = timeout
 
-    monkeypatch.setattr(
-        "config.CONFIG",
-        dataclasses.replace(CONFIG, llm_backend="anthropic",
-                             anthropic_api_key="test-key"))
-    monkeypatch.setattr(agents, "CONFIG",
-                         dataclasses.replace(CONFIG, llm_backend="anthropic",
-                                              anthropic_api_key="test-key"))
+    # Pin llm_enabled explicitly rather than inheriting whatever the ambient
+    # CONFIG currently has (e.g. a local .env with LLM_ENABLED=false would
+    # otherwise make _build_client() return None before ever reaching the
+    # anthropic branch, regardless of backend/key — observed 2026-07-20).
+    patched = dataclasses.replace(
+        CONFIG, llm_enabled=True, llm_backend="anthropic",
+        anthropic_api_key="test-key")
+    monkeypatch.setattr("config.CONFIG", patched)
+    monkeypatch.setattr(agents, "CONFIG", patched)
     monkeypatch.setitem(__import__("sys").modules, "anthropic", _FakeAnthropicModule)
     client = agents._build_client()
     assert captured["timeout"] == CONFIG.llm_timeout_sec

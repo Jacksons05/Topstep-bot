@@ -20,7 +20,12 @@ def log(msg: str) -> None:
     line = f"[{_stamp()}] {msg}"
     print(line)
     try:
-        with open(CONFIG.log_file, "a") as f:
+        # Explicit UTF-8: many notify() messages carry emoji (warning/status
+        # markers), and open()'s default encoding is the OS locale codepage
+        # -- on Windows that's cp1252, which raises UnicodeEncodeError on the
+        # very first emoji-bearing log line. UTF-8 matches the actual
+        # production (Linux) behavior and is always correct here.
+        with open(CONFIG.log_file, "a", encoding="utf-8") as f:
             f.write(line + "\n")
     except OSError:
         pass

@@ -316,9 +316,12 @@ def test_load_day_state_ignores_non_dict_json(tmp_path, monkeypatch):
     ts.peak_equity = 50_000.0
     ts.day_start_equity = 50_000.0
 
-    for bad_content in ("null", "[]", '"string"', "42"):
+    for i, bad_content in enumerate(("null", "[]", '"string"', "42")):
         ts._cold_start_unsafe = False
-        state_file = tmp_path / f"day_state_{bad_content[:5]}.json"
+        # Index, not a raw content slice, in the filename: bad_content[:5] for
+        # '"string"' is '"stri' — a literal double-quote, which Windows NTFS
+        # rejects in filenames (OSError: Invalid argument).
+        state_file = tmp_path / f"day_state_{i}.json"
         state_file.write_text(bad_content)
         # Patch at instance level since _DAY_STATE_FILE is a class variable.
         ts._DAY_STATE_FILE = state_file

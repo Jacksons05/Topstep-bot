@@ -31,7 +31,18 @@ class EngineAlreadyRunning(RuntimeError):
 def _pid_alive(pid: int) -> bool:
     """Best-effort liveness check. Fails safe: if we can't tell, assume alive
     (a false 'still running' blocks a restart with a clear error; a false
-    'dead' would let a second live engine start trading — much worse)."""
+    'dead' would let a second live engine start trading — much worse).
+
+    os.kill(pid, 0) is POSIX-shaped: on Linux/macOS a dead PID raises
+    ProcessLookupError and a live-but-unsignalable PID raises PermissionError,
+    both handled below. On Windows there is no such distinction — os.kill's
+    signal-0 path raises a plain OSError (WinError 87, "the parameter is
+    incorrect") for a dead PID too, which used to propagate uncaught and crash
+    acquire() entirely (observed 2026-07-20: blocked every engine start after
+    a crashed process left a stale lock, on the actual production Linux
+    target this exact bug can't occur). Any OSError we can't specifically
+    classify falls back to the same fail-safe default as an unrecognized
+    condition: assume alive."""
     if pid <= 0:
         return False
     try:
@@ -39,6 +50,8 @@ def _pid_alive(pid: int) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
+        return True
+    except OSError:
         return True
     else:
         return True
