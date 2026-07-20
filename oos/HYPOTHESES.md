@@ -889,6 +889,21 @@ CL/YM leg -- not something to spend on without explicit approval.** Status
 remains DATA-BLOCKED pending that decision; the frozen spec above is
 unchanged and ready to run the moment data exists.
 
+## Round 17 — cost-check tooling added (2026-07-20, no P&L, no spend, still
+## DATA-BLOCKED pending the account holder's decision)
+
+`oos/fetch_round17_imbalance.py` written: calls `Historical.metadata.
+get_cost()` (free, read-only) for the full-market `imbalance` schema on
+XNYS.PILLAR (NYSE) and XNAS.ITCH (Nasdaq) across a few candidate window
+sizes (1y/3y/5y -- the top-tercile gate needs ~600+ sessions, ~2.4y minimum,
+for n>=200 post-gate trades). **Not yet run against a real key** -- no
+DATABENTO_API_KEY was available in the environment this was written in; the
+script fails loudly and safely with no key rather than guessing. Run it once
+the key is available and report the numbers back before deciding on a
+window. Still does not download or aggregate anything -- that pipeline (to
+build this round's moc_imbalance.csv contract) is a separate follow-up,
+written only once a window is approved.
+
 ---
 
 # Round 18 — dealer net-gamma-level reversal, intraday (registered 2026-07-09, diagnostic-first, before P&L)
