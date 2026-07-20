@@ -387,7 +387,24 @@ class Engine:
     def next_interval(self) -> int:
         if not self._market_open():
             return CONFIG.closed_interval_sec
-        return CONFIG.fast_interval_sec if self.cb_level != "green" else CONFIG.scan_interval_sec
+        if self.cb_level != "green":
+            # Breaker-tripped cadence is about risk-monitoring responsiveness,
+            # not signal freshness — keep it a flat fast poll, not bar-aligned.
+            return CONFIG.fast_interval_sec
+        return self._bar_aligned_interval()
+
+    def _bar_aligned_interval(self) -> int:
+        """Seconds until BAR_ALIGN_BUFFER_SEC after the next wall-clock bar
+        boundary (default: 5-min, matching every registered strategy's bar).
+        A flat SCAN_INTERVAL_SEC countdown can land anywhere up to ~60s after
+        a bar closes; aligning means a fresh bar is evaluated within a few
+        seconds, every time, instead of stale by up to a full poll interval."""
+        period = CONFIG.bar_align_sec
+        if period <= 0:
+            return CONFIG.scan_interval_sec
+        secs_into_bar = time.time() % period
+        wait = (period - secs_into_bar) + CONFIG.bar_align_buffer_sec
+        return max(1, int(wait))
 
     # ── fail-closed DB guard (Phase 2) ────────────────────
     def _db_panic_flatten_and_exit(self, why: str) -> None:

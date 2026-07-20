@@ -49,7 +49,7 @@ class _OllamaMessages:
     JSON output at the requested temperature.
     """
     def __init__(self, host: str):
-        self._http = httpx.Client(base_url=host, timeout=180.0)
+        self._http = httpx.Client(base_url=host, timeout=CONFIG.llm_timeout_sec)
 
     def create(self, *, model=None, max_tokens=400, temperature=0.0, messages):
         r = self._http.post("/api/chat", json={
@@ -82,7 +82,8 @@ def _build_client():
         try:
             import anthropic
 
-            return anthropic.Anthropic(api_key=CONFIG.anthropic_api_key)
+            return anthropic.Anthropic(
+                api_key=CONFIG.anthropic_api_key, timeout=CONFIG.llm_timeout_sec)
         except Exception:  # noqa: BLE001
             return None
     return None

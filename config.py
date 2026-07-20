@@ -42,6 +42,14 @@ class Config:
     scan_interval_sec: int = _i("SCAN_INTERVAL_SEC", 60)
     # Adaptive cadence: when realized vol spikes, poll faster (down to this).
     fast_interval_sec: int = _i("FAST_INTERVAL_SEC", 15)
+    # Every registered strategy signals off 5-min bars, so a fixed 60s countdown
+    # from whenever the last cycle happened to finish can leave a fresh bar
+    # sitting unevaluated for up to ~60s. When the breaker is green, align the
+    # wake-up to shortly after each wall-clock bar boundary instead (see
+    # Engine.next_interval). BAR_ALIGN_SEC=0 disables alignment (falls back to
+    # the flat SCAN_INTERVAL_SEC countdown).
+    bar_align_sec: int = _i("BAR_ALIGN_SEC", 300)
+    bar_align_buffer_sec: int = _i("BAR_ALIGN_BUFFER_SEC", 5)
     # Cost control: only run the (LLM-heavy) scan during US market hours; idle
     # cheaply otherwise. CLOSED_INTERVAL_SEC is the slow poll while the market is
     # shut so the loop just checks the clock instead of burning API credits 24/7.
@@ -215,6 +223,11 @@ class Config:
     llm_model_deep: str = _s("LLM_MODEL_DEEP", "claude-opus-4-8")
     llm_temperature: float = _f("LLM_TEMPERATURE", 0.0)    # 0 = deterministic JSON
     llm_max_symbols_per_cycle: int = _i("LLM_MAX_SYMBOLS_PER_CYCLE", 20)
+    # Bounds worst-case per-call latency in the pre-order hot path. A hung/slow
+    # LLM backend already degrades to a neutral read on any failure (agents.py
+    # _ask_json), so shortening this only trades a rare missed-opinion for
+    # bounding the decision cycle — it does not change entry logic or risk.
+    llm_timeout_sec: float = _f("LLM_TIMEOUT_SEC", 10.0)
     ollama_model: str = _s("OLLAMA_MODEL", "qwen2.5:7b")
     ollama_host: str = _s("OLLAMA_HOST", "http://localhost:11434")
 
