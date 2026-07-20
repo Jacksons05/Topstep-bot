@@ -50,6 +50,15 @@ class Config:
     # the flat SCAN_INTERVAL_SEC countdown).
     bar_align_sec: int = _i("BAR_ALIGN_SEC", 300)
     bar_align_buffer_sec: int = _i("BAR_ALIGN_BUFFER_SEC", 5)
+    # Event-driven wake (Engine.wake_wait / ProjectXOrderFlowFeed.on_boundary):
+    # a live tick can wake the loop the instant it crosses a bar boundary
+    # instead of waiting out the bar-aligned poll above. Strictly additive —
+    # next_interval() is still passed as wake_wait's timeout, so this can only
+    # make a wake-up earlier, never later. Kept behind its own flag (distinct
+    # from BAR_ALIGN_SEC, which also controls the *polling* cadence) so the
+    # live-tick path alone can be rolled back in one env edit without touching
+    # bar-aligned polling.
+    event_driven_loop_enabled: bool = _b("EVENT_DRIVEN_LOOP_ENABLED", True)
     # Cost control: only run the (LLM-heavy) scan during US market hours; idle
     # cheaply otherwise. CLOSED_INTERVAL_SEC is the slow poll while the market is
     # shut so the loop just checks the clock instead of burning API credits 24/7.

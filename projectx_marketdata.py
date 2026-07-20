@@ -66,9 +66,10 @@ class ProjectXOrderFlowFeed:
         self._last_reconnect_ts = 0.0
         # Optional callable invoked (from signalrcore's own background thread —
         # must be thread-safe; threading.Event.set is) the first time a live
-        # quote/trade tick is observed in a fresh wall-clock bar bucket, so the
-        # engine's decision loop can wake immediately instead of waiting out a
-        # full poll interval. None (the default) disables this entirely.
+        # quote/trade/depth tick is observed in a fresh wall-clock bar bucket,
+        # so the engine's decision loop can wake immediately instead of
+        # waiting out a full poll interval. None (the default) disables this
+        # entirely.
         self._on_boundary = on_boundary
         self._last_bucket: int | None = None
 
@@ -221,10 +222,11 @@ class ProjectXOrderFlowFeed:
     # ── SignalR event handlers (args = [contractId, payload]) ─────────────────
 
     def _maybe_signal_boundary(self) -> None:
-        """Fire on_boundary the first time a tick lands in a fresh wall-clock
-        bar bucket (same CONFIG.bar_align_sec grid the engine's poll cadence
-        aligns to). Debounced to once per bucket; never raises — a signaling
-        problem must never take down the tick handler that called it."""
+        """Fire on_boundary the first time a quote/trade/depth tick lands in a
+        fresh wall-clock bar bucket (same CONFIG.bar_align_sec grid the
+        engine's poll cadence aligns to). Debounced to once per bucket; never
+        raises — a signaling problem must never take down the tick handler
+        that called it."""
         if self._on_boundary is None:
             return
         try:
@@ -281,6 +283,7 @@ class ProjectXOrderFlowFeed:
 
     def _on_depth(self, args) -> None:
         try:
+            self._maybe_signal_boundary()
             cid, data = args[0], args[1]
             eng = self._engine_for(cid)
             if eng is None:

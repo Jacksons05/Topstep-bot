@@ -148,6 +148,46 @@ def test_wake_wait_clears_the_event_so_the_next_wait_is_not_stale():
     assert e.wake_wait(0.05) is False       # must NOT still read as set
 
 
+# ── EVENT_DRIVEN_LOOP_ENABLED: one-flag rollback for the live-tick wake ───
+def test_event_driven_loop_enabled_by_default():
+    assert CONFIG.event_driven_loop_enabled is True
+
+
+def test_oflow_boundary_callback_is_wake_event_set_when_enabled(monkeypatch):
+    import engine as eng
+    e = _bare_engine()
+    monkeypatch.setattr(eng, "CONFIG",
+                         dataclasses.replace(CONFIG, event_driven_loop_enabled=True))
+    assert e._oflow_boundary_callback() == e._wake_event.set
+
+
+def test_oflow_boundary_callback_is_none_when_disabled(monkeypatch):
+    import engine as eng
+    e = _bare_engine()
+    monkeypatch.setattr(eng, "CONFIG",
+                         dataclasses.replace(CONFIG, event_driven_loop_enabled=False))
+    assert e._oflow_boundary_callback() is None
+
+
+def test_disabling_event_driven_loop_makes_a_live_tick_a_pure_noop(monkeypatch):
+    """End-to-end check of the rollback flag: with it off, a feed built the
+    same way engine.py builds it (on_boundary=_oflow_boundary_callback())
+    never wakes wake_wait early, even under a full bar's worth of ticks."""
+    import engine as eng
+    from projectx_marketdata import ProjectXOrderFlowFeed
+
+    e = _bare_engine()
+    monkeypatch.setattr(eng, "CONFIG",
+                         dataclasses.replace(CONFIG, event_driven_loop_enabled=False))
+    f = ProjectXOrderFlowFeed(_MockBroker(), on_boundary=e._oflow_boundary_callback())
+    f._cid_to_sym["CID"] = "ES"
+
+    f._on_quote(["CID", {"bestBid": 100.0, "bestAsk": 100.25}])
+    f._on_trade(["CID", {"price": 100.0, "volume": 1}])
+    f._on_depth(["CID", {"type": 2, "price": 100.0, "volume": 1}])
+    assert e.wake_wait(0.05) is False
+
+
 # ── SignalR tick → bar-boundary wake signal (projectx_marketdata.py) ──────
 class _MockBroker:
     _mock_mode = True
@@ -202,7 +242,35 @@ def test_on_quote_and_on_trade_trigger_the_boundary_signal():
     assert len(calls) == 1   # both land in the same wall-clock bucket
 
 
+def test_on_depth_also_triggers_the_boundary_signal():
+    """GatewayDepth (L2 book) ticks arrive at least as often as quotes/trades
+    and are just as valid proof the feed is alive — must wake the loop too,
+    not just quote/trade."""
+    calls = []
+    f = _feed(on_boundary=lambda: calls.append(1))
+    f._on_depth([])
+    assert len(calls) == 1
+
+
+def test_on_depth_debounces_within_the_same_bucket_as_quote_and_trade(monkeypatch):
+    calls = []
+    f = _feed(on_boundary=lambda: calls.append(1))
+    period = CONFIG.bar_align_sec
+    base = 1_700_000_000.0 - (1_700_000_000.0 % period)
+
+    monkeypatch.setattr("projectx_marketdata.time.time", lambda: base + 1)
+    f._on_quote([])
+    f._on_depth([])
+    f._on_trade([])
+    assert len(calls) == 1   # all three share the same wall-clock bucket
+
+    monkeypatch.setattr("projectx_marketdata.time.time", lambda: base + period + 1)
+    f._on_depth([])
+    assert len(calls) == 2   # new bucket -> fires again
+
+
 def test_oflow_construction_without_on_boundary_is_backward_compatible():
     f = _feed()   # no on_boundary kwarg at all — matches every existing caller
     f._on_quote([])
     f._on_trade([])   # must not raise even though nothing is listening
+    f._on_depth([])

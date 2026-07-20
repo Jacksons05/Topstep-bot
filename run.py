@@ -70,8 +70,9 @@ def main() -> int:
             if once:
                 break
             # Event-driven wake: fires immediately on a live order-flow tick
-            # crossing a fresh bar boundary, falling back to a plain timeout
-            # (identical to the old time.sleep) when no feed is attached.
+            # (quote/trade/depth) crossing a fresh bar boundary, falling back
+            # to a plain timeout (identical to the old time.sleep) when no
+            # feed is attached or EVENT_DRIVEN_LOOP_ENABLED=false.
             engine.wake_wait(engine.next_interval())
     except KeyboardInterrupt:
         notify("shutdown requested")
