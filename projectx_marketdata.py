@@ -20,6 +20,10 @@ We map {2,4,9} → bid side and {1,3,10} → ask side; volume 0 removes the leve
 Degrades safely: if signalrcore is not installed or the broker is in mock mode,
 it subscribes to nothing and every engine stays empty → has_data False → the
 order-flow gate fails open.
+
+Also optionally pulses a BarClock (bar_clock.py) on every tick so the engine
+loop can wake the instant a bar closes instead of waiting for the next
+scheduled poll — see attach_bar_clock() / Engine.wait_for_next_cycle().
 """
 from __future__ import annotations
 
@@ -64,6 +68,22 @@ class ProjectXOrderFlowFeed:
         # reconnected — the re-subscribe may take a few seconds to start
         # delivering ticks, but that's not a sign the connection is dead.
         self._last_reconnect_ts = 0.0
+        # Optional BarClock (see bar_clock.py): every tick pulses it so the
+        # engine loop can wake the instant a bar closes instead of waiting for
+        # the next scheduled poll. None until Engine attaches one.
+        self._bar_clock = None
+
+    def attach_bar_clock(self, clock) -> None:
+        """Wire a BarClock so live ticks pulse it (bar-close -> instant wake).
+
+        Purely additive: ticks still update the OrderFlowEngine exactly as
+        before. A clock error is swallowed inside BarClock.mark_tick itself,
+        so this can never turn a bad wake-up callback into a dead feed."""
+        self._bar_clock = clock
+
+    def _pulse_bar_clock(self) -> None:
+        if self._bar_clock is not None:
+            self._bar_clock.mark_tick()
 
     def get(self, symbol: str) -> OrderFlowEngine:
         """Return (creating if needed) the engine for a futures root."""
@@ -214,6 +234,7 @@ class ProjectXOrderFlowFeed:
     # ── SignalR event handlers (args = [contractId, payload]) ─────────────────
 
     def _on_quote(self, args) -> None:
+        self._pulse_bar_clock()
         try:
             cid, data = args[0], args[1]
             eng = self._engine_for(cid)
@@ -235,6 +256,7 @@ class ProjectXOrderFlowFeed:
             log.debug(f"[OrderFlow] quote handler error: {exc}")
 
     def _on_trade(self, args) -> None:
+        self._pulse_bar_clock()
         try:
             cid, data = args[0], args[1]
             eng = self._engine_for(cid)
@@ -253,6 +275,7 @@ class ProjectXOrderFlowFeed:
             log.debug(f"[OrderFlow] trade handler error: {exc}")
 
     def _on_depth(self, args) -> None:
+        self._pulse_bar_clock()
         try:
             cid, data = args[0], args[1]
             eng = self._engine_for(cid)

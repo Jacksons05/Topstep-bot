@@ -2,6 +2,11 @@
 
   python run.py            # loop, interval adapts to volatility
   python run.py --once     # single cycle (cron / testing)
+
+Between cycles, engine.wait_for_next_cycle() waits on next_interval() as
+before, but a live ProjectX order-flow feed can wake it early the instant a
+tick reveals a bar has closed (see bar_clock.py) — the poll interval stays
+as a safety-net ceiling, so this can only make wake-ups earlier, never later.
 """
 from __future__ import annotations
 
@@ -69,7 +74,7 @@ def main() -> int:
                 notify(f"cycle error: {e}")
             if once:
                 break
-            time.sleep(engine.next_interval())
+            engine.wait_for_next_cycle()
     except KeyboardInterrupt:
         notify("shutdown requested")
     finally:

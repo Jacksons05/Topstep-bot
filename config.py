@@ -47,6 +47,14 @@ class Config:
     # shut so the loop just checks the clock instead of burning API credits 24/7.
     market_hours_only: bool = _b("MARKET_HOURS_ONLY", True)
     closed_interval_sec: int = _i("CLOSED_INTERVAL_SEC", 900)
+    # Event-driven wake-ups: the live ProjectX SignalR feed (order-flow ticks)
+    # can wake the loop the instant a bar closes instead of waiting for the
+    # next scheduled poll (see bar_clock.py, Engine.wait_for_next_cycle).
+    # Strictly additive — the *_interval_sec values above still bound the max
+    # wait, so a dead/mock/no feed degrades exactly to today's pure-polling
+    # behavior. Kept behind a flag so it can be turned off in one env edit
+    # without touching code if the event path ever misbehaves.
+    event_driven_loop_enabled: bool = _b("EVENT_DRIVEN_LOOP_ENABLED", True)
     watchlist: tuple[str, ...] = _csv("WATCHLIST", "ES,NQ,MES,MNQ")
     # Universe index used for regime / circuit-breaker reads.
     # QQQ tracks Nasdaq-100 (same underlying as NQ/MNQ) and is available on Alpaca.

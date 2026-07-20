@@ -14,10 +14,13 @@ confidence clears CONFIDENCE_THRESHOLD.
 from __future__ import annotations
 
 import math
+import threading
 import time
 from datetime import date, datetime, timezone
 import day_learner as _day_learner
 import singleton_lock
+
+from bar_clock import parse_timeframe_seconds, BarClock
 
 from agents import AgentTeam, SymbolContext, portfolio_weights
 from config import CONFIG
@@ -103,6 +106,12 @@ class Engine:
         # of manufacturing false MLL breaches after the first local close.
         self._equity_baseline: float | None = None
         self._oflow = None  # ProjectXOrderFlowFeed when a live ProjectX feed is up
+        # Event-driven wake-up (see bar_clock.py / wait_for_next_cycle): set by
+        # a BarClock the instant a live tick reveals a bar has closed. Created
+        # unconditionally — with no feed attached nothing ever sets it, so
+        # wait_for_next_cycle's timeout alone reproduces today's pure-polling
+        # behavior exactly.
+        self.wake_event = threading.Event()
         # Flow-risk overlays (flow_risk.py): A10 vol-target sizing (folded into
         # the futures risk multiplier, de-risk only) + A8 toxicity veto. Reads
         # are computed from the bars already fetched in _prescreen (no extra
@@ -168,6 +177,19 @@ class Engine:
                             n = self._oflow.subscribe(list(CONFIG.watchlist))
                             notify(f"📡 Order-flow feed: subscribed {n} futures root(s) "
                                    f"(OBI/CVD/whale gate {'live' if n else 'idle — no futures roots'})")
+                            # Wire the bar-close wake-up: only meaningful once
+                            # ticks are actually flowing (n>0, live/non-mock
+                            # connection) — otherwise nothing would ever pulse
+                            # it and it'd be dead weight.
+                            if n > 0 and CONFIG.event_driven_loop_enabled:
+                                period = parse_timeframe_seconds(CONFIG.scalp_timeframe)
+                                self._oflow.attach_bar_clock(
+                                    BarClock(period, self.wake_event.set)
+                                )
+                                notify(f"⚡ event-driven wake-ups enabled "
+                                       f"(bar={CONFIG.scalp_timeframe} / {period}s — "
+                                       "run_once fires on the first tick after a bar "
+                                       "close, capped by the existing poll interval)")
                         except Exception as e:  # noqa: BLE001
                             notify(f"⚠ Order-flow feed init failed ({e}) — gate disabled (fails open)")
                             self._oflow = None
@@ -388,6 +410,27 @@ class Engine:
         if not self._market_open():
             return CONFIG.closed_interval_sec
         return CONFIG.fast_interval_sec if self.cb_level != "green" else CONFIG.scan_interval_sec
+
+    def wait_for_next_cycle(self) -> None:
+        """Block until the next run_once() should fire.
+
+        Replaces a plain `time.sleep(next_interval())` with a wait on
+        `wake_event`, which a live order-flow feed's BarClock sets the
+        instant a tick reveals a bar has closed (see bar_clock.py). The
+        `next_interval()` value is still passed as the wait's timeout, so
+        this can only ever fire EARLIER than the old pure-polling loop, never
+        later — a dead feed, mock mode, or EVENT_DRIVEN_LOOP_ENABLED=false
+        reproduces the exact old behavior via the timeout alone.
+
+        Deliberately does not change what run_once() does or how often it's
+        *allowed* to run — only how promptly a real bar close is noticed.
+        run_once()'s own safety-critical sequencing (DB heartbeat, kill
+        switch, reconciliation, MLL/DLL) is untouched and still runs exactly
+        once per wake-up, same as every scheduled tick today.
+        """
+        timeout = self.next_interval()
+        self.wake_event.wait(timeout=timeout)
+        self.wake_event.clear()
 
     # ── fail-closed DB guard (Phase 2) ────────────────────
     def _db_panic_flatten_and_exit(self, why: str) -> None:
