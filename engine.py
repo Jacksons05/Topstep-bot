@@ -174,7 +174,7 @@ class Engine:
                             from projectx_marketdata import ProjectXOrderFlowFeed
                             self._oflow = ProjectXOrderFlowFeed(
                                 self.executor.broker,
-                                on_boundary=self._wake_event.set)
+                                on_boundary=self._oflow_boundary_callback())
                             n = self._oflow.subscribe(list(CONFIG.watchlist))
                             notify(f"📡 Order-flow feed: subscribed {n} futures root(s) "
                                    f"(OBI/CVD/whale gate {'live' if n else 'idle — no futures roots'})")
@@ -426,6 +426,13 @@ class Engine:
         woke_early = self._wake_event.wait(timeout=timeout)
         self._wake_event.clear()
         return woke_early
+
+    def _oflow_boundary_callback(self):
+        """on_boundary callable to pass into ProjectXOrderFlowFeed, or None to
+        disable live-tick wake-ups entirely (EVENT_DRIVEN_LOOP_ENABLED=false).
+        Extracted to its own method so the flag's wiring is unit-testable
+        without constructing a full live-broker Engine (see test_latency_fixes.py)."""
+        return self._wake_event.set if CONFIG.event_driven_loop_enabled else None
 
     # ── fail-closed DB guard (Phase 2) ────────────────────
     def _db_panic_flatten_and_exit(self, why: str) -> None:
