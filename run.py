@@ -69,7 +69,10 @@ def main() -> int:
                 notify(f"cycle error: {e}")
             if once:
                 break
-            time.sleep(engine.next_interval())
+            # Event-driven wake: fires immediately on a live order-flow tick
+            # crossing a fresh bar boundary, falling back to a plain timeout
+            # (identical to the old time.sleep) when no feed is attached.
+            engine.wake_wait(engine.next_interval())
     except KeyboardInterrupt:
         notify("shutdown requested")
     finally:

@@ -1,10 +1,13 @@
 """Decision-loop latency fixes (2026-07-20): bar-aligned poll cadence instead
-of a flat SCAN_INTERVAL_SEC countdown, and a bounded LLM call timeout instead
-of an effectively-unbounded one. Pure execution-quality changes — no entry
-logic or risk gating touched."""
+of a flat SCAN_INTERVAL_SEC countdown, a bounded LLM call timeout instead of
+an effectively-unbounded one, and an event-driven wake so the loop reacts to
+a live order-flow tick immediately instead of waiting out the full interval.
+Pure execution-quality changes — no entry logic or risk gating touched."""
 from __future__ import annotations
 
 import dataclasses
+import threading
+import time as _time
 
 import pytest
 
@@ -15,6 +18,7 @@ def _bare_engine():
     import engine as eng
     e = eng.Engine.__new__(eng.Engine)
     e.cb_level = "green"
+    e._wake_event = threading.Event()
     return e
 
 
@@ -110,3 +114,95 @@ def test_anthropic_client_uses_configured_timeout(monkeypatch):
     client = agents._build_client()
     assert captured["timeout"] == CONFIG.llm_timeout_sec
     assert client is not None
+
+
+# ── event-driven wake (Engine.wake_wait) ──────────────────────────────────
+def test_wake_wait_times_out_like_plain_sleep_when_never_signaled():
+    e = _bare_engine()
+    start = _time.monotonic()
+    woke_early = e.wake_wait(0.1)
+    elapsed = _time.monotonic() - start
+    assert woke_early is False
+    # Allow some slack for OS timer granularity / scheduling jitter under a
+    # loaded test run — the contract being checked is "didn't return near-
+    # instantly", not an exact 0.1s guarantee.
+    assert elapsed >= 0.08
+
+
+def test_wake_wait_returns_immediately_when_signaled_from_another_thread():
+    e = _bare_engine()
+    t = threading.Timer(0.02, e._wake_event.set)
+    t.start()
+    start = _time.monotonic()
+    woke_early = e.wake_wait(5.0)   # would hang the test if this didn't work
+    elapsed = _time.monotonic() - start
+    t.cancel()
+    assert woke_early is True
+    assert elapsed < 1.0            # nowhere near the 5s timeout
+
+
+def test_wake_wait_clears_the_event_so_the_next_wait_is_not_stale():
+    e = _bare_engine()
+    e._wake_event.set()
+    assert e.wake_wait(5.0) is True         # consumes the pre-set event
+    assert e.wake_wait(0.05) is False       # must NOT still read as set
+
+
+# ── SignalR tick → bar-boundary wake signal (projectx_marketdata.py) ──────
+class _MockBroker:
+    _mock_mode = True
+    token = ""
+
+    def contract_id(self, symbol):
+        raise AssertionError("should not resolve contracts in mock mode")
+
+
+def _feed(on_boundary=None):
+    from projectx_marketdata import ProjectXOrderFlowFeed
+    return ProjectXOrderFlowFeed(_MockBroker(), on_boundary=on_boundary)
+
+
+def test_on_boundary_none_is_a_safe_noop(monkeypatch):
+    f = _feed(on_boundary=None)
+    f._maybe_signal_boundary()   # must not raise
+
+
+def test_boundary_fires_once_per_bucket_not_every_tick(monkeypatch):
+    calls = []
+    f = _feed(on_boundary=lambda: calls.append(1))
+    period = CONFIG.bar_align_sec
+    base = 1_700_000_000.0 - (1_700_000_000.0 % period)
+
+    monkeypatch.setattr("projectx_marketdata.time.time", lambda: base + 1)
+    f._maybe_signal_boundary()
+    f._maybe_signal_boundary()
+    f._maybe_signal_boundary()
+    assert len(calls) == 1          # debounced within the same bucket
+
+    monkeypatch.setattr("projectx_marketdata.time.time", lambda: base + period + 1)
+    f._maybe_signal_boundary()
+    assert len(calls) == 2          # new bucket -> fires again
+
+
+def test_boundary_signal_swallows_callback_exceptions():
+    def _boom():
+        raise RuntimeError("callback blew up")
+    f = _feed(on_boundary=_boom)
+    f._maybe_signal_boundary()   # must not propagate
+
+
+def test_on_quote_and_on_trade_trigger_the_boundary_signal():
+    calls = []
+    f = _feed(on_boundary=lambda: calls.append(1))
+    # Malformed/unresolvable args are fine — the boundary signal must fire
+    # before any per-symbol engine lookup, since it only proves the feed is
+    # alive and time has moved, not that this specific tick parsed cleanly.
+    f._on_quote([])
+    f._on_trade([])
+    assert len(calls) == 1   # both land in the same wall-clock bucket
+
+
+def test_oflow_construction_without_on_boundary_is_backward_compatible():
+    f = _feed()   # no on_boundary kwarg at all — matches every existing caller
+    f._on_quote([])
+    f._on_trade([])   # must not raise even though nothing is listening

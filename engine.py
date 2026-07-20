@@ -14,6 +14,7 @@ confidence clears CONFIDENCE_THRESHOLD.
 from __future__ import annotations
 
 import math
+import threading
 import time
 from datetime import date, datetime, timezone
 import day_learner as _day_learner
@@ -103,6 +104,13 @@ class Engine:
         # of manufacturing false MLL breaches after the first local close.
         self._equity_baseline: float | None = None
         self._oflow = None  # ProjectXOrderFlowFeed when a live ProjectX feed is up
+        # Set by the live order-flow feed the instant a tick crosses a fresh
+        # bar boundary, so run.py's loop can wake immediately instead of
+        # waiting out the full poll interval. Always constructed (even with no
+        # feed attached) so run.py can call wake_wait() unconditionally — with
+        # no feed the event is simply never set early and behavior is
+        # identical to a plain time.sleep(next_interval()).
+        self._wake_event = threading.Event()
         # Flow-risk overlays (flow_risk.py): A10 vol-target sizing (folded into
         # the futures risk multiplier, de-risk only) + A8 toxicity veto. Reads
         # are computed from the bars already fetched in _prescreen (no extra
@@ -164,7 +172,9 @@ class Engine:
                     if CONFIG.orderflow_gate_enabled:
                         try:
                             from projectx_marketdata import ProjectXOrderFlowFeed
-                            self._oflow = ProjectXOrderFlowFeed(self.executor.broker)
+                            self._oflow = ProjectXOrderFlowFeed(
+                                self.executor.broker,
+                                on_boundary=self._wake_event.set)
                             n = self._oflow.subscribe(list(CONFIG.watchlist))
                             notify(f"📡 Order-flow feed: subscribed {n} futures root(s) "
                                    f"(OBI/CVD/whale gate {'live' if n else 'idle — no futures roots'})")
@@ -405,6 +415,17 @@ class Engine:
         secs_into_bar = time.time() % period
         wait = (period - secs_into_bar) + CONFIG.bar_align_buffer_sec
         return max(1, int(wait))
+
+    def wake_wait(self, timeout: float) -> bool:
+        """Block until either the live order-flow feed signals a fresh bar
+        boundary or `timeout` seconds elapse, whichever is first — replaces a
+        flat time.sleep(timeout) in run.py's loop. With no feed attached (or
+        the feed in mock mode) the event is never set early, so this behaves
+        exactly like time.sleep(timeout). Returns True if woken early by a
+        live tick, False on a plain timeout (informational only)."""
+        woke_early = self._wake_event.wait(timeout=timeout)
+        self._wake_event.clear()
+        return woke_early
 
     # ── fail-closed DB guard (Phase 2) ────────────────────
     def _db_panic_flatten_and_exit(self, why: str) -> None:

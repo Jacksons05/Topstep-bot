@@ -48,7 +48,7 @@ _ASK_TYPES = {1, 3, 10}  # Ask, BestAsk, NewBestAsk
 class ProjectXOrderFlowFeed:
     """Subscribes ProjectX market data and routes it into per-symbol engines."""
 
-    def __init__(self, broker) -> None:
+    def __init__(self, broker, on_boundary=None) -> None:
         # broker is a ProjectXBroker; reuse its token + contract-id resolution.
         self._broker = broker
         self._mock = getattr(broker, "_mock_mode", True) or not _SIGNALR_AVAILABLE
@@ -64,6 +64,13 @@ class ProjectXOrderFlowFeed:
         # reconnected — the re-subscribe may take a few seconds to start
         # delivering ticks, but that's not a sign the connection is dead.
         self._last_reconnect_ts = 0.0
+        # Optional callable invoked (from signalrcore's own background thread —
+        # must be thread-safe; threading.Event.set is) the first time a live
+        # quote/trade tick is observed in a fresh wall-clock bar bucket, so the
+        # engine's decision loop can wake immediately instead of waiting out a
+        # full poll interval. None (the default) disables this entirely.
+        self._on_boundary = on_boundary
+        self._last_bucket: int | None = None
 
     def get(self, symbol: str) -> OrderFlowEngine:
         """Return (creating if needed) the engine for a futures root."""
@@ -213,8 +220,27 @@ class ProjectXOrderFlowFeed:
 
     # ── SignalR event handlers (args = [contractId, payload]) ─────────────────
 
+    def _maybe_signal_boundary(self) -> None:
+        """Fire on_boundary the first time a tick lands in a fresh wall-clock
+        bar bucket (same CONFIG.bar_align_sec grid the engine's poll cadence
+        aligns to). Debounced to once per bucket; never raises — a signaling
+        problem must never take down the tick handler that called it."""
+        if self._on_boundary is None:
+            return
+        try:
+            period = CONFIG.bar_align_sec
+            if period <= 0:
+                return
+            bucket = int(time.time() // period)
+            if bucket != self._last_bucket:
+                self._last_bucket = bucket
+                self._on_boundary()
+        except Exception as exc:  # noqa: BLE001
+            log.debug(f"[OrderFlow] boundary signal failed: {exc}")
+
     def _on_quote(self, args) -> None:
         try:
+            self._maybe_signal_boundary()
             cid, data = args[0], args[1]
             eng = self._engine_for(cid)
             if eng is None or not isinstance(data, dict):
@@ -236,6 +262,7 @@ class ProjectXOrderFlowFeed:
 
     def _on_trade(self, args) -> None:
         try:
+            self._maybe_signal_boundary()
             cid, data = args[0], args[1]
             eng = self._engine_for(cid)
             if eng is None:
