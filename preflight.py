@@ -317,40 +317,6 @@ def check_state(rep: Report) -> None:
             rep.add(WARN, "Persisted state", f"could not load state: {e}")
 
 
-def check_gex_feed(rep: Report) -> None:
-    """ENTRY_ENGINE=gex: verify the dealer-GEX regime feed answers. A dead feed
-    is fail-closed at runtime (every symbol reads neutral → entries locked), so
-    this is a WARN — the bot is safe, just deliberately idle."""
-    if CONFIG.entry_engine != "gex":
-        return
-    if not CONFIG.uw_api_key:
-        rep.add(FAIL, "GEX regime feed",
-                "ENTRY_ENGINE=gex but UW_API_KEY is empty (config.validate "
-                "should have caught this)")
-        return
-    try:
-        from uw_gex import UWGexFeed, gex_proxy_map
-        feed = UWGexFeed()
-        sym = next(iter(CONFIG.watchlist), None)
-        read = feed.get(sym) if sym else None
-        feed.close()
-        if read is None or not read.proxy:
-            rep.add(WARN, "GEX regime feed",
-                    f"no GEX proxy mapped for watchlist head {sym!r} — "
-                    f"map: {gex_proxy_map()}")
-        elif read.net_gamma == 0.0 and read.regime == "neutral":
-            rep.add(WARN, "GEX regime feed",
-                    f"{sym}→{read.proxy}: no usable GEX data (feed down or empty) "
-                    "— entries will stay LOCKED (neutral, fail closed)")
-        else:
-            rep.add(PASS, "GEX regime feed",
-                    f"{sym}→{read.proxy}: regime={read.regime} | "
-                    f"net_gamma={read.net_gamma:,.0f} | band=±{read.band:,.0f}")
-    except Exception as e:  # noqa: BLE001
-        rep.add(WARN, "GEX regime feed",
-                f"probe failed: {e} — entries will stay LOCKED (fail closed)")
-
-
 CHECKS = [
     check_config,
     check_dependencies,
@@ -359,7 +325,6 @@ CHECKS = [
     check_topstep_risk,
     check_session,
     check_state,
-    check_gex_feed,
 ]
 
 

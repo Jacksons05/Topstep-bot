@@ -122,8 +122,6 @@ class Engine:
         )
         self._flow_reads: dict[str, FlowRead] = {}
         self._uw = None     # UWFlowFeed when UW_FLOW_ENABLED=true + UW_API_KEY set
-        self._gex = None    # UWGexFeed when ENTRY_ENGINE=gex + UW_API_KEY set
-        self._gex_regimes: dict[str, str] = {}   # symbol → regime at prescreen time
         self._account_key: str = ""              # broker account id (account_history key)
         self._last_equity_record: float = 0.0    # throttle for state.record_equity
         # Partial-exit / BE-ratchet state keyed by position symbol.
@@ -174,7 +172,7 @@ class Engine:
                             from projectx_marketdata import ProjectXOrderFlowFeed
                             self._oflow = ProjectXOrderFlowFeed(
                                 self.executor.broker,
-                                on_boundary=self._wake_event.set)
+                                on_boundary=self._oflow_boundary_callback())
                             n = self._oflow.subscribe(list(CONFIG.watchlist))
                             notify(f"📡 Order-flow feed: subscribed {n} futures root(s) "
                                    f"(OBI/CVD/whale gate {'live' if n else 'idle — no futures roots'})")
@@ -209,23 +207,6 @@ class Engine:
             except Exception as e:  # noqa: BLE001
                 notify(f"⚠ UW flow feed init failed ({e}) — disabled")
                 self._uw = None
-
-        # GEX-regime entry engine (Phase 4). Init failure does NOT fall back to
-        # the legacy SMA/RSI signal (negative EV, Rounds 1/19) — with no feed
-        # every symbol reads neutral and entries stay locked (fail closed).
-        if CONFIG.entry_engine == "gex" and CONFIG.uw_api_key:
-            try:
-                from uw_gex import UWGexFeed
-                self._gex = UWGexFeed()
-                notify("🎛 GEX-regime entry engine enabled "
-                       f"(neutral_band={CONFIG.gex_neutral_band_frac:.0%} of median |GEX| | "
-                       f"MR_dev={CONFIG.gex_mr_atr_dev:g} ATR | "
-                       f"breakout_lookback={CONFIG.gex_breakout_lookback} | "
-                       f"neg_risk_mult={CONFIG.gex_neg_risk_mult:g})")
-            except Exception as e:  # noqa: BLE001
-                notify(f"⚠ GEX feed init failed ({e}) — entries will stay LOCKED "
-                       "(neutral fail-closed); fix the feed or set ENTRY_ENGINE=legacy")
-                self._gex = None
 
         # UW signal-quality logger (optional) — records uw_lean vs forward return
         # so the blend's edge can be measured offline. Behavior-neutral.
@@ -387,8 +368,6 @@ class Engine:
         self.state.save()
         if self._uw is not None:
             self._uw.close()
-        if self._gex is not None:
-            self._gex.close()
         if self._uw_log is not None:
             self._uw_log.close()
         singleton_lock.release(self._lock_path)
@@ -426,6 +405,13 @@ class Engine:
         woke_early = self._wake_event.wait(timeout=timeout)
         self._wake_event.clear()
         return woke_early
+
+    def _oflow_boundary_callback(self):
+        """on_boundary callable to pass into ProjectXOrderFlowFeed, or None to
+        disable live-tick wake-ups entirely (EVENT_DRIVEN_LOOP_ENABLED=false).
+        Extracted to its own method so the flag's wiring is unit-testable
+        without constructing a full live-broker Engine (see test_latency_fixes.py)."""
+        return self._wake_event.set if CONFIG.event_driven_loop_enabled else None
 
     # ── fail-closed DB guard (Phase 2) ────────────────────
     def _db_panic_flatten_and_exit(self, why: str) -> None:
@@ -755,11 +741,6 @@ class Engine:
             # at 1.0, so on the funded account this can only DE-RISK in an
             # elevated-vol regime, never size up.
             _vol_mult = min(1.0, flow.vol_mult) if flow is not None else 1.0
-            # GEX pivot: negative-gamma (vol-expanded) breakout entries run
-            # strictly micro-tier — halve the risk budget on top of the other
-            # defensive multipliers (futures_plan caps the product at 1.0).
-            _gex_mult = (CONFIG.gex_neg_risk_mult
-                         if self._gex_regimes.get(sig.symbol) == "negative" else 1.0)
             # Eval-pass sizing: de-risk after a loss streak and taper toward the
             # MLL floor (edge-independent variance control). Only ever ≤ 1.0.
             _eval_mult = 1.0
@@ -768,7 +749,7 @@ class Engine:
                 _eval_mult = self._topstep.combined_size_mult(_eq_for_size)
             risk_mult = (cb_mult * (w or 1.0)
                          * regime_params["size_mult"] * _day_mult * _vol_mult
-                         * _gex_mult * _eval_mult)
+                         * _eval_mult)
             if size < CONFIG.min_executable_size_usd:
                 notify(f"  skip (regime {rk} sized to {size:.0f} < min "
                        f"{CONFIG.min_executable_size_usd:.0f}): {sig.symbol}")
@@ -902,8 +883,7 @@ class Engine:
         }
 
     def _session_vwap(self, bars: dict) -> float | None:
-        """RTH-anchored session VWAP (extracted from the legacy inline gate so
-        the GEX mean-reversion strategy shares the identical anchoring logic).
+        """RTH-anchored session VWAP (used by the VWAP directional gate below).
 
         Anchors to today's 09:30 ET open when the bars carry per-bar timestamps
         (ProjectX futures feed) — without the reset this becomes a multi-session
@@ -963,22 +943,12 @@ class Engine:
             # survived OOS testing — the honest default is NO new entries.
             # Open positions are still managed/flattened by everything above.
             return None
-        if CONFIG.entry_engine == "gex":
-            # Phase 4 pivot: the dealer net-GEX regime replaces SMA/RSI (and
-            # the optional ML read) as the entry idea. positive → VWAP
-            # mean-reversion, negative → reduced-risk breakout, neutral (or a
-            # dead/missing GEX feed) → no entries, fail closed.
-            regime = self._gex.get(sym).regime if self._gex is not None else "neutral"
-            self._gex_regimes[sym] = regime
-            from gex_strategy import gex_quant_signal
-            quant = gex_quant_signal(bars, regime, self._session_vwap(bars))
-        else:
-            # Legacy path: ML quant signal first (LightGBM on bar + order-flow
-            # features); fall back to the deterministic indicator model when no
-            # model is loaded or it has no opinion. Same QuantRead either way.
-            quant = ML.read(bars, micro) if (CONFIG.ml_signal_enabled and ML.ready) else None
-            if quant is None:
-                quant = quant_signal(bars)
+        # Legacy path: ML quant signal first (LightGBM on bar + order-flow
+        # features); fall back to the deterministic indicator model when no
+        # model is loaded or it has no opinion. Same QuantRead either way.
+        quant = ML.read(bars, micro) if (CONFIG.ml_signal_enabled and ML.ready) else None
+        if quant is None:
+            quant = quant_signal(bars)
         if quant is None:
             return None
 
@@ -1041,28 +1011,23 @@ class Engine:
                 detail=quant.detail + f" · phase={_phase}({_phase_mult:.0%})",
             )
 
-        # ── VWAP directional gate (legacy engine only) ────────────────────────
+        # ── VWAP directional gate ─────────────────────────────────────────────
         # RTH VWAP (reset at 09:30 ET) used as intraday fair-value anchor. Longs
         # only above VWAP; shorts only below. Don't enter when price is extended
         # > 0.5×ATR from VWAP (chasing). Research: self-fulfilling institutional
         # benchmark; most execution desks target VWAP ± bands.
-        # BYPASSED when ENTRY_ENGINE=gex: the positive-gamma mean-reversion leg
-        # deliberately buys BELOW / sells ABOVE VWAP at ≥1 ATR extension — the
-        # exact opposite of this momentum gate (gex_strategy.py owns its own
-        # VWAP logic via _session_vwap).
-        if CONFIG.entry_engine != "gex":
-            _vwap = self._session_vwap(bars)
-            if _vwap is not None and _phase != "overnight":
-                _vwap_dev = abs(spot - _vwap)
-                _atr_val = quant.atr if quant.atr and quant.atr > 0 else spot * 0.001
-                # VWAP gate: longs need price above VWAP, shorts need price below
-                _vwap_ok = (spot > _vwap) if quant.direction == "BUY" else (spot < _vwap)
-                # Extension filter: skip when price is already >0.5 ATR from VWAP
-                _extended = _vwap_dev > 0.5 * _atr_val
-                if not _vwap_ok:
-                    return None  # direction conflicts with VWAP anchor
-                if _extended:
-                    return None  # chasing extended move; wait for pullback
+        _vwap = self._session_vwap(bars)
+        if _vwap is not None and _phase != "overnight":
+            _vwap_dev = abs(spot - _vwap)
+            _atr_val = quant.atr if quant.atr and quant.atr > 0 else spot * 0.001
+            # VWAP gate: longs need price above VWAP, shorts need price below
+            _vwap_ok = (spot > _vwap) if quant.direction == "BUY" else (spot < _vwap)
+            # Extension filter: skip when price is already >0.5 ATR from VWAP
+            _extended = _vwap_dev > 0.5 * _atr_val
+            if not _vwap_ok:
+                return None  # direction conflicts with VWAP anchor
+            if _extended:
+                return None  # chasing extended move; wait for pullback
 
         if quant.direction == "FLAT":
             return None
