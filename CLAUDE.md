@@ -104,17 +104,29 @@ FAIL → the idea is dead; no parameter sweeps to rescue it.
 - Data: ~/Topstep-bot/oos/data/ — ES 5-min 2010–2026, MES/MNQ 2019–2026,
   NQ 2010–2019 (CSVs); ES_of_1s.npz (1-sec book features, May 2026);
   gex_sign.json (250d SPX/NDX/SPY/QQQ). Fetch more: oos/fetch_databento.py
-  (DATABENTO_API_KEY in .env — ROTATE IT, it was exposed in chat).
+  (DATABENTO_API_KEY in .env — ROTATE IT, it was exposed in chat). Round 17's
+  cost-check (oos/fetch_round17_imbalance.py) is written, not yet run —
+  needs a real DATABENTO_API_KEY in this environment.
 - Backtesters: oos/backtest_oos.py (bot's own kernel), oos/candidates.py
   (C1/C2/C3 + evaluate()), oos/orderflow_test.py, oos/mbp10_features.py;
   research/{datasets,features,backtest}.py (newer, reusable scaffolding —
   causal feature primitives + a bracket simulator with Round 24's fill-rule
   fixes frozen in; prefer this for new rounds over hand-rolling a runner).
 - Results: oos/*_results.json. Venv: ~/Topstep-bot/.venv (py3.12).
-- UW API client: ~/Claude/Trading-Bot/uw_history.py (UW_API_TOKEN in that .env).
+- UW API client: ~/Claude/Trading-Bot/uw_history.py (UW_API_TOKEN in that
+  .env) — SUBSCRIPTION CANCELLED (2026-07-20, account holder's decision).
+  This client and every UW_API_KEY-gated path in Topstep-bot (uw_gex.py,
+  uw_flow.py, marketdata.py's stock-state regime fallback) are dormant.
+  All fail closed/safe on a dead or missing key by design (uw_gex.py locks
+  entries neutral; uw_flow.py/uw_flow_enabled default off; the regime
+  fallback just drops to yfinance) — no code change was needed to cancel
+  safely. Do not re-subscribe or re-enable ENTRY_ENGINE=gex / UW_FLOW_ENABLED
+  without a new pre-registered round; both remain dead per item 5 below.
 
 # CURRENT PRIORITIES (ranked, updated 2026-07-20 full-ledger re-evaluation —
-# account holder wants to stay on Topstep, so #1 below is currently inactive)
+# account holder wants to stay on Topstep, so #1 below is currently inactive;
+# same day, UW subscription cancelled, so #3 below is BLOCKED not just
+# waiting — Round 17/Databento, #2, is the only live path remaining)
 1. If a non-prop futures account exists: enable overnight_drift.py there
    (ES small size beats stacked micros — overnight micro spreads are wide).
    Inactive while trading only through Topstep (see THE ONE VALIDATED EDGE).
@@ -127,14 +139,16 @@ FAIL → the idea is dead; no parameter sweeps to rescue it.
    exact window and report the number — this is a disclosed $ decision for
    the account holder (same precedent as Round 12's deferred CL/YM leg), not
    an auto-proceed. Highest-ROI next step if funded.
-3. UW intraday GEX walls/gamma-flip recording is ACTIVE since 2026-07-04
-   (launchd com.jarvis.uwcapture: every 30 min, weekdays 09:25-16:15 ET,
-   SPX/NDX/SPY/QQQ → ~/Claude/Trading-Bot/data/uw_intraday/). Testable after
-   ~3 months of capture (~Oct 2026). Two rounds are pre-registered and ready
-   to run the moment that history clears a year: Round 14 (UW market-tide)
-   and Round 27 (UW intraday gamma NEGATIVE-tercile momentum leg — the
-   untested mirror of Round 18's dead fade; runner already written,
-   oos/round27_gamma_momentum.py, reuses Round 18's cache).
+3. UW intraday GEX walls/gamma-flip recording is CANCELLED (2026-07-20,
+   account holder's decision) — the launchd com.jarvis.uwcapture job that
+   started 2026-07-04 stopped after ~16 days, nowhere near the ~3-month
+   target. Round 14 (UW market-tide) and Round 27 (UW intraday gamma
+   NEGATIVE-tercile momentum leg) are both BLOCKED, not failed — see their
+   status notes in HYPOTHESES.md. Runners exist (oos/round27_gamma_momentum.py)
+   but reopening either round needs a fresh UW subscription (accumulation
+   restarts from zero) or an equivalent data source, neither of which exists
+   today. Do not spend on UW again for this without discussing it first — the
+   account holder made a deliberate cost call, not an oversight.
 4. Event-conditioned ideas (CPI reaction, conditional turn-of-month) only
    with multi-year event datasets — never on <100 events. FOMC reversal
    itself is now dead (item 6 above), not open.

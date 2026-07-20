@@ -430,6 +430,21 @@ from this repo) — CLAUDE.md already flags that as testable only after
 
 **Conclusion:** Do NOT run full backtest. Historical depth is insufficient for a PASS bar to be actionable (n≥200 with 4 months of daily data is borderline, and p<0.05 would still be exploratory-tier). Instead, rely on forward logging via `com.jarvis.uwcapture`'s accumulated daily market-tide read (already active since 2026-07-04, persisting to ~/Claude/Trading-Bot/data/uw_intraday/). Revisit this hypothesis once that capture reaches ~3 months of accumulation (target: early October 2026), at which point a ~1-year-equivalent sample (4mo historical + 3mo forward = 7mo, or blended with a paid backfill to 1yr if budget allows) will merit full registration and test.
 
+## Round 14 — BLOCKED, not failed (2026-07-20: UW subscription cancelled by
+## the account holder)
+
+The account holder cancelled the Unusual Whales subscription today. Both this
+round's remaining paths are gone: the API's own historical market-tide access
+(the 121-day probe above) and the `com.jarvis.uwcapture` forward accumulation
+this round's plan depended on (ran only 2026-07-04 → 2026-07-20, ~16 days, far
+short of the ~3-month target). No P&L exists to report and none was computed
+against a maturing dataset that stopped mid-accumulation. **Status: BLOCKED
+indefinitely, not dead** — this is a data-availability outcome, not a test
+result; it must not be conflated with the DEAD list (CLAUDE.md) or treated as
+a verdict. Reopen only if UW service is resubscribed (accumulation restarts
+from zero) or an equivalent options-flow data source is sourced elsewhere;
+until then, no further work on this round.
+
 ---
 
 ## Considered and REJECTED without a backtest (2026-07-06): FOMC reversal
@@ -1950,7 +1965,26 @@ year will need a fresh pull covering the extended window.
 
 **Runner.** Extend `oos/round18_gamma_reversal.py` with the mirrored
 direction/tercile rule (or a sibling `oos/round27_gamma_momentum.py`) —
-not yet written.
+not yet written. [Update 2026-07-20: written, see status note below —
+oos/round27_gamma_momentum.py reads oos/round18_gamma_scores.json verbatim.]
+
+## Round 27 — BLOCKED, not failed (2026-07-20: UW subscription cancelled by
+## the account holder, same day this round was registered)
+
+The account holder cancelled the Unusual Whales subscription today, before
+this round's own maturity clock (~Oct 2026, ~90-120 usable days as of
+2026-07) could run out. The intraday gamma capture that was supposed to
+mature into an actionable sample has stopped accumulating. `oos/
+round27_gamma_momentum.py` exists and still reads the frozen `oos/
+round18_gamma_scores.json` cache (whatever history it holds as of the
+cancellation date) — running it now would still only produce an
+EXPLORATORY-tier read per this round's own PASS-bar tiering, same
+constraint as before, just with a permanently-capped n instead of a growing
+one. **Status: BLOCKED indefinitely, not dead** — a subscription
+cancellation is not a test result and must not be conflated with the DEAD
+list (CLAUDE.md) or reported as a verdict either way. Reopen only if UW
+service is resubscribed (accumulation restarts from zero, new maturity
+date) or an equivalent dealer-gamma data source is sourced elsewhere.
 
 ---
 
@@ -1958,8 +1992,22 @@ not yet written.
 every registered round end-to-end, there is still no proven, actionable,
 Topstep-legal intraday edge. That has not changed by re-reading it — it is
 what a correct re-read of an honestly-run 26-round program looks like. The
-two live paths forward are (1) spend to unblock Round 17 (MOC imbalance —
+two live paths forward were (1) spend to unblock Round 17 (MOC imbalance —
 get the exact Databento cost, then decide), and (2) wait for the UW gamma
 and market-tide captures to clear ~1 year of history (~Oct 2026) so Round 27
 and Round 14 stop being exploratory-only. Nothing on the dead list is
 eligible to be revisited by relabeling or re-parameterizing it.
+
+**Update, same day:** the account holder cancelled the Unusual Whales
+subscription. Path (2) is now BLOCKED, not merely deferred — Round 14 and
+Round 27 lose their data source before maturing (see their own status notes
+above) and cannot be reopened without a fresh UW subscription (accumulation
+restarts from zero) or an equivalent data source. **Path (1), Round 17 /
+Databento MOC-imbalance, is the only live path remaining** in this ledger;
+`oos/fetch_round17_imbalance.py` is written and ready to price the exact
+pull the moment `DATABENTO_API_KEY` is available. Nothing in the live
+trading bot is affected by the UW cancellation: `ENTRY_ENGINE` already
+defaults to `off` (Round 21 killed the GEX entry engine), `UW_FLOW_ENABLED`
+already defaults to `False`, and every UW-keyed code path (uw_gex.py,
+uw_flow.py, marketdata.py's regime-fallback) fails closed/safe on a
+dead key by design — no code change was required.
