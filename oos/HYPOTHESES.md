@@ -2100,6 +2100,12 @@ moment (8:30 CPI/NFP print pre-open; the FOMC move is priced fast) — by the 09
 RTH open it is banked, and the RTH-open→close slice GIVES IT BACK. The premium lives
 where Topstep forbids you to trade.
 
+**[SUPERSEDED 2026-07-21 — the conclusion below assumed RTH-only trading. Topstep
+actually allows the FULL Globex session (5:00 PM CT → 3:10 PM CT, flat by 3:10 PM CT;
+the 5 PM CT open starts the trading day, so evening→morning holds are legal, not
+"overnight/swing"). The overnight/pre-open window — where R26/R27/R29 located the
+premium — IS tradeable. See Round 30.]**
+
 **PROGRAM CONCLUSION (2026-07-21): 29 rounds + 3 screens, ZERO robust intraday edges.
 Every category the mandate named has now been tested** — order flow / microstructure
 (5,20,22,23), directional break-fade at reference levels (2,24,25,IB-screen), cross-
@@ -2112,3 +2118,49 @@ to-negative. The one edge that ever survived OOS across regimes — the overnigh
 — is Topstep-illegal by construction. Holdout 2025-06..2026-06 remains UNUSED (never
 earned a single-candidate final test). Further intraday price-pattern search on this
 data is expected-negative and raises the multiple-testing bar for any future winner.
+
+---
+
+# Round 30 — Overnight drift, Topstep-LEGAL window (ES), REGISTERED 2026-07-21
+# BEFORE any test code (frozen by the commit adding this entry; no round30 test
+# file exists at registration). The first test of the RE-OPENED overnight/pre-open
+# window after the RTH-only assumption was corrected.
+
+**Failure mode FIRST.** (a) The Topstep-capturable window is 18:00 ET (session open)
+-> 09:30 ET, NOT the full 16:00->09:30 close-to-open — we MISS the 16:10-18:00 ET
+slice (forced flat + CME break), where some of the effect may sit. (b) A ~15.5h
+hold has fat-tailed gap risk that interacts badly with the k DLL / k MLL — a
+single bad overnight gap can breach the DLL, so even a positive-EV edge may fail the
+Topstep RISK sim. (c) Post-publication decay (Cooper-Cliff-Gulen 2008; Lou-Polk-
+Skouras 2019 are well known). (d) Overnight slippage at the 18:00 ET reopen may
+exceed 1 tick.
+
+**Mechanism / counterparty.** The overnight-vs-intraday anomaly: ~all of the US
+equity risk premium accrues close-to-open (overnight), not open-to-close (intraday)
+— Cooper-Cliff-Gulen (2008), Lou-Polk-Skouras (2019, "A Tug of War"). Compensation
+for bearing overnight risk when liquidity is thin and holders are reluctant;
+counterparty = those unwilling to hold overnight, paying those who do. This is the
+ONLY family that ever passed OOS across regimes in this repo (Rounds 3/4/7/8/11/12);
+it was previously shelved as "Topstep-illegal" — now known to be LEGAL.
+
+**Frozen feature & rule (ONE configuration — NO sweep).**
+- LONG ES. Enter at the first 5-min bar open at/after 18:00 ET (evening session
+  reopen = start of the Topstep trading day). Exit at the first bar open at/after
+  09:30 ET the next RTH morning. One trade per session (Sun-Thu evening ->
+  Mon-Fri morning). Flat by 09:30 ET, far inside the 3:10 PM CT flatten.
+
+**Data / costs.** ES 5-min (covers the full Globex session). Net 1-tick +  RT comm
+(primary); 2-tick reported (thinner overnight book). Seed 7.
+
+**Multiple-testing discipline (Rule 3).**
+- SEARCH 2010-06 -> 2025-06-04. **HOLDOUT 2025-06-05 -> 2026-06-05 = LOCKED**, touched
+  once only if the search set passes.
+- Program trial count = 33. One config (window/direction frozen; no sweep). Deflated
+  Sharpe haircut N_trials = 33.
+
+**PASS bar (pre-registered — ES, 1-tick, SEARCH).** n >= 200; PF >= 1.15; one-sided
+p < 0.05 (Student-t AND 20k bootstrap seed 7); >= 60% years positive; deflated Sharpe
+(SR - SR0 @ N=33) > 0. ALSO report the overnight P&L TAIL (worst / 1st-pct single-
+trade loss per contract) as a Topstep-risk flag — if it clears the edge bar, the full
+eval-pass Monte-Carlo (vs k DLL / k MLL / consistency) is the REQUIRED second gate
+before this is Combine-viable. Any fail on the edge bar -> KILL, holdout untouched.
