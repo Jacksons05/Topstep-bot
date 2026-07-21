@@ -23,7 +23,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 LOG = ROOT / "oos" / "data" / "overnight_forward_log.csv"
 ET = ZoneInfo("America/New_York")
-FIELDS = ["exit_date", "sym", "px_1800", "px_0930", "drift_pts", "pnl_1ct_net", "prior_vix", "logged_at"]
+FIELDS = ["exit_date", "sym", "px_1800", "px_0600", "px_0930", "drift_pts",
+          "pnl_full_1ct", "pnl_evening_1ct", "prior_vix", "logged_at"]
 SPECS = {"MES": {"pt": 5.0, "tick": 0.25, "comm_rt": 1.40},
          "MNQ": {"pt": 2.0, "tick": 0.25, "comm_rt": 1.40}}
 
@@ -98,9 +99,10 @@ def run():
             px_1800 = _bar_price_at(bars, 18 * 60, d)
             if px_1800 is not None:
                 break
+        px_0600 = _bar_price_at(bars, 6 * 60, exit_d)
         px_0930 = _bar_price_at(bars, 9 * 60 + 30, exit_d)
-        if px_1800 is None or px_0930 is None:
-            print(f"[fwd-log] {sym}: missing 18:00 or 09:30 price -- skip")
+        if px_1800 is None or px_0930 is None or px_0600 is None:
+            print(f"[fwd-log] {sym}: missing 18:00 / 06:00 / 09:30 price -- skip")
             continue
         if (exit_d.isoformat(), sym) in logged:
             print(f"[fwd-log] {sym} {exit_d}: already logged -- skip")
@@ -108,13 +110,15 @@ def run():
         spec = SPECS[sym]
         cost = spec["comm_rt"] + 2 * 1 * spec["tick"] * spec["pt"]
         drift = px_0930 - px_1800
-        pnl = drift * spec["pt"] - cost
+        pnl_full = drift * spec["pt"] - cost                 # 18:00 -> 09:30
+        pnl_eve = (px_0600 - px_1800) * spec["pt"] - cost    # 18:00 -> 06:00 (better slice)
         new_rows.append({"exit_date": exit_d.isoformat(), "sym": sym,
-                         "px_1800": f"{px_1800:.2f}", "px_0930": f"{px_0930:.2f}",
-                         "drift_pts": f"{drift:.2f}", "pnl_1ct_net": f"{pnl:.2f}",
+                         "px_1800": f"{px_1800:.2f}", "px_0600": f"{px_0600:.2f}",
+                         "px_0930": f"{px_0930:.2f}", "drift_pts": f"{drift:.2f}",
+                         "pnl_full_1ct": f"{pnl_full:.2f}", "pnl_evening_1ct": f"{pnl_eve:.2f}",
                          "prior_vix": f"{vix:.2f}", "logged_at": now.isoformat(timespec="minutes")})
-        print(f"[fwd-log] {sym} {exit_d}: 1800={px_1800:.2f} 0930={px_0930:.2f} "
-              f"drift={drift:+.2f}pt pnl=${pnl:+.2f} vix={vix:.1f}")
+        print(f"[fwd-log] {sym} {exit_d}: full=${pnl_full:+.0f} evening=${pnl_eve:+.0f} "
+              f"vix={vix:.1f}")
     if new_rows:
         exists = LOG.exists()
         with LOG.open("a", newline="") as f:
@@ -135,13 +139,15 @@ def report():
     print(f"forward overnight-drift log: {len(rows)} rows, "
           f"{rows[0]['exit_date']}..{rows[-1]['exit_date']}")
     for sym in ("MES", "MNQ"):
-        p = [float(r["pnl_1ct_net"]) for r in rows if r["sym"] == sym]
-        if len(p) >= 2:
-            wins = sum(1 for x in p if x > 0)
-            print(f"  {sym}: n={len(p)} mean=${statistics.mean(p):+.2f} "
-                  f"total=${sum(p):+.0f} win={100*wins/len(p):.0f}% worst=${min(p):+.0f}")
-        elif p:
-            print(f"  {sym}: n={len(p)} (need >=2 for stats)")
+        for col in ("pnl_full_1ct", "pnl_evening_1ct"):
+            p = [float(r[col]) for r in rows if r["sym"] == sym and r.get(col) not in (None, "")]
+            if len(p) >= 2:
+                wins = sum(1 for x in p if x > 0)
+                print(f"  {sym} {col.replace('pnl_','').replace('_1ct',''):<8}: "
+                      f"n={len(p)} mean=${statistics.mean(p):+.2f} total=${sum(p):+.0f} "
+                      f"win={100*wins/len(p):.0f}% worst=${min(p):+.0f}")
+            elif p:
+                print(f"  {sym} {col}: n={len(p)} (need >=2 for stats)")
     print("NOTE: forward OOS evidence only. Needs months to be meaningful; a stable")
     print("positive mean would revive the drift, a flat/negative one confirms decay.")
     return 0
