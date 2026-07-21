@@ -2281,3 +2281,28 @@ TOPSTEP RISK still fatal: MNQ tail worst -$1,661/contract (breaches the $1k DLL 
 micro), P(loss>$500)=2.2%; NQ-full = 10x (worst ~-$16,610). Overnight-gap tail is
 DLL/MLL-incompatible for NQ too. VERDICT: KILL -- same as ES R30: slightly stronger
 drift, same fatal tail + insignificance. NQ does not change the conclusion.
+
+## LOCKED HOLDOUT — BURNED 2026-07-21 (one-shot, on the single best candidate: NQ overnight drift)
+
+The holdout 2025-06-05..2026-06-05, untouched through 31 rounds, was spent ONCE here
+(oos/round30_nq_holdout.py). NOTE: the candidate FAILED the search-set edge bar; the
+holdout was used at end-of-program on the single best candidate to answer "is the NQ
+overnight drift real OOS (worth a fork-B design)?", NOT to certify Topstep-viability
+(the gap tail is fatal regardless).
+
+RESULT — significant OOS, but a REGIME/BETA read, not stable alpha:
+- MNQ holdout (n=259): avg +$42.01, PF 1.419, t=2.06, p=0.020 (t) / 0.018 (boot),
+  positive at 2-tick (+$41.01, p=0.022). ES holdout: avg +$191.66, PF 1.385, t=1.88,
+  p=0.030. FIRST OOS-significant result in the program.
+- BUT DISTRUSTED, on four grounds: (1) it is ONE recent year (n=259; "100% yrs+" = one
+  year). (2) search (15yr, +$5.86) vs holdout (+$42) magnitudes disagree ~8x -> NON-
+  STATIONARY / regime-dependent, not a stable edge. (3) it is largely long-equity BETA
+  realized overnight: +$42/MNQ x 259 ~= the year's overnight NQ gain -- in a flat/down
+  year long-overnight is flat-to-negative, which is why the 15yr average is weak. (4)
+  the overnight-gap TAIL is unchanged (ES -$5,566 in a single night even this year).
+
+VERDICT: the overnight drift is a REAL, regime-varying, long-biased phenomenon (positive
+in BOTH windows) but NOT stable market-neutral alpha, and remains Topstep-impossible on
+the tail. Holdout is now SPENT -- no further OOS test is available on this data. Any
+future overnight work must treat it as regime-dependent long BETA with a fat gap tail,
+sized accordingly, in a venue whose risk limits tolerate overnight gaps (fork B).
