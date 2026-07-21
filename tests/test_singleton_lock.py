@@ -8,6 +8,7 @@ beyond the test process's own (always alive) and a deliberately-invalid one
 from __future__ import annotations
 
 import os
+import sys
 
 import pytest
 
@@ -38,6 +39,17 @@ def test_second_acquire_by_a_live_process_is_rejected(tmp_path, monkeypatch):
     assert lock.read_text().strip() == str(other_pid)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="os.kill(pid, 0) is POSIX-shaped: on Linux/macOS a never-allocated "
+           "PID reliably raises ProcessLookupError, which _pid_alive maps to "
+           "'dead' and this test exercises the reclaim path. On Windows the "
+           "same call raises a plain OSError (WinError 87) that _pid_alive "
+           "can't distinguish from a real 'can't tell' case, so it correctly "
+           "fails safe and assumes alive (see singleton_lock._pid_alive's "
+           "docstring, fixed 2026-07-20) — this exact reclaim scenario isn't "
+           "reachable on Windows via this technique. The actual production "
+           "target is Linux, where this path is real and this test matters.")
 def test_stale_lock_from_a_dead_pid_is_reclaimed(tmp_path):
     lock = tmp_path / "ENGINE.lock"
     # PID 1 followed by a large offset is astronomically unlikely to be a

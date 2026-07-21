@@ -8,6 +8,20 @@ from __future__ import annotations
 import sys
 import time
 
+# Console output carries emoji status markers (warning/success/critical).
+# stdout/stderr default to the OS locale codepage -- on Windows that's cp1252,
+# which raises UnicodeEncodeError on the first emoji-bearing print. Reconfigure
+# to UTF-8 unconditionally; it's a no-op where the stream already is UTF-8
+# (Linux/macOS), and this is the actual entrypoint, so it covers every print
+# and every notify() call downstream without requiring PYTHONIOENCODING to be
+# set manually before each launch.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except Exception:  # noqa: BLE001 - best effort, never block startup on this
+            pass
+
 from config import CONFIG
 from dashboard import start_background as _start_dashboard
 from engine import Engine

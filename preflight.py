@@ -27,6 +27,16 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+# See run.py for why: the human-readable report uses PASS/WARN/FAIL glyphs
+# that raise UnicodeEncodeError on Windows' default cp1252 stdout when this
+# script is run directly (not through run.py, which sets this up itself).
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
+
 from config import CONFIG
 
 _ET = ZoneInfo("America/New_York")
