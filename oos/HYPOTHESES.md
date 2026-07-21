@@ -1966,3 +1966,53 @@ drift is a close-to-close / overnight effect; the RTH-open→close slice Topstep
 forces (flat by close) does not capture a significant, regime-robust, cost-clearing
 edge. Anomaly may be real but is not intraday-Topstep-monetizable. Program status:
 27 rounds + 3 screens, still ZERO robust intraday edges. Holdout intact/unused.
+
+---
+
+# Round 28 — VIX-regime-conditioned intraday behavior (ES), REGISTERED 2026-07-21
+# BEFORE any test code (frozen by the commit that adds this entry; no round28
+# test file exists at registration time).
+
+**Failure mode FIRST (per protocol).** Round 21 already FALSIFIED the core idea —
+vol-regime toggling of mean-reversion vs momentum — using dealer GEX as the regime
+proxy (ES pooled PF 0.809, t=−8.95, 0% years positive, negative even gross). And
+today's IB screen showed intraday DIRECTION carries ~no unconditional information
+(break base rate 0.504). This round swaps the regime proxy to an EXTERNAL, cleaner
+measure (VIX level) and conditions the MORNING MOVE rather than VWAP/breakout — a
+genuinely different construction — but the prior it re-confirms is HIGH. It is,
+honestly, "a cleaner conditioner bolted onto a signal that has died unconditionally."
+
+**Mechanism / counterparty.** In HIGH-vol regimes, dealer short-gamma hedging +
+vol-target/CTA deleveraging force trend-CONTINUATION flows intraday (counterparty:
+mean-reverters/liquidity providers run over). In LOW-vol regimes, dealer long-gamma
+hedging dampens moves, so morning extensions REVERT (counterparty: breakout-chasers
+faded). Kolanovic-style gamma/vol-regime narrative, tested with an external VIX
+regime instead of R21's GEX.
+
+**Frozen feature & rule (ONE configuration — NO sweep).**
+- Regime for day D = prior trading day's VIXCLS close (oos/data/macro/VIXCLS.csv)
+  classified vs the trailing 60 VIX closes STRICTLY before D: top tercile (≥ 66.67
+  pct) = HIGH; bottom tercile (≤ 33.33 pct) = LOW; middle = SKIP. Causal (prior-day
+  VIX is known at today's open).
+- Morning move = sign of (RTH 11:00 ET close − 09:30 ET open).
+- HIGH regime → MOMENTUM: trade IN the morning-move direction. LOW regime →
+  REVERSION: trade OPPOSITE. Enter at the first 5-min bar open at/after 11:05 ET,
+  exit at the 15:55 RTH flatten. One trade/day, long or short, flat by close.
+
+**Data / costs.** ES 5-min (owned) + VIXCLS daily (FRED, free). Net 1-tick slip +
+$4 RT comm (primary); 2-tick reported for robustness. Seed 7 bootstrap.
+
+**Multiple-testing discipline (Rule 3).**
+- SEARCH: 2010-06 → 2025-06-04. **HOLDOUT 2025-06-05 → 2026-06-05 = LOCKED**,
+  touched once only if the search set passes.
+- Program trial count = 31. Within-round configs = 1 (terciles/windows/assignment
+  all frozen; no grid). Deflated Sharpe haircut uses N_trials = 31.
+- The momentum-HIGH / reversion-LOW assignment is theory-driven, not fit. The MIRROR
+  assignment (reversion-HIGH / momentum-LOW) is reported as a DIAGNOSTIC only: if the
+  mirror ALSO loses, there is no directional edge, just cost drag.
+
+**PASS bar (pre-registered — combined HIGH+LOW stream, ES, 1-tick, SEARCH).** n ≥ 200;
+PF ≥ 1.15; one-sided p < 0.05 (Student-t AND 20k bootstrap seed 7); ≥ 60% years
+positive; deflated Sharpe (SR − SR0 @ N=31) > 0. Report expectancy/trade ($ and R),
+per-trade + deflated Sharpe, and the HIGH / LOW sub-streams. Any fail on the search
+set → KILL, logged, no sweep, holdout stays untouched.
