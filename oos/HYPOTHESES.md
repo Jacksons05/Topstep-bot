@@ -1941,3 +1941,28 @@ Any fail on the search set → KILL, logged, no sweep, holdout stays untouched.
 a close-to-close / overnight effect in the literature; Topstep forces flat-by-
 close, so the RTH-open→close slice may capture little of it and not clear costs.
 If so: KILL — the anomaly may be real but not intraday-Topstep-monetizable.
+
+## Round 27 — result (2026-07-21, oos/round27_turn_of_month.py): KILL
+
+Ran the frozen spec on the SEARCH set (2010-06 .. 2025-06-04). Holdout
+(2025-06-05 .. 2026-06-05) NOT touched — the search set failed, so per Rule 3 it
+stays LOCKED and unseen. Seed 7; program trial count 30; one configuration.
+
+ES TOM, 1-tick (judged cell): n=723, avg **+$16.04/trade**, PF 1.038, t=0.32,
+p=0.374 (t) / 0.378 (20k boot), **37.5% years positive**, per-trade Sharpe 0.012,
+deflated SR−SR0(N=30) = **−0.065** (DSR prob 0.04). Fails PF, t, both p, years+,
+AND deflated Sharpe — only n clears. 2-tick: avg **−$8.96** (flips negative).
+MES TOM: PF 1.137, t 0.82, p 0.21, 57% yrs+ — also fails.
+
+The nominal +$16/trade is NOISE: t=0.32 cannot reject zero; only 37.5% of years
+positive (a few good years carry the mean); negative at an honest 2-tick fill.
+There IS a mild TOM-vs-baseline differential (TOM +$16 vs non-TOM long open→close
+−$8.33 = **+$24/trade**), directionally consistent with the literature, but not
+significant, not persistent, not cost-robust. Baseline non-TOM long open→close is
+NEGATIVE (−$8.33): generic RTH-intraday long drift does not exist net of costs.
+
+**VERDICT: KILL** — exactly on the pre-registered failure mode: the turn-of-month
+drift is a close-to-close / overnight effect; the RTH-open→close slice Topstep
+forces (flat by close) does not capture a significant, regime-robust, cost-clearing
+edge. Anomaly may be real but is not intraday-Topstep-monetizable. Program status:
+27 rounds + 3 screens, still ZERO robust intraday edges. Holdout intact/unused.
