@@ -2194,3 +2194,48 @@ Combine's RISK limits ($1k DLL / $2k MLL) bind as hard as its time limits. Progr
 30 rounds + 3 screens, zero Combine-viable edges. Holdout intact/unused. Still-untested
 in the re-opened window: the 8:30 ET announcement REACTION as a SHORT pre-open trade
 (no overnight hold -> sidesteps the gap tail that killed R30).
+
+---
+
+# Round 31 — 8:30 ET pre-open announcement-reaction drift (ES), REGISTERED
+# 2026-07-21 BEFORE any test code (frozen by the commit adding this entry; no
+# round31 test file exists at registration). The FINAL untested hypothesis in the
+# re-opened pre-open window; tail-safe (no overnight hold).
+
+**Failure mode FIRST.** (a) ES reprices the 8:30 number within seconds-to-minutes;
+by 8:45 the reaction is likely complete -> no residual continuation -> coin-flip +
+cost drag. (b) The pre-open book (08:45-09:30) is thin -> honest slippage may exceed
+1 tick. (c) Every intraday DIRECTIONAL continuation test so far (R10 momentum, IB
+screen, R28) found no unconditional edge. (d) R29 showed announcement-day RTH is
+negative. Prior: modest.
+
+**Mechanism / counterparty.** Macro post-announcement UNDER-reaction: the market
+does not fully price the 8:30 CPI/NFP release instantly, so the initial reaction
+DRIFTS in the same direction into the RTH open as slower participants digest it.
+Counterparty: slow reactors / staggered institutional rebalancing across the pre-open
+hour. Topstep-legal (pre-open trading allowed); SHORT ~45-min hold, no overnight gap
+risk.
+
+**Frozen feature & rule (ONE configuration — NO sweep).**
+- Announcement day = date in {CPI, NFP} per econ_calendar.csv (the two highest-impact
+  08:30 ET releases; FOMC excluded — it prints 14:00, not pre-open).
+- Reaction = sign(open[08:45 ET] - open[08:30 ET]) — the first 15-min move off the
+  release (known at 08:45, no look-ahead).
+- Rule: at 08:45 ET enter IN the reaction direction (continuation), exit at the 09:30
+  ET RTH open. One trade/announcement day, long or short, flat by 09:30.
+
+**Data / costs.** ES 5-min (covers pre-open). Net 1-tick + $4 RT comm (primary);
+2-tick reported (thin pre-open book). Seed 7.
+
+**Multiple-testing discipline (Rule 3).**
+- SEARCH 2010-06 -> 2025-06-04. **HOLDOUT 2025-06-05 -> 2026-06-05 = LOCKED**, touched
+  once only if the search set passes.
+- Program trial count = 34. One config (report set, windows, direction frozen; no
+  sweep). Deflated Sharpe haircut N_trials = 34.
+- MIRROR (reversion) and non-announcement-day 08:45->09:30 baseline reported as
+  DIAGNOSTICS: if the mirror also loses -> no directional edge; if announcement ~=
+  baseline -> the pattern isn't announcement-specific.
+
+**PASS bar (pre-registered — ES, 1-tick, SEARCH).** n >= 200; PF >= 1.15; one-sided
+p < 0.05 (Student-t AND 20k bootstrap seed 7); >= 60% years positive; deflated Sharpe
+(SR - SR0 @ N=34) > 0. Any fail on the search set -> KILL, no sweep, holdout untouched.
