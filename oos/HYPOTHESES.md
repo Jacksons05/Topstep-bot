@@ -2164,3 +2164,33 @@ p < 0.05 (Student-t AND 20k bootstrap seed 7); >= 60% years positive; deflated S
 trade loss per contract) as a Topstep-risk flag — if it clears the edge bar, the full
 eval-pass Monte-Carlo (vs k DLL / k MLL / consistency) is the REQUIRED second gate
 before this is Combine-viable. Any fail on the edge bar -> KILL, holdout untouched.
+
+## Round 30 — result (2026-07-21, oos/round30_overnight_drift.py): KILL
+
+SEARCH exit-date 2010-06..2025-06-04; holdout NOT touched (search failed -> locked).
+Seed 7; trial count 33; one config.
+
+ES 1-tick: n=3848, avg +$13.76, PF 1.048, t=0.86, p=0.195 (t) / 0.194 (boot),
+62.5% years positive (first round to clear that), deflated SR-SR0(N=33) = -0.020
+(DSR 0.105). Fails PF / p / deflated -> KILL on the edge bar. 2-tick: -$11.24 (flips
+negative -- thin overnight reopen). MES: +$1.68/trade, PF 1.035 (edge ~zero).
+
+The CLOSEST miss of the program: the overnight drift IS weakly present even in the
+Topstep-legal 18:00->09:30 ET window (positive, 62.5% yrs+) -- but not significant.
+Two reasons vs the classic close-to-open edge: (1) the 16:10-18:00 ET forced-flat
+drops the immediate post-close slice; (2) overnight-reopen slippage makes 2t negative.
+
+TOPSTEP RISK -- the decisive killer (per 1 ES contract): worst overnight -$8,779,
+1st-pct -$3,061, 5th-pct -$1,404; P(loss>$1000)=7.7%, P(loss>$500)=17%. A single
+contract breaches the $1k DLL ~1 night in 13, and tail gaps blow the $2k trailing MLL
+many times over. MES caps the tail (worst -$901) but has ~no edge. The overnight-gap
+tail is INCOMPATIBLE with the $1k DLL / $2k MLL -- a positive-EV edge is irrelevant if
+one gap ends the account.
+
+VERDICT: KILL. The one family that ever passed OOS across regimes is now TESTED in the
+Topstep-legal window and fails for a NEW reason: weak-and-insignificant in the reduced
+window, AND its overnight-gap tail is incompatible with the Combine's risk limits. The
+Combine's RISK limits ($1k DLL / $2k MLL) bind as hard as its time limits. Program:
+30 rounds + 3 screens, zero Combine-viable edges. Holdout intact/unused. Still-untested
+in the re-opened window: the 8:30 ET announcement REACTION as a SHORT pre-open trade
+(no overnight hold -> sidesteps the gap tail that killed R30).
