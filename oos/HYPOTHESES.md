@@ -2081,3 +2081,34 @@ p < 0.05 (Student-t AND 20k bootstrap seed 7); ≥ 60% years positive; deflated 
 (SR − SR0 @ N=32) > 0. Report expectancy/trade ($ and R), per-trade + deflated
 Sharpe, and the non-announcement baseline. Any fail on search → KILL, no sweep,
 holdout stays untouched.
+
+## Round 29 — result (2026-07-21, oos/round29_announcement_premium.py): KILL
+
+SEARCH 2010-06..2025-06-04; holdout NOT touched (search failed → stays locked).
+Seed 7; trial count 32; one config.
+
+ES ANNOUNCEMENT long, 1-tick: n=477, avg **−$29.39**, PF 0.937, t=−0.44, p=0.67
+(t) / 0.67 (boot), 37.5% years positive, deflated SR−SR0(N=32) = **−0.116** (DSR
+0.005). Fails every criterion. 2-tick: −$54.39.
+Baseline non-announcement RTH-long: −$0.13/trade (flat). **Announcement days are
+−$29/trade WORSE than normal days — the OPPOSITE of a premium.** MES same: ANN
+−$6.32 vs baseline +$1.14.
+
+**VERDICT: KILL**, decisively on the pre-registered failure mode. Savor-Wilson's
+announcement premium is a close-to-close effect earned OVERNIGHT and at the release
+moment (8:30 CPI/NFP print pre-open; the FOMC move is priced fast) — by the 09:30
+RTH open it is banked, and the RTH-open→close slice GIVES IT BACK. The premium lives
+where Topstep forbids you to trade.
+
+**PROGRAM CONCLUSION (2026-07-21): 29 rounds + 3 screens, ZERO robust intraday edges.
+Every category the mandate named has now been tested** — order flow / microstructure
+(5,20,22,23), directional break-fade at reference levels (2,24,25,IB-screen), cross-
+asset reversion (divergence screen), overnight-inventory (26, closed), GEX / dealer-
+gamma (6,18,21), momentum & confidence (10,19), calendar (27 TOM), vol-regime (28),
+and scheduled macro events (29). The RECURRING result across R26/R27/R29 is the same
+structural fact: the equity premium (overnight drift, turn-of-month, announcement
+premium) is an OVERNIGHT phenomenon; the RTH-open→close slice Topstep forces is flat-
+to-negative. The one edge that ever survived OOS across regimes — the overnight HOLD
+— is Topstep-illegal by construction. Holdout 2025-06..2026-06 remains UNUSED (never
+earned a single-candidate final test). Further intraday price-pattern search on this
+data is expected-negative and raises the multiple-testing bar for any future winner.
