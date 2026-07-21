@@ -2037,3 +2037,47 @@ behavior; it's cost drag either way. Re-confirms R21 (vol-regime MR/momentum tog
 is dead) with a cleaner EXTERNAL VIX regime and a different construction — the idea,
 not the proxy, was the problem. Program status: **28 rounds + 3 screens, still ZERO
 robust intraday edges.** Holdout intact/unused.
+
+---
+
+# Round 29 — Macro-announcement premium (ES), REGISTERED 2026-07-21 BEFORE any
+# test code (frozen by the commit adding this entry; no round29 test file exists
+# at registration). First hypothesis on the new oos/data/econ_calendar.csv.
+
+**Failure mode FIRST.** Like TOM (R27) and overnight-inventory (R26), the premium
+may live OVERNIGHT / around the release moment, not in the RTH-open→close slice
+Topstep forces — and R27's baseline showed generic RTH-long is NEGATIVE (−$8.33/
+trade). It is also a well-known published effect (possible decay/arb). The bet is
+narrow: that announcement DAYS are the specific day-type where the (generally dead)
+intraday RTH long is positive.
+
+**Mechanism / counterparty.** Savor & Wilson (2013, JFQA): US equity excess returns
+concentrate on scheduled macro-announcement days — compensation for bearing
+announcement risk. Counterparty: investors who de-risk INTO announcements, paying
+the premium to those who bear the risk across the print.
+
+**Frozen feature & rule (ONE configuration — NO sweep).**
+- "Announcement day" = a session whose date is in {FOMC, CPI, NFP} per
+  oos/data/econ_calendar.csv. Frozen tight set (the 3 highest-impact scheduled
+  reports, closest to Savor-Wilson's FOMC+CPI+PPI+Employment); claims/PCE/GDP/
+  retail are DELIBERATELY excluded (not swept).
+- Rule: LONG ES at the RTH 09:30 open, exit at the 15:55 flatten, on announcement
+  days only. One trade/day, RTH only, flat by close (Topstep-legal). Uniform across
+  the 3 report types (08:30 CPI/NFP are pre-open; 14:00 FOMC is held through, which
+  IS bearing the announcement risk the premium pays for).
+
+**Data / costs.** ES 5-min (owned) + econ_calendar.csv. Net 1-tick + $4 RT comm
+(primary); 2-tick reported. Seed 7. Non-announcement-day RTH-long reported as a
+BASELINE diagnostic: if announcement ≈ baseline, there is no premium.
+
+**Multiple-testing discipline (Rule 3).**
+- SEARCH 2010-06 → 2025-06-04. **HOLDOUT 2025-06-05 → 2026-06-05 = LOCKED**, touched
+  once only if the search set passes.
+- Program trial count = 32. Within-round configs = 1 (report set + window frozen).
+  Deflated Sharpe haircut uses N_trials = 32.
+
+**PASS bar (pre-registered — ES, 1-tick, SEARCH).** n ≥ 200; PF ≥ 1.15; one-sided
+p < 0.05 (Student-t AND 20k bootstrap seed 7); ≥ 60% years positive; deflated Sharpe
+(SR − SR0 @ N=32) > 0. Report expectancy/trade ($ and R), per-trade + deflated
+Sharpe, and the non-announcement baseline. Any fail on search → KILL, no sweep,
+holdout stays untouched.
