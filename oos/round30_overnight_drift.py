@@ -78,7 +78,7 @@ def main():
     print("  ROUND 30 — Overnight drift, Topstep-LEGAL window (ES) — SEARCH ONLY")
     print("  LONG 18:00 ET -> 09:30 ET next RTH open. (holdout LOCKED, not evaluated)")
     print("=" * 80)
-    for sym in ("ES", "MES"):
+    for sym in ("ES", "MES", "MNQ"):
         ts, tr = build(sym)
         print(f"\n--- {sym} --- (n={len(tr)} overnight sessions)")
         for slip in (1, 2):

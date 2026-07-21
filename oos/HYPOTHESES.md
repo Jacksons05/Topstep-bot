@@ -2239,3 +2239,45 @@ risk.
 **PASS bar (pre-registered — ES, 1-tick, SEARCH).** n >= 200; PF >= 1.15; one-sided
 p < 0.05 (Student-t AND 20k bootstrap seed 7); >= 60% years positive; deflated Sharpe
 (SR - SR0 @ N=34) > 0. Any fail on the search set -> KILL, no sweep, holdout untouched.
+
+## Round 31 — result (2026-07-21, oos/round31_announcement_reaction.py): KILL
+
+SEARCH 2010-06..2025-06-04; holdout NOT touched (search failed -> locked). Seed 7;
+trial count 34; one config.
+
+ES ANNOUNCE continuation, 1-tick: n=358, avg -$43.18, PF 0.677, t=-2.34 (significantly
+NEGATIVE), p=0.99 (t) / 0.99 (boot), 18.8% years positive, deflated SR-SR0(N=34) =
+-0.238 (DSR 0.000). Fails every criterion. 2-tick: -$68.18.
+- The continuation bet loses SIGNIFICANTLY -> the 8:30 reaction REVERSES, not continues.
+- But the MIRROR (reversion) ALSO loses (-$14.82/trade, t=-0.80) -> no clean directional
+  edge either way.
+- Non-announcement baseline loses WORST (-$24.03/trade, t=-5.27, PF 0.735, 6% yrs+) ->
+  the 08:45->09:30 window is a small-move, cost-dominated loser GENERALLY; the pattern
+  is not announcement-specific, it's the $29 round-trip eating a ~45-min pre-open move.
+MES: same story (continuation -$5.08, baseline -$2.73, both losing).
+
+**VERDICT: KILL.** The FINAL untested hypothesis in the re-opened pre-open window is
+dead. The re-opened window is now FULLY tested: the overnight HOLD (R30 — weak +
+tail-incompatible with the DLL/MLL) and the pre-open REACTION (R31 — cost-dominated,
+no directional edge). Program: 31 rounds + 3 screens, zero Combine-viable edges.
+Holdout 2025-06..2026-06 STILL UNUSED. The corrected conclusion stands: no
+Combine-viable edge exists on this stack; the only real edge (overnight drift) needs
+a fuller window AND looser risk limits than Topstep allows (a different venue).
+
+## Round 30 — NQ/MNQ extension (2026-07-21, user request): also KILL (best-looking overnight yet)
+
+Same frozen R30 methodology (LONG 18:00 -> 09:30 ET) on MNQ (the NQ instrument in the
+data; NQ-full = 10x). MNQ sample 2019-05..2025-06 (n=1571) is shorter / more RECENT
+than ES -> less power, regime caveats.
+
+MNQ 1-tick: n=1571, avg +$5.86, PF 1.078, t=1.01, p=0.157 (t/boot), 71.4% years
+positive, deflated SR-SR0(N=33) = -0.028. STAYS POSITIVE at 2-tick (+$4.86) -- more
+slippage-robust than ES, the strongest overnight profile in the program (PF 1.078,
+71% yrs+). BUT still fails the edge bar: PF < 1.15, not significant (t=1.0), deflated
+< 0. The NQ overnight drift is real and a touch stronger than ES (Nasdaq/tech has a
+larger overnight component), but not significant and partly a post-2019 regime effect.
+
+TOPSTEP RISK still fatal: MNQ tail worst -$1,661/contract (breaches the $1k DLL on ONE
+micro), P(loss>$500)=2.2%; NQ-full = 10x (worst ~-$16,610). Overnight-gap tail is
+DLL/MLL-incompatible for NQ too. VERDICT: KILL -- same as ES R30: slightly stronger
+drift, same fatal tail + insignificance. NQ does not change the conclusion.
