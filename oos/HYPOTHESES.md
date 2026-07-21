@@ -2016,3 +2016,24 @@ PF ≥ 1.15; one-sided p < 0.05 (Student-t AND 20k bootstrap seed 7); ≥ 60% ye
 positive; deflated Sharpe (SR − SR0 @ N=31) > 0. Report expectancy/trade ($ and R),
 per-trade + deflated Sharpe, and the HIGH / LOW sub-streams. Any fail on the search
 set → KILL, logged, no sweep, holdout stays untouched.
+
+## Round 28 — result (2026-07-21, oos/round28_vix_regime.py): KILL
+
+SEARCH set (2010-06..2025-06-04); holdout NOT touched (search failed → stays locked).
+Seed 7; trial count 31; one configuration.
+
+ES COMBINED, 1-tick: n=2851, avg **−$36.76**, PF 0.894, t=−1.67, p=0.95 (t) / 0.95
+(boot), **31.2% years positive**, deflated SR−SR0(N=31) = **−0.072** (DSR 0.000).
+Fails every criterion. 2-tick: −$61.76 (worse).
+- HIGH(momentum) sub-stream: −$22.3/trade, PF 0.953, t=−0.49 — losing.
+- LOW(reversion) sub-stream: −$47.7/trade, PF 0.811, **t=−2.60** — significantly
+  bad: in low-vol regimes the morning move CONTINUES, it does not revert.
+- MIRROR assignment (reversion-HIGH / momentum-LOW): ALSO loses (−$21.2, t=−0.96).
+MES combined: −$6.2/trade, PF 0.89 — same story.
+
+**VERDICT: KILL**, on the pre-registered failure mode. Both the theory-driven
+assignment AND its mirror lose ⇒ the VIX regime separates NO tradeable directional
+behavior; it's cost drag either way. Re-confirms R21 (vol-regime MR/momentum toggle
+is dead) with a cleaner EXTERNAL VIX regime and a different construction — the idea,
+not the proxy, was the problem. Program status: **28 rounds + 3 screens, still ZERO
+robust intraday edges.** Holdout intact/unused.
