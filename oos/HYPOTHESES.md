@@ -1790,3 +1790,154 @@ logging at realistic open-fill costs, never sized on this backtest.
 **Program status after 26 rounds: still ZERO robust, actionable intraday
 edges.** The overnight-drift HOLD (Topstep-illegal) remains the only signal
 that survives realistic costs across regimes.
+
+---
+
+# EDA screen (2026-07-20) — ES-NQ intraday divergence reversion: DEAD before
+# registration (research/es_nq_divergence_eda.py; pre-backtest statistical
+# screen, never earned a round number)
+
+**Hypothesis.** MES (S&P) and MNQ (Nasdaq) move ~together; the intraday gap
+D_t = log(NQ_t/NQ_open) − log(ES_t/ES_open) IS the tech-vs-broad FACTOR return.
+Claim: when D_t is z-stretched (|z|≥2 vs trailing 30 bars, session reset) it
+snaps back — fade it (short rich leg / long cheap leg), exit |z|≤0.5 / 60min /
+EOD. The trade is TWO-LEGGED: short MNQ + long MES (or reverse).
+
+**Data.** MES + MNQ 5-min RTH, aligned by timestamp, 2019-05-06 → 2026-06-05,
+1,827 sessions, 138,485 spread-increment obs. corr(MES,MNQ) 5-min rets = 0.933
+(confirms it's a factor, not two independent assets).
+
+**Screen (kill it cheap if the spread doesn't revert — no full backtest).**
+Variance ratio VR(q) on the spread increment s_t = logret(MNQ)−logret(MES)
+(Lo-MacKinlay heteroskedasticity-robust z, session-aware windows), OU/AR(1)
+half-life of D_t, autocorr, era split, + indicative net-friction payoff of the
+literal rule for a ~dollar-neutral 1 MES + 1 MNQ pair (~$6.30 round-turn
+friction = comm + 1 tick/leg/side).
+
+**Result — statistically real, economically zero.**
+  - VR<1 at every horizon, hugely significant: VR(60min)=0.777 (z*=−12.8, p≈0,
+    CI [0.74, 0.81]); monotone to VR(120min)=0.703. Stable across eras
+    (0.75 / 0.82 / 0.76). So the spread DOES mean-revert — statistically.
+  - BUT OU half-life of the LEVEL D_t = ∞ (ρ=1.0001): the level is a random
+    walk. Reconciliation: lag-1 autocorr −0.009 (sum L1..12 = −0.02) — a real
+    but economically negligible effect made "significant" only by n=138k.
+    Textbook significance≠tradeability.
+  - Indicative payoff: mean −$6.68/trade (≈ −friction), i.e. GROSS edge ≈
+    −$0.38/trade — essentially ZERO before a cent of costs. Win 48%, per-trade
+    Sharpe −0.14, −$19,090 over 2,856 signals. Mean<median → fat left tail on
+    trend days (fading a trending factor gets run over, as predicted). The
+    30-bar reset also blanks the signal ~09:30–12:00 ET every session (54,810
+    bars lost) — but VR on ALL bars still shows only trivial reversion, so the
+    morning wouldn't rescue it.
+
+**Verdict: DEAD.** No gross edge to pay costs with. Micros don't rescue it —
+contract size scales edge and cost together (ratio fixed), and micro commission
+is ~3.5×/unit-exposure WORSE than full-size ($0.28 vs $0.08 per S&P point). The
+two-leg retail friction is the named killer, consistent with faster stat-arb
+desks having compressed the SPY/QQQ reversion below our cost floor. Screened
+out before earning a round number. Program status: still ZERO robust intraday
+edges after 26 rounds + this screen.
+
+---
+
+# Screen (2026-07-20) — R26 overnight-inventory reversion, slippage-dodge:
+# LEAD CLOSED / DEAD (oos/screen_overnight_inventory_entry.py)
+
+Tested whether R26's mechanical pass survives a DELAYED entry (09:45 / 10:00 /
+10:15) to dodge the 09:30 opening-auction slippage that killed it at 2 ticks.
+Only the entry bar changed — signal (top-tercile |ON| fade), target (prior RTH
+close), stop (∓1·ATR), valid-geometry, 15:55 flatten, and the evaluate kernel
+are identical to R26.
+
+- Baseline reproduced EXACTLY (ES 09:30): 1-tick PF 1.262 t 2.33 71% yrs+ $56k;
+  2-tick PF 1.091 t 0.91 41% yrs+ — matches the R26 sensitivity collapse.
+- Delayed entries are ALL net-NEGATIVE even at the optimistic 1-tick:
+  09:45 PF 0.843 (t −1.64, −$38k), 10:00 PF 0.950 (t −0.53, −$13k),
+  10:15 PF 0.873 (t −1.43). MES tells the same story.
+- reverted@entry ≈ 0.00 at every delayed bar: price has NOT net-moved from the
+  open, yet the edge is gone → the profitable reversion is a FIRST-15-MINUTE
+  phenomenon (trades hitting target 09:30–09:45 are captured only by the open
+  entry). The edge is inseparable from the opening-auction window; you cannot
+  dodge the slippage without dodging the edge. Pre-2020 stays negative (regime
+  artifact intact).
+
+**VERDICT: R26 CLOSED.** The single mechanical pass in the whole program is
+fully explained as 1-tick-optimism at the open + a post-2020 regime, not a
+tradeable edge. Zero robust, actionable intraday edges stands.
+
+---
+
+# Screen (2026-07-20) — Initial-Balance break (continuation vs failure): DEAD
+# (oos/screen_initial_balance.py)
+
+Mechanism: first IB (09:30-10:30) break post-10:30, enter next-bar open, HOLD
+to 15:55 flatten; continuation = trade WITH the break, fade = exact mirror.
+Parameter-light event study (no stop/target tuning) — kill the mechanism before
+bracketing anything. One leg, ES; same evaluate kernel.
+
+- ES: 4,106 full-IB days, 3,899 first-breaks (2,128 up / 1,771 down).
+  **Continuation base rate = 0.504** — a coin flip; the break carries NO
+  directional information.
+- BOTH directions lose: CONTINUATION PF 0.926 / 0.857 (1 / 2-tick), FADE
+  PF 0.901 / 0.834; both t<0, ~12-18% years positive, both decades negative.
+  A signal AND its exact mirror both losing ⇒ gross directional edge ≈ 0
+  (~$4/trade vs the $29 one-leg ES cost at 1-tick). Nothing to tune. MES same.
+
+**VERDICT: DEAD.** Re-confirms R2 (ORB) / R24 (value-area rotation) / R25
+(failed-auction fade) from a fresh angle: intraday directional break/fade around
+reference levels has no edge at our latency/cost. Zero robust intraday edges
+stands (26 rounds + 3 screens).
+
+---
+
+# Round 27 — Turn-of-the-month drift (ES), REGISTERED 2026-07-21 BEFORE any test
+# code was written (frozen by the commit that adds this entry; no round27 test
+# file exists at registration time). NB: an unmerged cursor branch
+# (topstep-edge-reevaluation) drafted a different oos/round27_gamma_momentum.py;
+# if that ever merges, one of the two must be renumbered — this main-branch
+# registration is canonical.
+
+**Mechanism (who trades / why / why it persists).** Pension, target-date and
+index funds mechanically rebalance toward their equity target near month-end,
+and 401(k)/payroll contributions are invested at month-end — a forced,
+calendar-timed buy imbalance that liquidity providers require compensation to
+absorb. Documented and among the most robust calendar anomalies: Ariel (1987,
+JF), Lakonishok & Smidt (1988, RFS), McConnell & Xu (2008, FAJ — turn-of-month
+days earn ~all the equity premium in their sample), Etula-Rinne-Suominen-
+Vaittinen (2020, JFE, "Dash for cash" — monthly institutional liquidity flows).
+Counterparty = forced mechanical rebalancers vs. compensated liquidity providers.
+
+**Falsifiable claim.** ES has positive expected INTRADAY (RTH) drift on the
+turn-of-month window vs. other days, large enough to clear costs + the Topstep
+sim.
+
+**Frozen feature & rule (NO sweep — window fixed to the McConnell-Xu canonical
+definition; one configuration only).**
+- Turn-of-month (TOM) window = the LAST 1 trading day of month M through the
+  FIRST 3 trading days of month M+1 (4 sessions per turn).
+- Direction: LONG ES only (the documented drift is positive).
+- Execution (Topstep-LEGAL, intraday, flat by close): enter long at the RTH
+  09:30 open (next-bar-open discipline), exit at the RTH close (15:55 flatten).
+  One position/day, RTH only, NO overnight hold.
+
+**Data / costs.** ES 5-min (owned). Net at 1-tick slip + $4 RT comm (repo
+standard evaluate kernel); also reported at 2-tick for robustness. MES reported.
+
+**Multiple-testing discipline (Rule 3).**
+- SEARCH set: 2010-06 → 2025-06-04. **HOLDOUT: 2025-06-05 → 2026-06-05, LOCKED**
+  — touched exactly once, only if the search set passes, as final confirmation.
+- Program trial count = 30 (26 rounds + 3 screens + this). Within-round configs
+  tested = 1 (window frozen; no grid). Deflated Sharpe haircut uses N_trials=30.
+- Seed 7 (bootstrap), matching the repo kernel. Threshold pre-registered below,
+  not to be moved after seeing results.
+
+**PASS bar (pre-registered).** On the SEARCH set: n ≥ 200; PF ≥ 1.15; one-sided
+p < 0.05 (Student-t AND 20k bootstrap, seed 7); ≥ 60% of years positive; AND
+DEFLATED Sharpe > 0 at N_trials=30. Report expectancy/trade in $ and in R, plus
+deflated Sharpe. Only if ALL pass, run the LOCKED holdout ONCE as confirmation.
+Any fail on the search set → KILL, logged, no sweep, holdout stays untouched.
+
+**Primary anticipated failure mode (stated up front).** The TOM drift is largely
+a close-to-close / overnight effect in the literature; Topstep forces flat-by-
+close, so the RTH-open→close slice may capture little of it and not clear costs.
+If so: KILL — the anomaly may be real but not intraday-Topstep-monetizable.
