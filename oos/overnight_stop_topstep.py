@@ -31,15 +31,15 @@ def era(y):
     return "2010-15" if y <= 2015 else "2016-19" if y <= 2019 else "2020-21" if y <= 2021 else "2022-26"
 
 
-def simulate(sym, stop_usd):
+def simulate(sym, stop_usd, slip_ticks=1):
     """Return per-night (year, pnl_usd, stopped, gapped) for the evening drift with
-    an optional dollar stop (0 = no stop)."""
+    an optional dollar stop (0 = no stop). slip_ticks sets the assumed fill cost."""
     ts, o, h, l, c, v = C.load(sym)
     by_date = defaultdict(list)
     for i, t in enumerate(ts):
         by_date[t.date()].append(i)
     spec = C.SPECS[sym]
-    pt, cost = spec["pt"], spec["comm_rt"] + 2 * 1 * spec["tick"] * spec["pt"]
+    pt, cost = spec["pt"], spec["comm_rt"] + 2 * slip_ticks * spec["tick"] * spec["pt"]
     out = []
     for E in sorted(by_date):
         if E.weekday() not in (6, 0, 1, 2, 3):
