@@ -47,3 +47,4 @@ oos/round18_gamma_scores.json
 state.db
 data/recorded/
 .KILL_SWITCH.*
+forkc/data/
