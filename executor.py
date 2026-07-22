@@ -59,7 +59,9 @@ def _futures_risk_budget_usd() -> float:
 def futures_plan(sig: Signal, price: float | None = None,
                  risk_mult: float = 1.0,
                  max_contracts: int | None = None,
-                 atr_mult: float | None = None) -> FuturesPlan | None:
+                 atr_mult: float | None = None,
+                 fixed_qty: int | None = None,
+                 fixed_stop_pts: float | None = None) -> FuturesPlan | None:
     """Risk-based futures sizing + ATR bracket. Returns a plan, or None to REJECT
     the trade (invalid/zero ATR, unknown $/pt, or stop too wide for the budget).
 
@@ -83,6 +85,27 @@ def futures_plan(sig: Signal, price: float | None = None,
     atr = sig.atr
     if not (px and px > 0) or pv <= 0:
         return None
+
+    # Fixed-sizing path (scheduled strategies, e.g. overnight-drift): a set qty +
+    # a set $-stop, decoupled from the shrinking per-trade risk budget (which would
+    # otherwise block the trade after any equity dip). Still respects the account-
+    # wide cap, and the engine's trailing-MLL / DLL headroom pre-checks still run.
+    if fixed_qty is not None and fixed_stop_pts is not None:
+        dist = float(fixed_stop_pts)
+        if not (math.isfinite(dist) and dist > 0):
+            return None
+        cap = CONFIG.topstep_max_contracts if max_contracts is None else int(max_contracts)
+        qty = min(int(fixed_qty), cap)
+        if qty < 1:
+            return None
+        tdist = CONFIG.take_profit_pct * px if CONFIG.take_profit_pct > 0 else 0.0
+        if sig.side == "BUY":
+            stop, target = px - dist, (px + tdist if tdist > 0 else 0.0)
+        else:
+            stop, target = px + dist, (px - tdist if tdist > 0 else 0.0)
+        return FuturesPlan(qty=qty, stop_price=stop, target_price=target,
+                           stop_distance_points=dist, point_value=pv,
+                           risk_usd=qty * dist * pv)
     # ATR must be finite and strictly positive — it sizes the stop.
     if not (atr and math.isfinite(atr) and atr > 0):
         return None
@@ -140,7 +163,9 @@ class Executor:
     def open(self, sig: Signal, size_usd: float, state: State,
              risk_mult: float = 1.0,
              max_contracts: int | None = None,
-             atr_mult: float | None = None) -> Position | None:
+             atr_mult: float | None = None,
+             fixed_qty: int | None = None,
+             fixed_stop_pts: float | None = None) -> Position | None:
         """Size + submit an entry. Returns the Position, or None to REJECT (no
         broker order placed) when risk-based sizing yields 0 contracts or the
         stop is non-finite. risk_mult shrinks the futures risk budget (circuit
@@ -153,7 +178,8 @@ class Executor:
         futures = is_futures_symbol(sig.symbol)
         if futures:
             plan = futures_plan(sig, sig.price, risk_mult=risk_mult,
-                                max_contracts=max_contracts, atr_mult=atr_mult)
+                                max_contracts=max_contracts, atr_mult=atr_mult,
+                                fixed_qty=fixed_qty, fixed_stop_pts=fixed_stop_pts)
             if plan is None:
                 log.warning("[exec] reject %s — futures sizing failed "
                             "(invalid ATR, stop too wide for risk budget, or no "
@@ -194,7 +220,8 @@ class Executor:
         # Re-anchor the bracket to the ACTUAL fill price (distances are unchanged).
         if futures:
             fp = futures_plan(sig, fill.price, risk_mult=risk_mult,
-                              max_contracts=max_contracts, atr_mult=atr_mult) or plan
+                              max_contracts=max_contracts, atr_mult=atr_mult,
+                              fixed_qty=fixed_qty, fixed_stop_pts=fixed_stop_pts) or plan
             stop, target = fp.stop_price, fp.target_price
         else:
             stop = self._stop(sig, fill.price)

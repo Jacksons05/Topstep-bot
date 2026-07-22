@@ -473,6 +473,20 @@ class Config:
     #           Rounds 1/19 — kept only for comparison runs).
     entry_engine: str = _s("ENTRY_ENGINE", "off").lower()
 
+    # ── overnight-drift strategy (scheduled; the one research edge) ────────
+    # LONG 1x MNQ at the 18:00 ET session open, exit 06:00 ET, $500 native stop,
+    # halt after N consecutive losing nights. Topstep-LEGAL (flat by 06:00 ET, far
+    # before the 3:10 PM CT flatten). Runs INDEPENDENT of entry_engine. Validated
+    # in-sample only -> sim/eval forward test. See BOOKMARK-overnight-drift. OFF default.
+    overnight_drift_enabled: bool = _b("OVERNIGHT_DRIFT_ENABLED", False)
+    overnight_drift_symbol: str = _s("OVERNIGHT_DRIFT_SYMBOL", "MNQ").upper()
+    overnight_drift_contracts: int = _i("OVERNIGHT_DRIFT_CONTRACTS", 1)
+    overnight_drift_entry_et: str = _s("OVERNIGHT_DRIFT_ENTRY_ET", "18:00")
+    overnight_drift_exit_et: str = _s("OVERNIGHT_DRIFT_EXIT_ET", "06:00")
+    overnight_drift_entry_window_min: int = _i("OVERNIGHT_DRIFT_ENTRY_WINDOW_MIN", 60)
+    overnight_drift_stop_usd: float = _f("OVERNIGHT_DRIFT_STOP_USD", 500.0)
+    overnight_drift_max_losing_nights: int = _i("OVERNIGHT_DRIFT_MAX_LOSING_NIGHTS", 2)
+
     # ── notify / logging ──────────────────────────────────
     discord_webhook: str = _s("DISCORD_WEBHOOK")
     log_file: str = _s("LOG_FILE", "signals.log")

@@ -1,73 +1,89 @@
-"""Overnight-drift runner guards: Topstep venue refusal, contract-cap entry
-gate, fail-closed position reads, and safe defaults."""
+"""Overnight-drift decision-module tests: entry/exit windows, loss-streak halt,
+once-per-session guard, session roll, stop sizing. (Supersedes the old standalone
+16:00->09:30 runner tests; that window violated the flatten rule — the evening
+18:00->06:00 slice does not.)"""
 from __future__ import annotations
 
-import dataclasses
+from datetime import datetime
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import overnight_drift as od
-import projectx_executor as px
+
+ET = ZoneInfo("America/New_York")
 
 
-def test_refuses_projectx_gateway(monkeypatch):
-    monkeypatch.setattr(
-        px, "CONFIG",
-        dataclasses.replace(px.CONFIG, projectx_username="", projectx_api_key=""))
-    b = px.ProjectXBroker()
-    reason = od.broker_refused(b)
-    assert reason is not None and "flatten rule" in reason
+def _cfg(**kw):
+    base = dict(overnight_drift_symbol="MNQ", overnight_drift_entry_et="18:00",
+                overnight_drift_exit_et="06:00", overnight_drift_entry_window_min=60,
+                overnight_drift_stop_usd=500.0, overnight_drift_max_losing_nights=2,
+                overnight_drift_contracts=1)
+    base.update(kw)
+    return SimpleNamespace(**base)
 
 
-def test_allows_non_projectx_adapter():
-    class NonPropBroker:          # a future non-prop adapter — different class
-        pass
-    assert od.broker_refused(NonPropBroker()) is None
+def _strat(tmp_path, **kw):
+    od.STATE_PATH = tmp_path / "od.json"          # isolate persistent state
+    return od.OvernightDrift(_cfg(**kw))
 
 
-def test_run_exits_on_projectx_even_when_enabled(monkeypatch, capsys):
-    monkeypatch.setattr(
-        px, "CONFIG",
-        dataclasses.replace(px.CONFIG, projectx_username="", projectx_api_key=""))
-    monkeypatch.setattr(od, "ENABLED", True)
-    od.run()                      # must return immediately, never enter the loop
-    out = capsys.readouterr().out
-    assert "REFUSING to run" in out
+def _dt(y, mo, d, h, mi=0):
+    return datetime(y, mo, d, h, mi, tzinfo=ET)
 
 
-class _Broker:
-    def __init__(self, positions):
-        self._positions = positions
-
-    def get_positions(self):
-        return self._positions
+def test_enter_in_window_when_flat(tmp_path):
+    s = _strat(tmp_path)
+    assert s.should_enter(_dt(2026, 7, 21, 18, 5), is_flat=True)[0]   # Tue 18:05
 
 
-def test_entry_blocked_at_contract_cap(monkeypatch):
-    monkeypatch.setattr(od, "QTY", 1)
-    monkeypatch.setattr(od, "MAX_ACCOUNT_CONTRACTS", 5)
-    b = _Broker([{"qty": 3}, {"qty": 2}])          # 5 open + 1 new > 5
-    assert "exceed" in od.entry_blocked(b)
+def test_no_enter_outside_window(tmp_path):
+    s = _strat(tmp_path)
+    assert not s.should_enter(_dt(2026, 7, 21, 20, 0), is_flat=True)[0]  # past 18:00+60
+    assert not s.should_enter(_dt(2026, 7, 21, 10, 0), is_flat=True)[0]
 
 
-def test_entry_allowed_below_cap(monkeypatch):
-    monkeypatch.setattr(od, "QTY", 1)
-    monkeypatch.setattr(od, "MAX_ACCOUNT_CONTRACTS", 5)
-    b = _Broker([{"qty": 2}])
-    assert od.entry_blocked(b) is None
+def test_no_enter_when_not_flat(tmp_path):
+    s = _strat(tmp_path)
+    assert not s.should_enter(_dt(2026, 7, 21, 18, 5), is_flat=False)[0]
 
 
-def test_entry_fails_closed_on_position_read_error(monkeypatch):
-    class _Boom:
-        def get_positions(self):
-            raise RuntimeError("api down")
-    assert "fail closed" in od.entry_blocked(_Boom())
+def test_no_enter_saturday(tmp_path):
+    s = _strat(tmp_path)
+    assert not s.should_enter(_dt(2026, 7, 25, 18, 5), is_flat=True)[0]  # Saturday
 
 
-def test_dry_run_is_the_default(monkeypatch):
-    monkeypatch.delenv("OD_DRY", raising=False)
-    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: None)  # ignore .env
-    import importlib
-    mod = importlib.reload(od)
-    try:
-        assert mod.DRY is True    # unset env → logs, never trades
-    finally:
-        importlib.reload(od)      # restore module state for other tests
+def test_once_per_session(tmp_path):
+    s = _strat(tmp_path)
+    now = _dt(2026, 7, 21, 18, 5)
+    assert s.should_enter(now, True)[0]
+    s.mark_entered(now)
+    assert not s.should_enter(_dt(2026, 7, 21, 18, 30), True)[0]        # same session
+
+
+def test_loss_streak_halt(tmp_path):
+    s = _strat(tmp_path)
+    s.record_result(-500.0)
+    assert not s.halted()
+    s.record_result(-300.0)
+    assert s.halted()
+    assert not s.should_enter(_dt(2026, 7, 22, 18, 5), True)[0]
+    s.record_result(+400.0)          # a win resets the streak
+    assert not s.halted() and s.consecutive_losses == 0
+
+
+def test_exit_at_or_after_0600(tmp_path):
+    s = _strat(tmp_path)
+    assert s.should_exit(_dt(2026, 7, 22, 6, 5), have_position=True)
+    assert not s.should_exit(_dt(2026, 7, 22, 3, 0), have_position=True)   # before 06:00
+    assert not s.should_exit(_dt(2026, 7, 22, 6, 5), have_position=False)
+
+
+def test_session_roll_18et(tmp_path):
+    s = _strat(tmp_path)
+    assert str(s.session_date(_dt(2026, 7, 21, 18, 5))) == "2026-07-22"
+    assert str(s.session_date(_dt(2026, 7, 21, 10, 0))) == "2026-07-21"
+
+
+def test_stop_points(tmp_path):
+    s = _strat(tmp_path)
+    assert s.stop_points(2.0) == 250.0     # $500 / $2 per point (MNQ) = 250 pts

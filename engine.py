@@ -121,6 +121,22 @@ class Engine:
             else None
         )
         self._flow_reads: dict[str, FlowRead] = {}
+        # Overnight-drift scheduled strategy (the one research edge; OFF by default,
+        # runs independent of entry_engine). Its entry is a first-class engine
+        # position (native stop + naked-guard + Topstep MLL/DLL layer all apply).
+        self._overnight = None
+        if CONFIG.overnight_drift_enabled:
+            try:
+                from overnight_drift import OvernightDrift
+                self._overnight = OvernightDrift(CONFIG)
+                notify("🌙 Overnight-drift ENABLED "
+                       f"({CONFIG.overnight_drift_contracts}x {CONFIG.overnight_drift_symbol} "
+                       f"{CONFIG.overnight_drift_entry_et}->{CONFIG.overnight_drift_exit_et} ET | "
+                       f"${CONFIG.overnight_drift_stop_usd:.0f} stop | "
+                       f"halt after {CONFIG.overnight_drift_max_losing_nights} losing nights)")
+            except Exception as e:  # noqa: BLE001
+                notify(f"⚠ overnight-drift init failed ({e}) — disabled")
+                self._overnight = None
         self._uw = None     # UWFlowFeed when UW_FLOW_ENABLED=true + UW_API_KEY set
         self._account_key: str = ""              # broker account id (account_history key)
         self._last_equity_record: float = 0.0    # throttle for state.record_equity
@@ -581,6 +597,14 @@ class Engine:
         # 0. reconcile provisional entries against real broker fills
         self._reconcile_fills()
 
+        # Overnight-drift scheduled strategy (independent of the signal funnel).
+        # Runs after reconcile/naked-guard/Topstep-risk so it sees fresh state.
+        if self._overnight is not None:
+            try:
+                self._overnight_drift_step()
+            except Exception as _e:  # noqa: BLE001
+                notify(f"⚠ overnight-drift step failed: {_e}")
+
         # 1. regime + circuit breaker. A None move = data outage (NOT a genuine 0%
         #    move) → fail CLOSED: force the breaker RED so no new entries fire blind
         #    during a feed blackout (open positions are still managed/flattened).
@@ -866,6 +890,92 @@ class Engine:
                 notify(trade_ticket(pos, sig.confidence, sig.confidence_label))
 
         self.state.save()
+
+    # ── overnight-drift scheduled strategy ──
+    def _overnight_drift_step(self) -> None:
+        """LONG `contracts` of the symbol at the 18:00 ET session open, exit at
+        06:00 ET, fixed $-stop (native bracket via executor.open), loss-streak halt.
+        The entry is a first-class engine position — the naked-guard, reconcile and
+        Topstep trailing-MLL/DLL layer all manage it. Gated by OVERNIGHT_DRIFT_ENABLED.
+
+        WARNING: real orders on a live account. Validated in-sample only (holdout
+        spent) — intended as a sim/eval FORWARD test. Kill criteria in the bookmark."""
+        from zoneinfo import ZoneInfo as _ZIod
+        from executor import dollar_value_per_point
+        strat = self._overnight
+        sym = strat.symbol
+        now = datetime.now(_ZIod("America/New_York"))
+        od_pos = next((p for p in self.state.open_positions
+                       if p.symbol == sym and not p.shadow
+                       and getattr(p, "kind", "") == "overnight"), None)
+
+        # ── EXIT leg (06:00 ET) ──────────────────────────────────────────
+        if strat.should_exit(now, od_pos is not None):
+            mark = self._mark(sym)
+            if mark is None or mark <= 0:
+                notify("⚠ overnight-drift: no exit mark — retry next cycle")
+                return
+            try:
+                entry, qty = od_pos.entry_price, od_pos.qty
+                pv = dollar_value_per_point(sym)
+                self.executor.close(od_pos, mark, self.state)
+                pnl = (mark - entry) * qty * pv        # long
+                strat.record_result(pnl, now)
+                self.state.save()
+                notify(f"🌙 overnight-drift EXIT {sym} @ ~{mark:.2f} "
+                       f"pnl≈${pnl:+.0f} | losing-streak={strat.consecutive_losses}")
+            except Exception as e:  # noqa: BLE001
+                notify(f"⚠ overnight-drift exit failed ({e}) — retry next cycle")
+            return
+
+        # ── ENTRY leg (18:00 ET) ─────────────────────────────────────────
+        is_flat = not any(p.symbol == sym and not p.shadow
+                          for p in self.state.open_positions)
+        ok, reason = strat.should_enter(now, is_flat)
+        if not ok:
+            return
+        # Safety: never enter into a day-halt / failed-equity / kill state.
+        if self._topstep is not None and (self._topstep_day_halt or self._equity_blocked):
+            return
+        mark = self._mark(sym)
+        if mark is None or mark <= 0:
+            notify("⚠ overnight-drift: no entry mark — skip tonight")
+            return
+        pv = dollar_value_per_point(sym)
+        stop_pts = strat.stop_points(pv)              # $500 → 250 pts (MNQ)
+        risk_usd = strat.contracts * strat.stop_usd   # worst-case = the native stop
+        # Topstep MLL floor + DLL headroom pre-checks (same as the entry funnel).
+        if self._topstep is not None:
+            eq_chk, _u = self._account_equity()
+            if (eq_chk - risk_usd) <= self._topstep.mll_floor():
+                notify(f"  overnight-drift skip (worst-case ${risk_usd:,.0f} breaches "
+                       f"trailing-MLL floor ${self._topstep.mll_floor():,.0f})")
+                return
+            if CONFIG.topstep_responsible_trading:
+                day_pnl = eq_chk - self._topstep.day_start_equity
+                headroom = CONFIG.topstep_daily_loss_limit + day_pnl
+                if risk_usd >= headroom:
+                    notify(f"  overnight-drift skip (worst-case ${risk_usd:,.0f} > DLL "
+                           f"headroom ${max(headroom, 0):,.0f})")
+                    return
+        from signals import Signal
+        sig = Signal(symbol=sym, asset="equity", side="BUY", price=mark,
+                     confidence=1.0, kind="overnight", atr=stop_pts,
+                     thesis="overnight-drift evening slice 18:00->06:00 ET")
+        try:
+            pos = self.executor.open(sig, 0.0, self.state, risk_mult=1.0,
+                                     max_contracts=strat.contracts,
+                                     fixed_qty=strat.contracts, fixed_stop_pts=stop_pts)
+        except Exception as e:  # noqa: BLE001
+            notify(f"⚠ overnight-drift entry failed ({e})")
+            return
+        if pos is None:
+            notify("  overnight-drift skip (order rejected — no position)")
+            return
+        strat.mark_entered(now)
+        self.state.save()
+        notify(f"🌙 overnight-drift ENTRY LONG {pos.qty} {sym} @ ~{mark:.2f} | "
+               f"${strat.stop_usd:.0f} stop | exit {strat.exit_min // 60:02d}:00 ET")
 
     # ── live order-flow → ML micro-feature dict ──
     def _micro_for(self, sym: str) -> dict | None:
