@@ -2306,3 +2306,71 @@ in BOTH windows) but NOT stable market-neutral alpha, and remains Topstep-imposs
 the tail. Holdout is now SPENT -- no further OOS test is available on this data. Any
 future overnight work must treat it as regime-dependent long BETA with a fat gap tail,
 sized accordingly, in a venue whose risk limits tolerate overnight gaps (fork B).
+
+---
+
+## R32 — PRE-REGISTERED 2026-07-23 (before test code): commodity time-series
+## momentum (TSMOM), expressed as Topstep session-long holds on MICROS
+
+TRIGGER: this is NEW DATA TYPE + NEW MECHANISM (the resume conditions): free Yahoo
+daily continuous futures, 2000-2026 (~6500 closes/mkt, 17/17 board symbols verified
+2026-07-23), covering the COMMODITY complex we have never tested. User constraint:
+$0 data budget, no Combine fees on unvalidated ideas.
+
+MECHANISM (named counterparty, documented): time-series momentum -- hedging-pressure
+risk premium + slow information diffusion (Moskowitz-Ooi-Pedersen 2012; Hurst et al.
+century evidence). Commodity trends persist because commercial hedgers pay speculators
+to absorb inventory risk, and supply shocks diffuse slowly. Distinct from every
+mechanism previously tested here (all were equity-index intraday/overnight).
+
+TOPSTEP FIT (why this is not the overnight-drift bind): signal = daily close; hold =
+one full Globex session (18:00 ET evening open -> next-day ~16:10 ET flatten) which
+captures ~the close-to-close return. NO overnight-gap-across-flat exposure beyond the
+55-min maintenance break. Micros exist for the energy/metal legs: MCL($1/tick),
+MNG($1), MGC($1), MHG($1.25) -> a 1-micro position's normal daily range is $100-300,
+inside the $1k DLL. (ZW/grains have NO micro -> diagnostics only, not tradeable.)
+
+PRIMARY CLAIM (one, falsifiable): an equal-weight 1-micro-each basket of {CL, NG, GC,
+HG} traded long/short by the sign of the past 60-trading-day return, held every
+session, is profitable net of costs (micro comm $1.40 RT + 2-tick spread cost/side)
+with full-sample t>=2 AND positive mean in >=4 of 5 eras (2001-08, 09-15, 16-19,
+20-21, 22-26). Else KILL.
+
+PRE-REGISTERED TRIALS (all count toward deflated-Sharpe N): lookbacks {20d, 60d,
+252d} on the same basket = 3 trials. Per-market panels and vol-scaling are
+DIAGNOSTIC ONLY (no selection). Program trial count to date: 31 rounds + 3 screens
++ ~30 intraday configs; N_effective for DSR uses >=40.
+
+DATA CAVEAT (stated up front): Yahoo continuous series have an UNKNOWN roll method;
+roll gaps pollute close-to-close returns (worst for NG contango). Mitigations, fixed
+now: (a) sensitivity pass clipping |daily ret|>8% (roll-jump filter); (b) if the
+basket passes, the claim is only "screen-pass" -- confirmation must come from a
+FORWARD paper-log on ProjectX's own bars (free) before any live size. A screen-pass
+here does NOT authorize live trading by itself.
+
+KILL-FAST: if the 60d primary fails, the 20d/252d trials do not resurrect the idea;
+report and stop. No new lookbacks, no per-market cherry-picks, no long-only rescue.
+
+RESULT 2026-07-23 (oos/round32_commodity_tsmom.py): **KILL — significantly NEGATIVE.**
+Primary (lb=60): -$15.90/day, t=-3.23, 0/5 eras positive. lb=20: t=-3.59; lb=252:
+t=-3.77 (all three trials negative — no resurrection possible). Roll-jump clip
+sensitivity: t=-3.07, 1/5 eras. Per-market (diagnostic): every leg negative; GC least
+bad (t=-0.28, +$17.2/d in 2022-26 = the gold bull, i.e. beta not alpha); NG worst
+after costs.
+
+MECHANISM ATTRIBUTION (cost accounting, not a rescue): per-session cost is exact:
+comm $1.40 + 4-tick RT = $5.40-6.40/market/day -> basket drag $22.60/day. Gross
+(cost-added-back) mean ~ +$6.7/day, t ~ +1.4, ~4/5 eras positive — i.e. commodity
+TSMOM exists GROSS (consistent with MOP-2012 magnitudes, Sharpe ~0.3) but is
+INSIGNIFICANT at this scale and is annihilated by the DAILY RE-ENTRY COST that
+Topstep's flatten forces: a multi-WEEK signal (60d momentum flips rarely) pays a
+full spread+comm round-trip EVERY session instead of only on signal flips. Without
+the forced flatten the same signal's cost would be ~10 RTs/yr, not 252.
+
+THE RECURRING STRUCTURAL LAW (now shown in equities AND commodities, R26-R32): every
+premium we can detect lives at horizons LONGER than one Topstep session, and the
+daily flatten converts it into cost-dominated churn. This is the third independent
+demonstration (overnight equity drift, announcement premium, commodity TSMOM).
+Program total: 32 rounds + 3 screens. Commodity daily-hold TSMOM: CLOSED. The free
+daily cache (oos/data/free_daily/, 17 mkts 2000-2026) remains an asset for any
+future INTRA-session commodity hypothesis with a named mechanism.

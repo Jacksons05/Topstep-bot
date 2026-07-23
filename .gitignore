@@ -48,3 +48,4 @@ state.db
 data/recorded/
 .KILL_SWITCH.*
 forkc/data/
+oos/data/free_daily/
