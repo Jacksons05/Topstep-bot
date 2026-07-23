@@ -911,7 +911,7 @@ class Engine:
 
         # ── EXIT leg (06:00 ET) ──────────────────────────────────────────
         if strat.should_exit(now, od_pos is not None):
-            mark = self._mark(sym)
+            mark = self._bar_mark(sym)
             if mark is None or mark <= 0:
                 notify("⚠ overnight-drift: no exit mark — retry next cycle")
                 return
@@ -937,7 +937,7 @@ class Engine:
         # Safety: never enter into a day-halt / failed-equity / kill state.
         if self._topstep is not None and (self._topstep_day_halt or self._equity_blocked):
             return
-        mark = self._mark(sym)
+        mark = self._bar_mark(sym)
         if mark is None or mark <= 0:
             notify("⚠ overnight-drift: no entry mark — skip tonight")
             return
@@ -1303,6 +1303,30 @@ class Engine:
             return None
         q = self.data.quote(symbol)
         return q.price if q and q.price > 0 else None
+
+    def _bar_mark(self, symbol: str) -> float | None:
+        """Live mark, falling back to the last ProjectX bar close.
+
+        _mark() intentionally returns None for a futures root when the SignalR
+        order-flow feed has no fresh micro-price — which is EXACTLY the state at
+        the 18:00 ET reopen, when the feed is still reconnecting after the
+        17:00–18:00 maintenance break. The overnight strategy fires at that
+        moment, so a live-feed-only mark never arrives and the entry skips every
+        night (observed 2026-07-22). historical_bars() is a REAL futures price
+        (ProjectX history, includePartialBar=True → newest close is the current
+        price) — NOT the Alpaca equities phantom that _mark guards against — so
+        it is the correct reopen fallback for the overnight entry/exit marks.
+        Live feed still wins whenever it has data; history only fills the gap."""
+        live = self._mark(symbol)
+        if live is not None and live > 0:
+            return live
+        broker = getattr(self.executor, "broker", None)
+        if broker is None or not hasattr(broker, "historical_bars"):
+            return None
+        bars = broker.historical_bars(symbol, timeframe="1Min", limit=3)
+        closes = bars.get("close") or []
+        last = closes[-1] if closes else None
+        return float(last) if last and last > 0 else None
 
     def _live_projectx(self) -> bool:
         """True only when executing against a real (non-mock) ProjectX account."""
