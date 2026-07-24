@@ -41,6 +41,7 @@ from futures_symbols import (
     mini_equivalents,
 )
 from flow_risk import FlowRiskManager, FlowRead
+import key_levels
 from state import Position, State
 from regime_strategy import (
     get_regime_params,
@@ -111,6 +112,12 @@ class Engine:
         # no feed the event is simply never set early and behavior is
         # identical to a plain time.sleep(next_interval()).
         self._wake_event = threading.Event()
+        # Live key-levels context (key_levels.py): prior-session reference
+        # levels + today's developing range/value-area, computed from bars
+        # already fetched in _prescreen (no extra network). PURE OBSERVABILITY
+        # -- surfaced via notify/dashboard, does not gate or trigger entries.
+        self._key_levels: dict[str, key_levels.KeyLevels] = {}
+        self._key_levels_date: date | None = None
         # Flow-risk overlays (flow_risk.py): A10 vol-target sizing (folded into
         # the futures risk multiplier, de-risk only) + A8 toxicity veto. Reads
         # are computed from the bars already fetched in _prescreen (no extra
@@ -1026,6 +1033,34 @@ class Engine:
             return None
         return sum(seg_c[i] * seg_v[i] for i in range(len(seg_c))) / tv
 
+    def _update_key_levels(self, sym: str, bars: dict) -> None:
+        """Refresh key_levels.py's live context for this symbol.
+
+        Prior-session reference levels (PDH/PDL/POC/VAH/VAL) are settled once
+        per session and need a wide bars pull to reach back through the full
+        prior RTH session, so that fetch only happens once (cached) per
+        Topstep session date. Today's developing range/value-area updates
+        every cycle from the bars _prescreen already fetched — no extra
+        network cost. Pure context: does not gate or trigger any entry."""
+        today = self._topstep_session_date()
+        if self._key_levels_date != today:
+            self._key_levels_date = today
+            self._key_levels = {}
+        kl = self._key_levels.get(sym)
+        if kl is None:
+            broker = self.executor.broker
+            if hasattr(broker, "historical_bars"):
+                wide = broker.historical_bars(sym, timeframe=CONFIG.scalp_timeframe, limit=500)
+            else:
+                wide = self.data.bars(sym, timeframe=CONFIG.scalp_timeframe, limit=500)
+            kl = key_levels.prior_session_levels(wide) or key_levels.KeyLevels()
+            self._key_levels[sym] = kl
+            if kl.pdh is not None:
+                notify(f"📍 {sym} key levels: {kl.summary()}")
+        dev = key_levels.developing_levels(bars, today)
+        if dev is not None:
+            kl.today_hi, kl.today_lo, kl.today_poc, kl.today_vah, kl.today_val = dev
+
     # ── stage 1: cheap quant prescreen (no LLM/news) ──
     def _prescreen(self, sym: str):
         """Fast pass run on the WHOLE universe: bars + indicators only.
@@ -1047,6 +1082,13 @@ class Engine:
         micro = self._micro_for(sym)
         if self.recorder is not None:
             self.recorder.record(sym, bars, self._oflow.get(sym) if self._oflow else None)
+        # Live key-levels context: runs every cycle regardless of entry_engine
+        # (pure observability — see key_levels.py's module docstring for why
+        # this is deliberately NOT wired into the entry decision below).
+        try:
+            self._update_key_levels(sym, bars)
+        except Exception as exc:  # noqa: BLE001 - never let context tracking break the scan
+            notify(f"⚠ key-levels update failed for {sym}: {exc}")
         # ── Signal source ─────────────────────────────────────────────────
         if CONFIG.entry_engine == "off":
             # Round 21 verdict (HYPOTHESES.md): no candidate entry strategy has
