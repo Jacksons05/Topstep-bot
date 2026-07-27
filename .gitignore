@@ -34,6 +34,10 @@ topstep_day_state.json
 day_adapt.json
 overnight-drift.log
 
+# Round 33 forward-capture output (generated locally, grows daily)
+oos/round33_capture.csv
+oos/round33_capture_task.log
+
 # Singleton-lock PID file (bot-written; never track)
 ENGINE.lock
 
