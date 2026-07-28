@@ -1630,15 +1630,37 @@ class Engine:
                 pos.size_usd = round(b_qty * pos.entry_price, 2)
                 changed = True
                 continue
-            # No broker position, or side flipped: the local position is gone.
-            mark = self._mark(pos.symbol)
-            exit_price = mark if mark is not None else pos.entry_price
+            # No broker position, or side flipped: the local position is gone
+            # -- most likely its resting protective stop fired (or Topstep
+            # liquidated it). Try the REAL fill price for that stop order
+            # first; only fall back to the current mark (which can be stale
+            # in a thin/cold overnight session) when the real fill isn't
+            # visible yet. Observed live 2026-07-27: a real $502 stop-loss
+            # reconciled as pnl=$0.00 because the mark grabbed here was still
+            # sitting near the entry price -- and that wrong pnl flows
+            # straight into _topstep.record_close() below, so the risk
+            # layer's own loss-streak counter never saw the loss happen.
+            exit_price = None
+            price_src = "mark estimate"
+            pid = getattr(pos, "protective_order_id", "")
+            if pid:
+                fill_fn = getattr(broker, "_avg_fill_price", None)
+                if callable(fill_fn):
+                    try:
+                        exit_price = fill_fn(pid)
+                        if exit_price is not None:
+                            price_src = "real stop fill"
+                    except Exception:  # noqa: BLE001 - fall through to the mark estimate
+                        exit_price = None
+            if exit_price is None:
+                mark = self._mark(pos.symbol)
+                exit_price = mark if mark is not None else pos.entry_price
             self.state.close(pos, exit_price)
             if self._topstep is not None:
                 self._topstep.record_close(pos.pnl_usd, hold_seconds(pos.opened_at))
             notify(f"♻ reconcile: phantom {pos.symbol} not at broker "
                    f"({'side mismatch' if bp is not None else 'flat'}) — closed "
-                   f"locally @ ~{exit_price:.2f} pnl=${pos.pnl_usd:.2f}")
+                   f"locally @ ~{exit_price:.2f} ({price_src}) pnl=${pos.pnl_usd:.2f}")
             if getattr(pos, "protective_order_id", ""):
                 # Position vanished while a native stop was resting — the stop
                 # (or Topstep liquidation) presumably took it out. Count it:

@@ -306,6 +306,126 @@ def test_reconcile_real_size_change_still_adopted(monkeypatch):
     assert pos.qty == pytest.approx(1.0), "broker qty must be adopted for a genuine size change"
 
 
+# ── Phantom-close uses the real stop fill, not a stale mark (2026-07-27 incident) ──
+
+def test_phantom_close_uses_real_stop_fill_price_when_available(monkeypatch):
+    """A position that vanished while a protective stop was resting must be
+    closed at that stop's REAL fill price, not the current mark -- a stale
+    mark can silently under-report the loss into the risk layer. Observed
+    live: a real $502 loss reconciled as pnl=$0.00 because the mark grabbed
+    at reconcile time was still sitting near the entry price."""
+    import engine as eng
+    from state import Position
+
+    e = eng.Engine.__new__(eng.Engine)
+    closes = []
+    e._topstep = type("T", (), {"record_close": lambda self, pnl, hold: closes.append(pnl)})()
+    e._exit_ambiguous = set()
+    e.state = State()
+    e.state.save = lambda: None
+
+    pos = Position(
+        symbol="MNQ", asset="future", side="BUY", qty=1,
+        entry_price=28218.75, size_usd=28218.75, stop=0.0, target=0.0,
+        kind="test", thesis="", opened_at="2026-01-01T00:00:00+00:00", mode="paper",
+        protective_order_id="STOP-123",
+    )
+    e.state.add(pos)
+
+    class _FakeBroker:
+        def get_positions(self):
+            return []  # position is gone -- the stop fired
+
+        def _avg_fill_price(self, order_id):
+            assert order_id == "STOP-123"
+            return 27967.75  # the REAL stop fill
+
+    e.executor = type("E", (), {"broker": _FakeBroker()})()
+    e._live_projectx = lambda: True
+    # A deliberately misleading mark, close to the ENTRY price -- if the fix
+    # regresses to using this, the test below catches it immediately.
+    e._mark = lambda sym: 28218.50
+
+    e._reconcile_positions()
+    assert not pos.open
+    # MNQ multiplier $2/pt * (28218.75 - 27967.75) = 251.0 pts loss
+    assert pos.pnl_usd == pytest.approx(-502.0, abs=1.0)
+    assert closes == [pytest.approx(-502.0, abs=1.0)], (
+        "the risk layer's record_close() must see the REAL loss, not a "
+        "mark-based near-zero estimate"
+    )
+
+
+def test_phantom_close_falls_back_to_mark_when_no_real_fill_visible(monkeypatch):
+    """When the real fill isn't visible yet (or the broker doesn't support
+    the lookup), the existing mark-based estimate must still work -- this
+    fix must not make a phantom-close fail when the fast path is unavailable."""
+    import engine as eng
+    from state import Position
+
+    e = eng.Engine.__new__(eng.Engine)
+    e._topstep = None
+    e._exit_ambiguous = set()
+    e.state = State()
+    e.state.save = lambda: None
+
+    pos = Position(
+        symbol="MNQ", asset="future", side="BUY", qty=1,
+        entry_price=28218.75, size_usd=28218.75, stop=0.0, target=0.0,
+        kind="test", thesis="", opened_at="2026-01-01T00:00:00+00:00", mode="paper",
+        protective_order_id="STOP-123",
+    )
+    e.state.add(pos)
+
+    class _FakeBroker:
+        def get_positions(self):
+            return []
+
+        def _avg_fill_price(self, order_id):
+            return None  # not visible yet
+
+    e.executor = type("E", (), {"broker": _FakeBroker()})()
+    e._live_projectx = lambda: True
+    e._mark = lambda sym: 28100.0
+
+    e._reconcile_positions()
+    assert not pos.open
+    assert pos.pnl_usd == pytest.approx((28100.0 - 28218.75) * 2.0, abs=0.5)
+
+
+def test_phantom_close_falls_back_to_mark_without_protective_order_id():
+    """A position with no recorded protective_order_id (e.g. it was never
+    protected, or the field predates this fix) must use the old mark-based
+    path unchanged -- no crash, no attempted lookup."""
+    import engine as eng
+    from state import Position
+
+    e = eng.Engine.__new__(eng.Engine)
+    e._topstep = None
+    e._exit_ambiguous = set()
+    e.state = State()
+    e.state.save = lambda: None
+
+    pos = Position(
+        symbol="MNQ", asset="future", side="BUY", qty=1,
+        entry_price=28218.75, size_usd=28218.75, stop=0.0, target=0.0,
+        kind="test", thesis="", opened_at="2026-01-01T00:00:00+00:00", mode="paper",
+    )
+    e.state.add(pos)
+
+    class _FakeBroker:
+        def get_positions(self):
+            return []
+
+    e.executor = type("E", (), {"broker": _FakeBroker()})()
+    e._live_projectx = lambda: True
+    e._mark = lambda sym: 28100.0
+
+    e._reconcile_positions()
+    assert not pos.open
+    assert pos.pnl_usd == pytest.approx((28100.0 - 28218.75) * 2.0, abs=0.5)
+
+
 # ── day_state.json corruption defense ─────────────────────────────────────────
 
 def test_load_day_state_ignores_non_dict_json(tmp_path, monkeypatch):
