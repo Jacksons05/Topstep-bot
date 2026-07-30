@@ -2412,12 +2412,19 @@ account-wide). No stop/target -- parameter-light, kill the mechanism before
 bracketing anything, same discipline as the ES screen.
 
 **Data source: FORWARD-ONLY, $0.** No Databento, no paid feed of any kind.
-Captured live via the desktop's own ProjectX connection (already-paid account
-access, not metered per-call) -- oos/round33_broad_ib_capture.py runs locally
-via Windows Task Scheduler (NOT WSL/systemd -- this stays on the desktop per
-account-holder directive), logging IB range, empirically-detected session
-open, which side broke (30m and 60m separately), and both books' outcomes,
-appended daily to a local CSV. Free Yahoo intraday history (~60-day lookback)
+Captured live via the ProjectX connection the account already pays for (not
+metered per-call). AMENDED 2026-07-29: originally a standalone script on a
+separate Windows-desktop process/credentials; moved INTO the live WSL engine
+(round33_capture.py, called from engine._maybe_run_round33_capture()) after
+the desktop process fought the live engine over TopstepX's one-active-
+session-per-API-key limit -- a second independent login on the same key kept
+getting rejected while the engine's own session stayed valid. Runs once per
+session inside the SAME long-lived engine process, reusing its own
+already-authenticated connection: no second process, no second key, no
+session conflict, by construction. Same frozen mechanism, only the execution
+path changed. Logs IB range, empirically-detected session open, which side
+broke (30m and 60m separately), and both books' outcomes, appended daily to a
+local CSV. Free Yahoo intraday history (~60-day lookback)
 is explicitly NOT used as a backtest substitute -- R32 already documented why
 continuous-series roll artifacts make that data untrustworthy for this kind of
 test; there is no honest historical version of this test, only forward.
@@ -2444,5 +2451,8 @@ judgment. Fail on the first window -> dead, matches every other round's no-
 resurrection discipline; the confirmation-window requirement only applies to
 an apparent PASS, not to rescuing a fail.
 
-**Runner:** oos/round33_broad_ib_capture.py (to be written; capture only, no
-backtest -- the analysis/judgment script comes later once >=40 days exist).
+**Runner:** round33_capture.py (repo root, moved 2026-07-29 from
+oos/round33_broad_ib_capture.py -- see the AMENDED data-source note above),
+called from engine._maybe_run_round33_capture() once per session inside the
+live WSL engine. Capture only, no backtest -- the analysis/judgment script
+comes later once >=40 days exist.

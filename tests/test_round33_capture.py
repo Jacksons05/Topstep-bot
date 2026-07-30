@@ -4,13 +4,10 @@ detection, IB computation, and first-break detection -- since the capture
 script's entire value is in these facts being recorded accurately."""
 from __future__ import annotations
 
-import sys
 from datetime import date, datetime, timedelta
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "oos"))
-import round33_broad_ib_capture as r33  # noqa: E402
+import round33_capture as r33
 
 _ET = ZoneInfo("America/New_York")
 
@@ -111,3 +108,175 @@ def test_first_break_returns_none_entry_when_break_is_the_last_bar_so_far():
 def test_universe_has_33_unique_symbols():
     assert len(r33.UNIVERSE) == 33
     assert len(set(r33.UNIVERSE)) == 33  # no accidental duplicates
+
+
+# ── run_capture: broker-injected entry point (used by engine._maybe_run_round33_capture) ──
+def test_run_capture_uses_the_injected_broker_not_its_own(monkeypatch, tmp_path):
+    """run_capture() must work off whatever broker it's handed -- the whole
+    point of moving this into the engine is reusing ITS connection, not
+    building a new one."""
+    calls = []
+
+    class _StubBroker:
+        def historical_bars(self, symbol, timeframe="5Min", limit=200, **kw):
+            calls.append(symbol)
+            return {}  # empty -> "no bars" rows, but proves each symbol was hit
+
+        def contract_id(self, symbol):
+            return None
+
+    monkeypatch.setattr(r33, "CSV_PATH", tmp_path / "capture.csv")
+    summary = r33.run_capture(_StubBroker(), today=date(2026, 7, 29))
+    assert set(calls) == set(r33.UNIVERSE)
+    assert "2026-07-29" in summary
+    assert (tmp_path / "capture.csv").exists()
+
+
+# ── already_captured: durable (file-based) once-per-day guard ─────────────
+def test_already_captured_false_when_csv_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(r33, "CSV_PATH", tmp_path / "nope.csv")
+    assert r33.already_captured(date(2026, 7, 29)) is False
+
+
+def test_already_captured_true_after_a_real_capture(tmp_path, monkeypatch):
+    monkeypatch.setattr(r33, "CSV_PATH", tmp_path / "capture.csv")
+
+    class _StubBroker:
+        def historical_bars(self, *a, **kw):
+            return {}
+
+        def contract_id(self, symbol):
+            return None
+
+    r33.run_capture(_StubBroker(), today=date(2026, 7, 29))
+    assert r33.already_captured(date(2026, 7, 29)) is True
+    assert r33.already_captured(date(2026, 7, 30)) is False  # different day, untouched
+
+
+def test_run_capture_is_a_noop_on_a_second_call_for_the_same_day(tmp_path, monkeypatch):
+    """This is the actual bug this guard exists to prevent: a restart landing
+    after 16:30 ET on a day already captured must not duplicate the rows."""
+    monkeypatch.setattr(r33, "CSV_PATH", tmp_path / "capture.csv")
+    calls = []
+
+    class _StubBroker:
+        def historical_bars(self, symbol, *a, **kw):
+            calls.append(symbol)
+            return {}
+
+        def contract_id(self, symbol):
+            return None
+
+    r33.run_capture(_StubBroker(), today=date(2026, 7, 29))
+    first_call_count = len(calls)
+    assert first_call_count == len(r33.UNIVERSE)
+
+    summary = r33.run_capture(_StubBroker(), today=date(2026, 7, 29))
+    assert len(calls) == first_call_count, "second call must not touch the broker at all"
+    assert "already captured" in summary
+
+
+# ── engine._maybe_run_round33_capture: once-per-session, time-gated, no second connection ──
+def _bare_engine():
+    import engine as eng
+    e = eng.Engine.__new__(eng.Engine)
+    e._round33_last_capture_date = None
+    return e
+
+
+class _LiveStubBroker:
+    """Looks like a real (non-mock) ProjectXBroker to the gate checks."""
+    _mock_mode = False
+
+    def historical_bars(self, symbol, timeframe="5Min", limit=200, **kw):
+        return {}
+
+
+def test_round33_capture_skipped_before_1630_et(monkeypatch):
+    import engine as eng
+    import round33_capture as r33mod
+
+    e = _bare_engine()
+    e.executor = type("E", (), {"broker": _LiveStubBroker()})()
+    calls = []
+    monkeypatch.setattr(r33mod, "run_capture", lambda broker, today=None: calls.append(today))
+    monkeypatch.setattr(eng, "datetime", type("D", (), {
+        "now": staticmethod(lambda tz=None: datetime(2026, 7, 29, 16, 0, tzinfo=r33mod._ET))}))
+
+    e._maybe_run_round33_capture()
+    assert calls == []
+    assert e._round33_last_capture_date is None
+
+
+def test_round33_capture_runs_once_after_1630_et_then_skips_same_day(monkeypatch):
+    import engine as eng
+    import round33_capture as r33mod
+
+    e = _bare_engine()
+    e.executor = type("E", (), {"broker": _LiveStubBroker()})()
+    calls = []
+    monkeypatch.setattr(r33mod, "run_capture",
+                         lambda broker, today=None: calls.append(today) or "summary")
+    monkeypatch.setattr(eng, "datetime", type("D", (), {
+        "now": staticmethod(lambda tz=None: datetime(2026, 7, 29, 16, 45, tzinfo=r33mod._ET))}))
+
+    e._maybe_run_round33_capture()
+    assert calls == [date(2026, 7, 29)]
+    assert e._round33_last_capture_date == date(2026, 7, 29)
+
+    e._maybe_run_round33_capture()  # same day, later cycle -- must NOT re-run
+    assert calls == [date(2026, 7, 29)]
+
+
+def test_round33_capture_uses_plain_calendar_date_not_session_date(monkeypatch):
+    """Regression for the 2026-07-29 bug: a late-evening check (well past
+    18:00 ET, when _topstep_session_date() has already rolled to tomorrow)
+    must still tag the capture with TODAY's calendar date -- capture_symbol
+    filters bars by the actual date they printed on, not a rolled-forward
+    session label. Using the session date here mislabeled every row as
+    tomorrow and every symbol came back 'no bars' (looking for a day that
+    hadn't started yet)."""
+    import engine as eng
+    import round33_capture as r33mod
+
+    e = _bare_engine()
+    e.executor = type("E", (), {"broker": _LiveStubBroker()})()
+    # A session-date getter that would (wrongly, if it were consulted) roll
+    # forward -- asserts it's never even called by this method anymore.
+    e._topstep_session_date = lambda: (_ for _ in ()).throw(
+        AssertionError("must not consult session date -- use the plain calendar date"))
+    calls = []
+    monkeypatch.setattr(r33mod, "run_capture",
+                         lambda broker, today=None: calls.append(today) or "summary")
+    # 22:33 ET, well past the 18:00 session roll -- the actual bug's timing.
+    monkeypatch.setattr(eng, "datetime", type("D", (), {
+        "now": staticmethod(lambda tz=None: datetime(2026, 7, 29, 22, 33, tzinfo=r33mod._ET))}))
+
+    e._maybe_run_round33_capture()
+    assert calls == [date(2026, 7, 29)], "must capture TODAY's date, not tomorrow's session label"
+
+
+def test_round33_capture_skipped_when_broker_has_no_live_connection():
+    """Sim/paper fallback or mock-mode broker -- must not attempt a capture
+    (there's nothing real to capture, and no reason to touch round33_capture
+    at all)."""
+    e = _bare_engine()
+
+    class _MockBroker:
+        _mock_mode = True
+
+        def historical_bars(self, *a, **kw):
+            raise AssertionError("must not be called in mock mode")
+
+    e.executor = type("E", (), {"broker": _MockBroker()})()
+    e._maybe_run_round33_capture()  # must not raise, must not set the guard
+    assert e._round33_last_capture_date is None
+
+
+def test_round33_capture_skipped_when_broker_lacks_historical_bars():
+    """A broker type with no historical_bars at all (e.g. the base Sim
+    executor) -- must not crash on the hasattr check."""
+    e = _bare_engine()
+    e.executor = type("E", (), {"broker": object()})()
+    e._maybe_run_round33_capture()
+    assert e._round33_last_capture_date is None

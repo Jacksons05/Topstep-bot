@@ -1,5 +1,5 @@
 """Round 33 (oos/HYPOTHESES.md): broad-universe opening-balance break, FORWARD
-CAPTURE ONLY. No backtest, no P&L judgment here -- this script's entire job is
+CAPTURE ONLY. No backtest, no P&L judgment here -- this module's entire job is
 to append one clean row of observed facts per (instrument, window) to a local
 CSV, once a day, after the 16:08 ET flatten. The analysis/judgment script gets
 written once >=40 trading days exist (see the PASS bar in HYPOTHESES.md).
@@ -13,33 +13,35 @@ result.
 
 Zero API cost: everything here comes off the ProjectX connection the Topstep
 account already pays for (contract search + historical bars), nothing paid,
-no Databento. Runs locally via Windows Task Scheduler, once per trading day,
-any time after 16:08 ET (the account-wide flatten) so the full day's bars are
-already final. Intended to run standalone, NOT through engine.py / run.py --
-it never builds an Engine, never touches state.py or the risk layer, and
-places no orders; it only reads.
+no Databento.
 
-Usage:
-    .venv\\Scripts\\python oos\\round33_broad_ib_capture.py
+RUNS INSIDE THE LIVE WSL ENGINE (as of 2026-07-29 -- was originally a
+standalone script on a separate Windows-desktop process with its own
+credentials, moved here after that setup fought with the WSL engine over
+TopstepX's one-session-per-API-key limit). engine.py calls run_capture()
+with its own already-authenticated broker, once per session, ~22min after
+the 16:08 ET flatten -- no separate process, no separate credentials, no
+second session. Read-only: never touches state.py or the risk layer, places
+no orders. Still runnable standalone for manual/ad-hoc capture (main() below
+builds its own broker), just not how it normally runs anymore.
+
+Usage (manual/standalone only):
+    .venv/bin/python round33_capture.py
 """
 from __future__ import annotations
 
 import csv
-import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent))
-
-import config  # noqa: E402
+import config
 config.load_dotenv()
 from config import CONFIG  # noqa: E402
 from projectx_executor import ProjectXBroker  # noqa: E402
 
 _ET = ZoneInfo("America/New_York")
-CSV_PATH = HERE / "round33_capture.csv"
+CSV_PATH = Path(__file__).resolve().parent / "oos" / "round33_capture.csv"
 
 # The 28 instruments confirmed live via /api/Contract/search on 2026-07-27
 # (see the Round 33 registration for the full rationale). Grouped only for
@@ -214,18 +216,30 @@ def append_rows(rows: list[dict]) -> None:
             w.writerow(r)
 
 
-def main() -> int:
-    if not (CONFIG.projectx_username and CONFIG.projectx_api_key):
-        print("PROJECTX_USERNAME/PROJECTX_API_KEY not set -- nothing to capture. "
-              "Fill these in .env yourself (never share them in chat).")
-        return 1
-    broker = ProjectXBroker()
-    if getattr(broker, "_mock_mode", True):
-        print("Broker came up in mock mode (bad/missing credentials?) -- aborting, "
-              "not writing placeholder rows.")
-        return 1
+def already_captured(today: date) -> bool:
+    """True if CSV_PATH already has any row for `today`. A DURABLE guard (the
+    file itself, not just in-memory state) -- engine._maybe_run_round33_capture
+    also tracks the date in memory, but that resets on every engine restart,
+    and a restart landing after 16:30 ET would otherwise re-capture and
+    duplicate the day's rows (observed 2026-07-29 doing exactly this during
+    manual testing)."""
+    if not CSV_PATH.exists():
+        return False
+    target = today.isoformat()
+    with open(CSV_PATH, newline="", encoding="utf-8") as f:
+        return any(row.get("date") == target for row in csv.DictReader(f))
 
-    today = datetime.now(_ET).date()
+
+def run_capture(broker, today: date | None = None) -> str:
+    """Capture all UNIVERSE symbols with an ALREADY-AUTHENTICATED broker (the
+    engine's own connection, or a standalone one from main() below) and
+    append the rows to CSV_PATH. Returns a one-line summary for the caller to
+    log/notify -- never raises, one bad symbol never loses the rest. A no-op
+    (with a clear summary) if `today` is already captured -- see
+    already_captured()."""
+    today = today or datetime.now(_ET).date()
+    if already_captured(today):
+        return f"Round 33 capture {today}: already captured, skipped (durable file guard)."
     all_rows = []
     for sym in UNIVERSE:
         try:
@@ -235,8 +249,24 @@ def main() -> int:
                              "notes": f"capture error: {exc}"})
     append_rows(all_rows)
     n_ok = sum(1 for r in all_rows if not r.get("notes", "").startswith(("no ", "capture error")))
-    print(f"Round 33 capture {today}: {len(all_rows)} rows written to {CSV_PATH} "
-          f"({n_ok} usable, {len(all_rows) - n_ok} skipped/errored).")
+    return (f"Round 33 capture {today}: {len(all_rows)} rows written to {CSV_PATH} "
+            f"({n_ok} usable, {len(all_rows) - n_ok} skipped/errored).")
+
+
+def main() -> int:
+    """Manual/standalone entry point -- builds its own broker connection.
+    Not how this normally runs anymore (see the module docstring); kept for
+    ad-hoc capture runs outside the live engine."""
+    if not (CONFIG.projectx_username and CONFIG.projectx_api_key):
+        print("PROJECTX_USERNAME/PROJECTX_API_KEY not set -- nothing to capture. "
+              "Fill these in .env yourself (never share them in chat).")
+        return 1
+    broker = ProjectXBroker()
+    if getattr(broker, "_mock_mode", True):
+        print("Broker came up in mock mode (bad/missing credentials?) -- aborting, "
+              "not writing placeholder rows.")
+        return 1
+    print(run_capture(broker))
     return 0
 
 

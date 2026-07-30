@@ -42,6 +42,7 @@ from futures_symbols import (
 )
 from flow_risk import FlowRiskManager, FlowRead
 import key_levels
+import round33_capture
 from state import Position, State
 from regime_strategy import (
     get_regime_params,
@@ -118,6 +119,13 @@ class Engine:
         # -- surfaced via notify/dashboard, does not gate or trigger entries.
         self._key_levels: dict[str, key_levels.KeyLevels] = {}
         self._key_levels_date: date | None = None
+        # Round 33 forward capture (round33_capture.py, oos/HYPOTHESES.md):
+        # once per session, well after the 16:08 ET flatten, using THIS
+        # engine's own already-authenticated broker connection -- not a
+        # separate process/credentials (moved here 2026-07-29 after a
+        # standalone desktop version fought with this engine over TopstepX's
+        # one-session-per-API-key limit). Pure read/log, no orders.
+        self._round33_last_capture_date: date | None = None
         # Flow-risk overlays (flow_risk.py): A10 vol-target sizing (folded into
         # the futures risk multiplier, de-risk only) + A8 toxicity veto. Reads
         # are computed from the bars already fetched in _prescreen (no extra
@@ -524,6 +532,13 @@ class Engine:
         # The one-shot flatten in executor.open() is not enough: during the MCL
         # incident a broker outage made that flatten a no-op and nothing retried.
         self._enforce_stops_or_flatten()
+
+        # Round 33 forward capture: once per session, well clear of the 16:08
+        # ET flatten, using this engine's own already-authenticated broker.
+        try:
+            self._maybe_run_round33_capture()
+        except Exception as exc:  # noqa: BLE001 - never let a research side-task break the cycle
+            notify(f"⚠ Round 33 capture failed: {exc}")
 
         # Refresh the Topstep day base (Daily Loss Limit anchor) each new session.
         # Keyed off the CME/Topstep SESSION date (rolls 18:00 ET), NOT the server
@@ -1060,6 +1075,34 @@ class Engine:
         dev = key_levels.developing_levels(bars, today)
         if dev is not None:
             kl.today_hi, kl.today_lo, kl.today_poc, kl.today_vah, kl.today_val = dev
+
+    def _maybe_run_round33_capture(self) -> None:
+        """Once per Topstep session, well clear of the 16:08 ET flatten (so
+        the full day's bars are final), run the Round 33 broad-universe
+        opening-balance capture using THIS engine's own already-authenticated
+        broker connection -- no separate process, no separate API key, no
+        second TopstepX session to conflict with this one. See
+        round33_capture.py's module docstring for why it moved here."""
+        broker = self.executor.broker
+        if not hasattr(broker, "historical_bars") or getattr(broker, "_mock_mode", True):
+            return  # sim/paper fallback or no live connection -- nothing to capture
+        now_et = datetime.now(round33_capture._ET)
+        # PLAIN ET calendar date, not _topstep_session_date() -- that rolls at
+        # 18:00 ET, which would relabel a late-evening capture (e.g. checked
+        # at 22:00 ET) as belonging to TOMORROW while capture_symbol filters
+        # bars by the actual calendar date the session happened on. Bug found
+        # and fixed 2026-07-29: a post-18:00 restart mislabeled the day and
+        # every symbol came back "no bars" (looking for a day that hadn't
+        # started yet). Calendar date doesn't roll until midnight ET, so a
+        # late check still correctly targets the session that already closed.
+        today = now_et.date()
+        if self._round33_last_capture_date == today:
+            return
+        if (now_et.hour, now_et.minute) < (16, 30):
+            return  # 22min buffer past the 16:08 ET flatten
+        self._round33_last_capture_date = today
+        summary = round33_capture.run_capture(broker, today=today)
+        notify(f"📊 {summary}")
 
     # ── stage 1: cheap quant prescreen (no LLM/news) ──
     def _prescreen(self, sym: str):
