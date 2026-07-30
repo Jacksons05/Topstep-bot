@@ -2374,3 +2374,75 @@ demonstration (overnight equity drift, announcement premium, commodity TSMOM).
 Program total: 32 rounds + 3 screens. Commodity daily-hold TSMOM: CLOSED. The free
 daily cache (oos/data/free_daily/, 17 mkts 2000-2026) remains an asset for any
 future INTRA-session commodity hypothesis with a named mechanism.
+
+---
+
+# Round 33 — Broad-universe opening-balance break, FORWARD CAPTURE (REGISTERED
+# 2026-07-27, before the capture script exists or any data is recorded)
+
+RATIONALE / PRIOR: identical mechanism to the Screen (2026-07-20) Initial-Balance
+break on ES, extended across the full Topstep-tradeable universe instead of one
+instrument. That screen was DECISIVE and DEAD on ES: n=3,899 first-breaks,
+continuation base rate 0.504 (coin flip), BOTH continuation (PF 0.926/0.857 at
+1/2-tick) and its exact mirror fade (PF 0.901/0.834) lose money, gross edge ~$4
+vs a $29 one-leg cost. This round is registered WITH that prior explicit up
+front: the working assumption is that this fails again, and it is run to see
+whether currencies/grains/metals/livestock -- structurally different session
+and participant bases than equity index futures -- behave differently, not
+because there is a fresh reason to expect a positive result.
+
+**Instrument universe** (confirmed live via ProjectX /api/Contract/search,
+2026-07-27; 33 products): equity indices ES/MES/NQ/MNQ/YM/MYM/RTY/M2K; energy
+CL/MCL/NG/MNG; metals GC/MGC/SI/HG/MHG/PL; rates ZB/ZN; currencies
+6E/M6E/6B/M6B/6J/6A/M6A/6C; grains ZC/ZS/ZW; livestock HE/LE.
+
+**Signal (mirrors the ES screen exactly, two window widths run in parallel):**
+IB = high/low of the first 30 min AND first 60 min after each product's own
+session open (two sub-tests per instrument). Session-open time per product is
+NOT hardcoded from an external source -- it is EMPIRICALLY DETECTED from that
+product's own live bar-volume profile (where volume actually steps up each
+day), computed by the capture script itself before logging begins, and
+recorded per-instrument so the assumption is auditable rather than trusted
+blind. First break of IBH/IBL after the window closes -> CONTINUATION book
+enters next-bar-open with the break; FADE book enters the exact mirror. One
+trade per book per instrument per day (first break only, matching the ES
+screen). Exit: 16:08 ET flatten, account-wide, every product, regardless of
+that product's own native session close (Topstep's daily flatten binds
+account-wide). No stop/target -- parameter-light, kill the mechanism before
+bracketing anything, same discipline as the ES screen.
+
+**Data source: FORWARD-ONLY, $0.** No Databento, no paid feed of any kind.
+Captured live via the desktop's own ProjectX connection (already-paid account
+access, not metered per-call) -- oos/round33_broad_ib_capture.py runs locally
+via Windows Task Scheduler (NOT WSL/systemd -- this stays on the desktop per
+account-holder directive), logging IB range, empirically-detected session
+open, which side broke (30m and 60m separately), and both books' outcomes,
+appended daily to a local CSV. Free Yahoo intraday history (~60-day lookback)
+is explicitly NOT used as a backtest substitute -- R32 already documented why
+continuous-series roll artifacts make that data untrustworthy for this kind of
+test; there is no honest historical version of this test, only forward.
+
+**Multiple-comparisons discipline (pre-registered -- 33 instruments x 2 windows
+x 2 books = up to 132 cells, so this matters):**
+- PRIMARY evidence is ONE pooled-panel test per book (continuation-pooled,
+  fade-pooled) across all instruments and both windows -- not per-instrument
+  p-values. Matches how R32 judged the commodity basket.
+- Per-instrument / per-window breakdowns are DIAGNOSTIC ONLY, no selection. An
+  outlier instrument reading "significant" while the pooled panel does not is
+  NOT a finding -- stated now so it cannot be cherry-picked after the data
+  comes in.
+- Costs computed per-instrument from real tick values (futures_symbols.py),
+  not a blanket number.
+
+**PASS bar:** n>=200 pooled trades minimum, collected over >=40 trading days of
+parallel forward capture across all instruments before any first read,
+standard significance (t-test AND 20k bootstrap) on the pooled panel, >=60% of
+weeks non-negative on the panel. Given the dead ES prior, ANY apparent pass on
+the first 40-day window is provisional only and requires a SECOND independent
+40-day confirmation window before being treated as real -- not a single-shot
+judgment. Fail on the first window -> dead, matches every other round's no-
+resurrection discipline; the confirmation-window requirement only applies to
+an apparent PASS, not to rescuing a fail.
+
+**Runner:** oos/round33_broad_ib_capture.py (to be written; capture only, no
+backtest -- the analysis/judgment script comes later once >=40 days exist).
