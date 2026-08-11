@@ -984,10 +984,38 @@ class Engine:
         sig = Signal(symbol=sym, asset="equity", side="BUY", price=mark,
                      confidence=1.0, kind="overnight", atr=stop_pts,
                      thesis="overnight-drift evening slice 18:00->06:00 ET")
+        # Account-wide checks the main entry funnel already runs (engine.py's
+        # main loop, ~line 837 for the cap, ~line 693/698 in topstep_risk.py
+        # for contracts_ok/consistency_ok) but this path skipped entirely --
+        # found in the 2026-08-03 execution-reliability audit: overnight-drift
+        # could silently breach TOPSTEP_MAX_CONTRACTS (sizing off its own
+        # fixed strat.contracts, not remaining capacity) or open after the
+        # day's consistency-rule cap was already hit, undetected either way.
+        max_contracts = strat.contracts
+        if self._topstep is not None:
+            contr_ok, contr_reason = self._topstep.contracts_ok(sym, self.state)
+            if not contr_ok:
+                notify(f"  overnight-drift skip (Topstep: {contr_reason})")
+                return
+            cons_ok, cons_reason = self._topstep.consistency_ok(self.state)
+            if not cons_ok:
+                notify(f"  overnight-drift skip (Topstep: {cons_reason})")
+                return
+            ratio = CONFIG.topstep_micro_ratio
+            open_mini = sum(mini_equivalents(p.symbol, int(p.qty), ratio)
+                            for p in self.state.open_positions if not p.shadow)
+            remaining_mini = CONFIG.topstep_max_contracts - open_mini
+            cap_from_remaining = contracts_for_mini_budget(sym, remaining_mini, ratio)
+            if cap_from_remaining < 1:
+                notify(f"  overnight-drift skip (Topstep account-wide contract cap "
+                       f"{CONFIG.topstep_max_contracts} mini-equiv reached — "
+                       f"{open_mini:.1f} open)")
+                return
+            max_contracts = min(strat.contracts, cap_from_remaining)
         try:
             pos = self.executor.open(sig, 0.0, self.state, risk_mult=1.0,
-                                     max_contracts=strat.contracts,
-                                     fixed_qty=strat.contracts, fixed_stop_pts=stop_pts)
+                                     max_contracts=max_contracts,
+                                     fixed_qty=max_contracts, fixed_stop_pts=stop_pts)
         except Exception as e:  # noqa: BLE001
             notify(f"⚠ overnight-drift entry failed ({e})")
             return
@@ -1701,6 +1729,19 @@ class Engine:
             self.state.close(pos, exit_price)
             if self._topstep is not None:
                 self._topstep.record_close(pos.pnl_usd, hold_seconds(pos.opened_at))
+            if getattr(self, "_overnight", None) is not None and getattr(pos, "kind", "") == "overnight":
+                # The overnight-drift module's own loss-streak halt only ever
+                # saw results via its normal 06:00 exit path (engine.py's
+                # _overnight_drift_step -> strat.record_result). A position
+                # that vanishes and gets resolved HERE instead (broker-side
+                # stop fired between scans, or a restart lost track of it)
+                # was invisible to that counter -- observed live 2026-07-28,
+                # a real ~$500 stop loss never counted toward "halt after 2
+                # losing nights". Feed it the same way so the safety net
+                # can't be silently bypassed by this path.
+                from zoneinfo import ZoneInfo as _ZIrec
+                self._overnight.record_result(
+                    pos.pnl_usd, datetime.now(_ZIrec("America/New_York")))
             notify(f"♻ reconcile: phantom {pos.symbol} not at broker "
                    f"({'side mismatch' if bp is not None else 'flat'}) — closed "
                    f"locally @ ~{exit_price:.2f} ({price_src}) pnl=${pos.pnl_usd:.2f}")
@@ -1946,9 +1987,23 @@ class Engine:
         cancel = getattr(self.executor.broker, "cancel_order", None)
         if pid and callable(cancel):
             try:
-                cancel(pid)
+                cancelled = cancel(pid)
             except Exception as exc:  # noqa: BLE001
                 notify(f"  ⚠ cancel stop {pid} for amend failed ({pos.symbol}): {exc}")
+                return
+            if cancelled is False:
+                # Found in the 2026-08-03 execution-reliability audit: a soft
+                # cancel failure (no exception, just a False return) used to
+                # be ignored -- we'd clear protective_order_id and place a
+                # NEW stop anyway, leaving the OLD one still resting at the
+                # broker, untracked. Two live stops on one position is a real
+                # double-fill/flip risk. Now: treat the OLD stop as still the
+                # position's protection and skip this amend; the next cycle
+                # retries the whole ratchet from a clean state instead of
+                # risking a duplicate.
+                notify(f"  ⚠ cancel stop {pid} returned False ({pos.symbol}) -- "
+                       f"leaving the existing stop in place, retry next cycle")
+                return
             pos.protective_order_id = ""
         self.executor.replace_protective_stop(pos, pos.stop)
         if pos.protective_order_id:
