@@ -336,7 +336,7 @@ def test_phantom_close_uses_real_stop_fill_price_when_available(monkeypatch):
         def get_positions(self):
             return []  # position is gone -- the stop fired
 
-        def _avg_fill_price(self, order_id):
+        def _avg_fill_price(self, order_id, since=None):
             assert order_id == "STOP-123"
             return 27967.75  # the REAL stop fill
 
@@ -381,7 +381,7 @@ def test_phantom_close_falls_back_to_mark_when_no_real_fill_visible(monkeypatch)
         def get_positions(self):
             return []
 
-        def _avg_fill_price(self, order_id):
+        def _avg_fill_price(self, order_id, since=None):
             return None  # not visible yet
 
     e.executor = type("E", (), {"broker": _FakeBroker()})()
@@ -391,6 +391,109 @@ def test_phantom_close_falls_back_to_mark_when_no_real_fill_visible(monkeypatch)
     e._reconcile_positions()
     assert not pos.open
     assert pos.pnl_usd == pytest.approx((28100.0 - 28218.75) * 2.0, abs=0.5)
+
+
+def test_phantom_close_falls_back_to_symbol_wide_search_when_stop_order_not_found(monkeypatch):
+    """The position wasn't closed by the specific order we were tracking (our
+    resting stop) -- e.g. a Topstep mandatory flatten fires its own market
+    order under a different order id. _avg_fill_price(protective_order_id)
+    can never find that fill no matter how wide its window; the symbol-wide
+    closing_fill_since() fallback must catch it instead of falling all the
+    way through to a stale/absent mark. Observed live 2026-08-12: exactly
+    this shape (host down through the strategy's own exit AND through the
+    16:08 ET flatten) shipped a fabricated pnl=$0.00 for a real +$348.78
+    close before this fallback existed."""
+    import engine as eng
+    from state import Position
+
+    e = eng.Engine.__new__(eng.Engine)
+    closes = []
+    e._topstep = type("T", (), {"record_close": lambda self, pnl, hold: closes.append(pnl)})()
+    e._exit_ambiguous = set()
+    e.state = State()
+    e.state.save = lambda: None
+
+    pos = Position(
+        symbol="MNQ", asset="future", side="BUY", qty=1,
+        entry_price=29659.75, size_usd=29659.75, stop=0.0, target=0.0,
+        kind="overnight", thesis="", opened_at="2026-08-11T22:00:05+00:00", mode="paper",
+        order_id="ENTRY-1", protective_order_id="STOP-1",
+    )
+    e.state.add(pos)
+
+    class _FakeBroker:
+        def get_positions(self):
+            return []  # position is gone
+
+        def _avg_fill_price(self, order_id, since=None):
+            return None  # our tracked stop never filled -- something else closed it
+
+        def closing_fill_since(self, symbol, since, exclude_order_ids=None):
+            assert symbol == "MNQ"
+            assert "STOP-1" in exclude_order_ids and "ENTRY-1" in exclude_order_ids
+            return 29834.14  # the real flatten fill, found by symbol+time
+
+    e.executor = type("E", (), {"broker": _FakeBroker()})()
+    e._live_projectx = lambda: True
+    # A deliberately misleading mark -- if the new fallback regresses to
+    # skipping straight to this, the test below catches it immediately.
+    e._mark = lambda sym: 29659.75
+
+    e._reconcile_positions()
+    assert not pos.open
+    assert pos.pnl_usd == pytest.approx(348.78, abs=0.5)
+    assert closes == [pytest.approx(348.78, abs=0.5)]
+
+
+def test_phantom_close_tags_unverified_when_nothing_found(monkeypatch):
+    """When NEITHER a real fill (specific order or symbol-wide) NOR a live
+    mark can be found, the reconcile still has to close the position (it
+    can't stay stuck open forever) -- but the resulting entry-price fallback
+    is a guess, not a resolved fact, and must not be allowed to look like a
+    normal, confidently-resolved reconcile. It must announce itself loudly
+    (an UNVERIFIED-tagged warning) so a real loss hidden this way gets
+    caught immediately instead of silently sitting in the ledger for days."""
+    import engine as eng
+    from state import Position
+
+    e = eng.Engine.__new__(eng.Engine)
+    e._topstep = None
+    e._exit_ambiguous = set()
+    e.state = State()
+    e.state.save = lambda: None
+
+    pos = Position(
+        symbol="MNQ", asset="future", side="BUY", qty=1,
+        entry_price=28218.75, size_usd=28218.75, stop=0.0, target=0.0,
+        kind="overnight", thesis="", opened_at="2026-01-01T00:00:00+00:00", mode="paper",
+        order_id="ENTRY-1", protective_order_id="STOP-1",
+    )
+    e.state.add(pos)
+
+    class _FakeBroker:
+        def get_positions(self):
+            return []
+
+        def _avg_fill_price(self, order_id, since=None):
+            return None
+
+        def closing_fill_since(self, symbol, since, exclude_order_ids=None):
+            return None
+
+    e.executor = type("E", (), {"broker": _FakeBroker()})()
+    e._live_projectx = lambda: True
+    e._mark = lambda sym: None  # nothing available anywhere (cold-start)
+
+    warnings = []
+    monkeypatch.setattr(eng, "notify", lambda msg: warnings.append(msg))
+
+    e._reconcile_positions()
+    assert not pos.open
+    assert pos.pnl_usd == pytest.approx(0.0, abs=1e-9)
+    assert any("UNVERIFIED" in w for w in warnings), (
+        "a fully-unresolved phantom close must announce itself loudly, not "
+        "silently masquerade as a normal reconcile"
+    )
 
 
 def test_phantom_close_falls_back_to_mark_without_protective_order_id():

@@ -517,14 +517,18 @@ class ProjectXBroker:
             order_id=order_id, status="filled",
         )
 
-    def _avg_fill_price(self, order_id: str) -> float | None:
+    def _avg_fill_price(self, order_id: str, *, since: str | None = None) -> float | None:
         """Size-weighted average fill price for an order via /api/Trade/search
         (schema verified 2026-07-03: trades[{orderId, price, size, voided}]).
-        Returns None when no (non-voided) fills are visible yet or on error."""
+        Returns None when no (non-voided) fills are visible yet or on error.
+        `since` widens the search past the default 24h -- a resting stop (or
+        any other order) can fill more than a day after being placed if the
+        host was down (observed live 2026-08-12: a position opened ~26h
+        earlier had its real fill invisible to the default 24h window)."""
         if not order_id:
             return None
         try:
-            start = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+            start = since or (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
             d = self._post("/api/Trade/search",
                            {"accountId": self.account_id, "startTimestamp": start})
             fills = [t for t in d.get("trades", [])
@@ -537,6 +541,37 @@ class ProjectXBroker:
                        for t in fills) / total
         except Exception as exc:  # noqa: BLE001
             log.debug(f"[ProjectX] trade search for order {order_id} failed: {exc}")
+            return None
+
+    def closing_fill_since(self, symbol: str, since: str,
+                            exclude_order_ids: "set[str] | None" = None) -> float | None:
+        """Size-weighted average price of the most recent non-voided fill(s)
+        for `symbol` since `since`, excluding any order id in
+        `exclude_order_ids` (e.g. the position's own entry order).
+
+        Fallback for when the SPECIFIC order we were tracking (a resting
+        protective stop) isn't what actually closed the position -- e.g. a
+        Topstep mandatory flatten fires its own market order with a
+        different order id, which _avg_fill_price(protective_order_id) can
+        never find no matter how wide its window. This matches by symbol
+        root + time instead, so it catches any closing order. Returns None
+        on no visible fills or error (caller falls back further)."""
+        exclude = {str(x) for x in (exclude_order_ids or set())}
+        try:
+            d = self._post("/api/Trade/search",
+                           {"accountId": self.account_id, "startTimestamp": since})
+            fills = [t for t in d.get("trades", [])
+                     if not t.get("voided")
+                     and str(t.get("orderId", "")) not in exclude
+                     and self.root_for_contract(str(t.get("contractId", ""))).upper()
+                         == symbol.upper()]
+            total = sum(float(t.get("size", 0)) for t in fills)
+            if total <= 0:
+                return None
+            return sum(float(t["price"]) * float(t.get("size", 0))
+                       for t in fills) / total
+        except Exception as exc:  # noqa: BLE001
+            log.debug(f"[ProjectX] symbol-wide trade search for {symbol} failed: {exc}")
             return None
 
     def find_bracket_stop(self, entry_order_id: str,

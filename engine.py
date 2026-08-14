@@ -1714,18 +1714,50 @@ class Engine:
             exit_price = None
             price_src = "mark estimate"
             pid = getattr(pos, "protective_order_id", "")
+            eid = getattr(pos, "order_id", "")
             if pid:
                 fill_fn = getattr(broker, "_avg_fill_price", None)
                 if callable(fill_fn):
                     try:
-                        exit_price = fill_fn(pid)
+                        exit_price = fill_fn(pid, since=pos.opened_at)
                         if exit_price is not None:
                             price_src = "real stop fill"
                     except Exception:  # noqa: BLE001 - fall through to the mark estimate
                         exit_price = None
             if exit_price is None:
-                mark = self._mark(pos.symbol)
-                exit_price = mark if mark is not None else pos.entry_price
+                # The order we were tracking (our resting stop) isn't what
+                # actually closed the position -- e.g. a Topstep mandatory
+                # flatten fires its own market order under a different order
+                # id, which the lookup above can never find no matter how
+                # wide its window. Search by symbol+time instead so ANY
+                # closing fill is caught, not just the specific one we knew
+                # about. Observed live 2026-08-12: a ~26h-old position was
+                # closed by something other than its own stop while the host
+                # was down; this fallback would have found the real fill.
+                wide_fn = getattr(broker, "closing_fill_since", None)
+                if callable(wide_fn):
+                    try:
+                        exit_price = wide_fn(pos.symbol, pos.opened_at,
+                                              exclude_order_ids={pid, eid})
+                        if exit_price is not None:
+                            price_src = "real fill (symbol-wide search)"
+                    except Exception:  # noqa: BLE001 - fall through to the mark estimate
+                        exit_price = None
+            if exit_price is None:
+                exit_price = self._mark(pos.symbol)
+                if exit_price is not None:
+                    price_src = "mark estimate"
+            if exit_price is None:
+                # Genuinely nothing to go on -- no fill visible anywhere (either
+                # search), no live mark. pos.entry_price guarantees a fabricated
+                # pnl=$0.00 that is indistinguishable from a real flat close, so
+                # tag it loudly rather than let it masquerade as a normal
+                # resolved reconcile. This exact silent-failure shape shipped a
+                # wrong $0.00 for a real +$348.78 close on 2026-08-12 (both
+                # lookups above came back empty at a cold-start reconcile,
+                # before this fallback existed).
+                exit_price = pos.entry_price
+                price_src = "UNVERIFIED -- no fill or mark found, used entry price"
             self.state.close(pos, exit_price)
             if self._topstep is not None:
                 self._topstep.record_close(pos.pnl_usd, hold_seconds(pos.opened_at))
@@ -1745,13 +1777,18 @@ class Engine:
             notify(f"♻ reconcile: phantom {pos.symbol} not at broker "
                    f"({'side mismatch' if bp is not None else 'flat'}) — closed "
                    f"locally @ ~{exit_price:.2f} ({price_src}) pnl=${pos.pnl_usd:.2f}")
+            if price_src.startswith("UNVERIFIED"):
+                notify(f"  ⚠ {pos.symbol} phantom-close pnl is UNVERIFIED (no real "
+                       f"fill or mark found) — verify manually against broker "
+                       f"equity/trade history and correct the ledger if it's wrong")
             if getattr(pos, "protective_order_id", ""):
                 # Position vanished while a native stop was resting — the stop
                 # (or Topstep liquidation) presumably took it out. Count it:
                 # the stop-execution audit needs these visible, not folklore.
                 from exec_telemetry import TELEM
                 TELEM.record("stop_assumed_filled", symbol=pos.symbol,
-                             exit_price=exit_price, pnl_usd=round(pos.pnl_usd, 2))
+                             exit_price=exit_price, pnl_usd=round(pos.pnl_usd, 2),
+                             price_src=price_src)
             changed = True
 
         # orphan: broker position with no local counterpart. In-watchlist →
